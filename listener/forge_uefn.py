@@ -51,12 +51,17 @@ def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> 
     """One cook-safe master. Instances set color, roughness, metal, and optional textures."""
     folder = pin_project_folder(folder, default_leaf="Materials")
     full = f"{folder.rstrip('/')}/{asset_name}"
-    existing = unreal.EditorAssetLibrary.load_asset(full)
-    if existing is not None and isinstance(existing, unreal.Material):
+    existing = None
+    for candidate in (full, f"{full}.{asset_name}"):
+        loaded = unreal.EditorAssetLibrary.load_asset(candidate)
+        if isinstance(loaded, unreal.Material):
+            existing = loaded
+            break
+    if existing is not None:
         exprs = list(unreal.MaterialEditingLibrary.get_material_expressions(existing) or [])
         if len(exprs) >= 10:
             return {"material_path": str(existing.get_path_name()), "created": False, "folder": folder}
-        unreal.EditorAssetLibrary.delete_asset(full)
+        unreal.EditorAssetLibrary.delete_asset(existing.get_path_name().split(".")[0])
 
     unreal.EditorAssetLibrary.make_directory(folder)
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
