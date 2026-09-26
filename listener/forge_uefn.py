@@ -21,8 +21,14 @@ def _load(path: str):
     return asset
 
 
+_EXPR_ALIAS = {"Lerp": "LinearInterpolate"}
+
+
 def _expr(mat, short: str, x: int, y: int):
-    cls = getattr(unreal, f"MaterialExpression{short}")
+    name = _EXPR_ALIAS.get(short, short)
+    cls = getattr(unreal, f"MaterialExpression{name}", None)
+    if cls is None:
+        raise RuntimeError(f"UEFN has no MaterialExpression{name}")
     node = unreal.MaterialEditingLibrary.create_material_expression(mat, cls, x, y)
     if node is None:
         raise RuntimeError(f"could not create {short}")
@@ -47,7 +53,10 @@ def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> 
     full = f"{folder.rstrip('/')}/{asset_name}"
     existing = unreal.EditorAssetLibrary.load_asset(full)
     if existing is not None and isinstance(existing, unreal.Material):
-        return {"material_path": str(existing.get_path_name()), "created": False, "folder": folder}
+        exprs = list(unreal.MaterialEditingLibrary.get_material_expressions(existing) or [])
+        if len(exprs) >= 10:
+            return {"material_path": str(existing.get_path_name()), "created": False, "folder": folder}
+        unreal.EditorAssetLibrary.delete_asset(full)
 
     unreal.EditorAssetLibrary.make_directory(folder)
     asset_tools = unreal.AssetToolsHelpers.get_asset_tools()
