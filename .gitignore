@@ -1,0 +1,8 @@
+deploy/
+.pytest_cache/
+__pycache__/
+*.pyc
+.env
+*.dat
+node_modules/
+cache/

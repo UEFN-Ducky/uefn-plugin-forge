@@ -1,0 +1,66 @@
+{
+  "id": "forge",
+  "kind": "plugin",
+  "version": "1.0.0",
+  "label": "Ducky Forge",
+  "description": "Model props inside UEFN-Ducky. You and the agent edit the same scene: primitives, extrude, bevel, booleans, groups, materials, AI textures, check-and-fix, then send SM_ meshes and MI_ materials into UEFN. No Blender.",
+  "min_app_version": "1.0.0",
+  "default_enabled": true,
+  "secret_keys": [],
+  "contributes": {
+    "ui.panels": [
+      {
+        "id": "forge",
+        "title": "Forge",
+        "icon": "assets/icon.png",
+        "entry": "ui/forge.html"
+      }
+    ],
+    "dock.panels": [
+      {
+        "id": "forge",
+        "title": "Forge",
+        "defaultSide": "right",
+        "ui": "panel:forge"
+      }
+    ],
+    "header.buttons": [
+      {
+        "id": "forge",
+        "title": "Forge",
+        "icon": "assets/icon.png",
+        "action": "panel:forge",
+        "order": 40
+      }
+    ],
+    "agent.tools": {
+      "category": "forge",
+      "intent_pattern": "\\b(forge|model(?:er|ing)?|prop|mesh|bevel|extrude|boolean|material|texture)\\b",
+      "plan_tools": [
+        "forge_scene_list",
+        "forge_scene_get",
+        "forge_check",
+        "forge_stats"
+      ]
+    },
+    "walkthrough": {
+      "id": "forge",
+      "title": "Forge is ready",
+      "auto_start": "first_enable",
+      "settings_tab": "Store",
+      "steps": [
+        {
+          "target": "settings.store.root",
+          "title": "Open Forge",
+          "body": "Forge is a modeler in the panel. Open it from the header or the right dock. You and the agent edit the same scene, then Send to UEFN.",
+          "advance": "next",
+          "mode": "rect"
+        }
+      ]
+    }
+  },
+  "backend": {
+    "entry": "backend",
+    "register": "register"
+  }
+}
