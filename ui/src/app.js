@@ -32,6 +32,7 @@ function rpc(method, params) {
 const state = {
   name: "",
   rev: -1,
+  geom: -1,
   payload: null,
   mode: "object",
   selectMode: "face",
@@ -39,12 +40,35 @@ const state = {
   tab: "outliner",
   follow: false,
   dragging: false,
-  selected: new Set(),
+  polling: false,
+  batches: [],
+  slots: new Map(),
+  parentOf: new Map(),
+  pick: null,
+  faceLines: null,
+  batchEdit: false,
+  editId: "",
+  flashIds: [],
 };
+
+const CHUNK = 16384;
+const WHITE = new THREE.Color(1, 1, 1);
+const TINT = new THREE.Color(0.65, 0.78, 1);
+const FLASH = new THREE.Color(0.45, 0.6, 1);
+const _pos = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _scl = new THREE.Vector3();
+const _euler = new THREE.Euler();
+const _m = new THREE.Matrix4();
+const _delta = new THREE.Matrix4();
+const _inv = new THREE.Matrix4();
+const _ident = new THREE.Matrix4();
+const geoCache = new Map();
+const matCache = new Map();
 
 const host = document.getElementById("view");
 const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+renderer.setPixelRatio(1);
 host.appendChild(renderer.domElement);
 const scene3 = new THREE.Scene();
 scene3.background = new THREE.Color(0x141418);
@@ -70,14 +94,41 @@ gizmo.addEventListener("dragging-changed", (ev) => {
   state.dragging = ev.value;
   orbit.enabled = !ev.value;
   if (ev.value) {
-    state.dragFrom = captureXform();
+    const slots = state.slots.get(pivot.userData.id) || [];
+    state.dragSlots = slots;
+    state.dragBase = slots.map((slot) => {
+      const m = new THREE.Matrix4();
+      slot.mesh.getMatrixAt(slot.index, m);
+      return m;
+    });
+    pivot.updateMatrix();
+    state.dragStart = pivot.matrix.clone();
+    for (const slot of slots) slot.mesh.frustumCulled = false;
   } else {
+    for (const slot of state.dragSlots || []) {
+      slot.mesh.frustumCulled = true;
+      slot.mesh.computeBoundingBox();
+      slot.mesh.computeBoundingSphere();
+    }
     commitXform();
   }
 });
+gizmo.addEventListener("objectChange", () => {
+  if (!state.dragging || !state.dragBase) return;
+  pivot.updateMatrix();
+  _delta.copy(pivot.matrix).multiply(_inv.copy(state.dragStart).invert());
+  const touched = new Set();
+  state.dragSlots.forEach((slot, i) => {
+    _m.copy(state.dragBase[i]).premultiply(_delta);
+    slot.mesh.setMatrixAt(slot.index, _m);
+    touched.add(slot.mesh);
+  });
+  for (const mesh of touched) mesh.instanceMatrix.needsUpdate = true;
+});
 
-const meshes = new Map();
 let flashUntil = 0;
+const pivot = new THREE.Object3D();
+content.add(pivot);
 
 function resize() {
   const w = host.clientWidth || 400;
@@ -86,7 +137,8 @@ function resize() {
   camera.aspect = w / Math.max(1, h);
   camera.updateProjectionMatrix();
 }
-window.addEventListener("resize", resize);
+new ResizeObserver(() => resize()).observe(host);
+resize();
 
 function colorOf(matId, materials) {
   const mat = (materials || []).find((m) => m.id === matId) || (materials || [])[0];
@@ -94,113 +146,267 @@ function colorOf(matId, materials) {
   return new THREE.Color(c[0], c[1], c[2]);
 }
 
-function rebuild(payload) {
-  state.payload = payload;
-  state.mode = payload.mode || "object";
-  state.selectMode = payload.select_mode || "face";
-  const sel = (payload.selection && payload.selection.object) || "";
-  for (const obj of content.children) obj.traverse((c) => c.geometry && c.geometry.dispose());
-  content.clear();
-  meshes.clear();
-  const byId = new Map();
-  for (const node of payload.nodes || []) {
-    const group = new THREE.Group();
-    group.name = node.id;
-    const t = node.transform || { pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] };
-    group.position.set(t.pos[0], t.pos[1], t.pos[2]);
-    group.rotation.set(
-      THREE.MathUtils.degToRad(t.rot[0] || 0),
-      THREE.MathUtils.degToRad(t.rot[1] || 0),
-      THREE.MathUtils.degToRad(t.rot[2] || 0),
-    );
-    group.scale.set(t.scale[0] || 1, t.scale[1] || 1, t.scale[2] || 1);
-    group.visible = node.visible !== false;
-    group.userData.node = node;
-    if (node.type === "object" && node.positions && node.positions.length) {
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute("position", new THREE.Float32BufferAttribute(node.positions, 3));
-      geo.setAttribute("normal", new THREE.Float32BufferAttribute(node.normals, 3));
-      geo.setAttribute("uv", new THREE.Float32BufferAttribute(node.uvs, 2));
-      geo.setIndex(node.indices);
-      const matId = node.material;
-      const mat = new THREE.MeshStandardMaterial({
-        color: colorOf(matId, payload.materials),
-        roughness: 0.55,
-        metalness: 0.05,
-      });
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.userData = { id: node.id, faceIds: node.face_ids || [] };
-      group.add(mesh);
-      meshes.set(node.id, mesh);
-      const picked = new Set(((payload.selection && payload.selection.faces) || []));
-      if (node.id === sel && picked.size) {
-        const pts = [];
-        const pos = node.positions;
-        const ids = node.face_ids || [];
-        for (let t = 0; t < ids.length; t++) {
-          if (!picked.has(ids[t])) continue;
-          const base = t * 9;
-          for (let e = 0; e < 3; e++) {
-            const i0 = base + e * 3;
-            const i1 = base + ((e + 1) % 3) * 3;
-            pts.push(pos[i0], pos[i0 + 1], pos[i0 + 2], pos[i1], pos[i1 + 1], pos[i1 + 2]);
-          }
-        }
-        if (pts.length) {
-          const lines = new THREE.BufferGeometry();
-          lines.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-          group.add(new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ color: 0x6c8cff })));
-        }
-      }
+function composeRow(row, target) {
+  _euler.set(
+    THREE.MathUtils.degToRad(row[6] || 0),
+    THREE.MathUtils.degToRad(row[7] || 0),
+    THREE.MathUtils.degToRad(row[8] || 0),
+    "XYZ",
+  );
+  _pos.set(row[3] || 0, row[4] || 0, row[5] || 0);
+  _quat.setFromEuler(_euler);
+  _scl.set(row[9] || 1, row[10] || 1, row[11] || 1);
+  return target.compose(_pos, _quat, _scl);
+}
+
+function geometryFor(proto) {
+  let geo = geoCache.get(proto.id);
+  if (geo) return geo;
+  geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(proto.positions, 3));
+  geo.setAttribute("normal", new THREE.Float32BufferAttribute(proto.normals, 3));
+  if (proto.uvs && proto.uvs.length) geo.setAttribute("uv", new THREE.Float32BufferAttribute(proto.uvs, 2));
+  geo.setIndex(proto.indices);
+  geoCache.set(proto.id, geo);
+  return geo;
+}
+
+function materialFor(matId, materials) {
+  const color = colorOf(matId, materials);
+  let mat = matCache.get(matId || "");
+  if (!mat) {
+    mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
+    matCache.set(matId || "", mat);
+    return mat;
+  }
+  mat.color.copy(color);
+  return mat;
+}
+
+function clearView() {
+  gizmo.detach();
+  for (const mesh of state.batches) mesh.removeFromParent();
+  state.batches = [];
+  state.slots = new Map();
+  state.parentOf = new Map();
+  if (state.pick) {
+    if (state.pick.material && state.pick.material !== matCache.get(state.pick.userData.matId)) state.pick.material.dispose();
+    state.pick.removeFromParent();
+    state.pick = null;
+  }
+  if (state.faceLines) {
+    state.faceLines.geometry.dispose();
+    state.faceLines.material.dispose();
+    state.faceLines.removeFromParent();
+    state.faceLines = null;
+  }
+}
+
+function paintColors() {
+  const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
+  const flash = new Set(state.flashIds || []);
+  for (const batch of state.batches) {
+    const ids = batch.userData.ids;
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      batch.setColorAt(i, flash.has(id) ? FLASH : id === sel && state.mode === "object" ? TINT : WHITE);
     }
-    byId.set(node.id, group);
+    if (batch.instanceColor) batch.instanceColor.needsUpdate = true;
   }
-  for (const node of payload.nodes || []) {
-    const group = byId.get(node.id);
-    const parent = node.parent && byId.get(node.parent);
-    (parent || content).add(group);
+}
+
+function paintFaceLines() {
+  if (state.faceLines) {
+    state.faceLines.geometry.dispose();
+    state.faceLines.material.dispose();
+    state.faceLines.removeFromParent();
+    state.faceLines = null;
   }
-  const selected = byId.get(sel);
-  if (selected && state.mode === "object") gizmo.attach(selected);
-  else gizmo.detach();
+  const picked = new Set((state.payload && state.payload.selection && state.payload.selection.faces) || []);
+  if (!state.pick || !picked.size || state.mode !== "edit") return;
+  const geo = state.pick.geometry;
+  const pos = geo.attributes.position.array;
+  const index = geo.index.array;
+  const ids = state.pick.userData.faceIds || [];
+  const pts = [];
+  for (let t = 0; t < ids.length; t++) {
+    if (!picked.has(ids[t])) continue;
+    const tri = [index[t * 3], index[t * 3 + 1], index[t * 3 + 2]];
+    for (let e = 0; e < 3; e++) {
+      const i0 = tri[e] * 3;
+      const i1 = tri[(e + 1) % 3] * 3;
+      pts.push(pos[i0], pos[i0 + 1], pos[i0 + 2], pos[i1], pos[i1 + 1], pos[i1 + 2]);
+    }
+  }
+  if (!pts.length) return;
+  const lines = new THREE.BufferGeometry();
+  lines.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+  state.faceLines = new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ color: 0x6c8cff }));
+  state.faceLines.matrix.copy(state.pick.matrix);
+  state.faceLines.matrixAutoUpdate = false;
+  content.add(state.faceLines);
+}
+
+function buildBatches() {
+  const payload = state.payload;
+  clearView();
+  if (!payload) return;
+  const live = new Set();
+  const protos = new Map();
+  for (const proto of payload.prototypes || []) {
+    live.add(proto.id);
+    protos.set(proto.id, proto);
+    geometryFor(proto);
+  }
+  for (const [id, geo] of geoCache) {
+    if (!live.has(id)) {
+      geo.dispose();
+      geoCache.delete(id);
+    }
+  }
+  const byId = new Map((payload.nodes || []).map((n) => [n.id, n]));
+  const worldCache = new Map();
+  function world(id) {
+    if (!id || !byId.has(id)) return _ident;
+    if (worldCache.has(id)) return worldCache.get(id);
+    const n = byId.get(id);
+    const t = n.transform || { pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] };
+    const local = composeRow([0, "", "", t.pos[0], t.pos[1], t.pos[2], t.rot[0], t.rot[1], t.rot[2], t.scale[0], t.scale[1], t.scale[2]], new THREE.Matrix4());
+    const m = new THREE.Matrix4().multiplyMatrices(world(n.parent), local);
+    worldCache.set(id, m);
+    return m;
+  }
+  const sel = (payload.selection && payload.selection.object) || "";
+  const editing = state.mode === "edit" && !!sel;
+  let pulled = null;
+  const groups = new Map();
+  for (const row of payload.instances || []) {
+    if (editing && !pulled && row[0] === sel) {
+      pulled = row;
+      continue;
+    }
+    const gk = `${row[1]}\0${row[12] || ""}`;
+    let list = groups.get(gk);
+    if (!list) groups.set(gk, (list = []));
+    list.push(row);
+  }
+  const local = new THREE.Matrix4();
+  for (const rows of groups.values()) {
+    const proto = protos.get(rows[0][1]);
+    if (!proto) continue;
+    const geo = geometryFor(proto);
+    const mat = materialFor(rows[0][12], payload.materials);
+    for (let c = 0; c < rows.length; c += CHUNK) {
+      const slice = rows.slice(c, c + CHUNK);
+      const batch = new THREE.InstancedMesh(geo, mat, slice.length);
+      batch.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+      batch.userData.ids = new Array(slice.length);
+      for (let i = 0; i < slice.length; i++) {
+        const row = slice[i];
+        composeRow(row, local);
+        _m.multiplyMatrices(world(row[2]), local);
+        batch.setMatrixAt(i, _m);
+        batch.userData.ids[i] = row[0];
+        if (!state.parentOf.has(row[0])) state.parentOf.set(row[0], world(row[2]));
+        let slots = state.slots.get(row[0]);
+        if (!slots) state.slots.set(row[0], (slots = []));
+        slots.push({ mesh: batch, index: i });
+      }
+      batch.computeBoundingBox();
+      batch.computeBoundingSphere();
+      content.add(batch);
+      state.batches.push(batch);
+    }
+  }
+  if (pulled) {
+    const proto = protos.get(pulled[1]);
+    if (proto) {
+      const mesh = new THREE.Mesh(geometryFor(proto), materialFor(pulled[12], payload.materials));
+      composeRow(pulled, local);
+      mesh.matrix.multiplyMatrices(world(pulled[2]), local);
+      mesh.matrixAutoUpdate = false;
+      mesh.userData = { id: pulled[0], faceIds: proto.face_ids || [], matId: pulled[12] || "" };
+      content.add(mesh);
+      state.pick = mesh;
+      state.parentOf.set(pulled[0], world(pulled[2]));
+    }
+  }
+  state.batchEdit = state.mode === "edit";
+  state.editId = sel;
+  paintColors();
+  paintFaceLines();
+}
+
+function attachGizmo() {
+  const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
+  const slots = state.slots.get(sel);
+  if (state.mode !== "object" || !slots || !slots.length) {
+    gizmo.detach();
+    return;
+  }
+  slots[0].mesh.getMatrixAt(slots[0].index, _m);
+  _m.decompose(pivot.position, pivot.quaternion, pivot.scale);
+  pivot.updateMatrix();
+  pivot.userData.id = sel;
+  gizmo.attach(pivot);
   gizmo.setMode(state.gizmo);
   const snap = Number(document.getElementById("snap").value) || 0;
   gizmo.setTranslationSnap(snap || null);
   gizmo.setRotationSnap(snap ? THREE.MathUtils.degToRad(15) : null);
-  if (payload.flash && payload.flash.ids) {
+}
+
+function syncSelection() {
+  const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
+  const editing = state.mode === "edit";
+  if (editing !== state.batchEdit || (editing && sel !== state.editId)) buildBatches();
+  else {
+    paintColors();
+    paintFaceLines();
+  }
+  attachGizmo();
+  paintPanels();
+  document.getElementById("mode").textContent = editing ? "Edit" : "Object";
+}
+
+function rebuild(payload) {
+  state.payload = payload;
+  state.mode = payload.mode || "object";
+  state.selectMode = payload.select_mode || "face";
+  state.geom = payload.geom || 0;
+  state.flashIds = (payload.flash && payload.flash.ids) || [];
+  buildBatches();
+  attachGizmo();
+  if (state.flashIds.length) {
     flashUntil = performance.now() + 700;
     document.getElementById("ai").hidden = false;
-    for (const id of payload.flash.ids) {
-      const mesh = meshes.get(id);
-      if (mesh) mesh.material.emissive = new THREE.Color(0x3355ff);
-    }
-    if (state.follow && payload.flash.ids[0] && byId.get(payload.flash.ids[0])) {
-      const box = new THREE.Box3().setFromObject(byId.get(payload.flash.ids[0]));
-      const center = box.getCenter(new THREE.Vector3());
-      orbit.target.copy(center);
+    paintColors();
+    if (state.follow) {
+      const slots = state.slots.get(state.flashIds[0]);
+      if (slots && slots[0]) {
+        slots[0].mesh.getMatrixAt(slots[0].index, _m);
+        orbit.target.setFromMatrixPosition(_m);
+      }
     }
   }
   paintPanels();
   document.getElementById("mode").textContent = state.mode === "edit" ? "Edit" : "Object";
 }
 
-function captureXform() {
-  const obj = gizmo.object;
-  if (!obj) return null;
-  return { pos: obj.position.clone(), rot: obj.rotation.clone(), scale: obj.scale.clone() };
-}
-
 async function commitXform() {
-  const obj = gizmo.object;
-  const from = state.dragFrom;
-  if (!obj || !from) return;
-  const node = obj.userData.node;
-  if (!node) return;
+  const id = pivot.userData.id;
+  const slots = state.dragSlots;
+  if (!id || !slots || !slots.length || !state.dragBase) return;
+  slots[0].mesh.getMatrixAt(slots[0].index, _m);
+  const parent = state.parentOf.get(id);
+  if (parent && parent !== _ident) _m.premultiply(_inv.copy(parent).invert());
+  _m.decompose(_pos, _quat, _scl);
+  _euler.setFromQuaternion(_quat, "XYZ");
+  state.dragBase = null;
   await op("edit", {
-    id: node.id,
-    pos: [obj.position.x, obj.position.y, obj.position.z],
-    rot: [THREE.MathUtils.radToDeg(obj.rotation.x), THREE.MathUtils.radToDeg(obj.rotation.y), THREE.MathUtils.radToDeg(obj.rotation.z)],
-    scale: [obj.scale.x, obj.scale.y, obj.scale.z],
+    id,
+    pos: [_pos.x, _pos.y, _pos.z],
+    rot: [THREE.MathUtils.radToDeg(_euler.x), THREE.MathUtils.radToDeg(_euler.y), THREE.MathUtils.radToDeg(_euler.z)],
+    scale: [_scl.x, _scl.y, _scl.z],
   });
 }
 
@@ -208,10 +414,10 @@ function animate() {
   requestAnimationFrame(animate);
   if (flashUntil && performance.now() > flashUntil) {
     flashUntil = 0;
+    state.flashIds = [];
     document.getElementById("ai").hidden = true;
-    for (const mesh of meshes.values()) mesh.material.emissive = new THREE.Color(0);
+    paintColors();
   }
-  resize();
   renderer.render(scene3, camera);
 }
 animate();
@@ -219,16 +425,18 @@ animate();
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 renderer.domElement.addEventListener("pointerdown", (ev) => {
-  if (ev.button !== 0 || state.dragging) return;
+  if (ev.button !== 0 || state.dragging || gizmo.axis) return;
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects([...meshes.values()], false);
+  const hits = raycaster.intersectObjects(state.batches.concat(state.pick ? [state.pick] : []), false);
   if (!hits.length) return;
   const hit = hits[0];
-  const id = hit.object.userData.id;
-  const face = (hit.object.userData.faceIds || [])[hit.faceIndex] ;
+  const id = hit.instanceId != null && hit.object.userData.ids
+    ? hit.object.userData.ids[hit.instanceId]
+    : hit.object.userData.id;
+  const face = hit.instanceId == null ? (hit.object.userData.faceIds || [])[hit.faceIndex] : undefined;
   op("select", { object: id, faces: state.mode === "edit" && state.selectMode === "face" && face != null ? [face] : undefined });
 });
 
@@ -269,21 +477,32 @@ async function refreshScenes(select) {
 }
 
 async function poll() {
-  if (!state.name || state.dragging) return;
+  if (!state.name || state.dragging || state.polling) return;
+  state.polling = true;
   try {
-    const info = await rpc("forge_call", { op: "scene_get", name: state.name, params: {}, actor: "user" });
-    if (!info || info.ok === false) return;
-    if (info.rev !== state.rev) {
+    const info = await rpc("forge_call", { op: "scene_get", name: state.name, params: { brief: true }, actor: "user" });
+    if (!info || info.ok === false || info.rev === state.rev) return;
+    if (!state.payload || info.geom !== state.geom) {
       const payload = await rpc("forge_call", { op: "scene_payload", name: state.name, params: {}, actor: "user" });
-      if (payload && payload.ok !== false) {
-        state.rev = payload.rev;
-        rebuild(payload);
-        const last = (payload.activity || []).slice(-1)[0];
-        if (last) setStatus((last.actor === "agent" ? "AI: " : "") + last.summary);
-      }
+      if (!payload || payload.ok === false) return;
+      state.rev = payload.rev;
+      rebuild(payload);
+      const last = (payload.activity || []).slice(-1)[0];
+      if (last) setStatus((last.actor === "agent" ? "AI: " : "") + last.summary);
+    } else {
+      state.rev = info.rev;
+      state.geom = info.geom;
+      state.payload.selection = info.selection;
+      state.payload.mode = info.mode;
+      state.payload.select_mode = info.select_mode;
+      state.mode = info.mode || "object";
+      state.selectMode = info.select_mode || "face";
+      syncSelection();
     }
   } catch (err) {
     setStatus(err.message || String(err), true);
+  } finally {
+    state.polling = false;
   }
 }
 
@@ -302,11 +521,19 @@ function paintPanels() {
 
 function outliner(p) {
   const sel = (p.selection && p.selection.object) || "";
-  const rows = (p.nodes || []).map((n) => {
+  let nodes = p.nodes || [];
+  let more = "";
+  if (nodes.length > 400) {
+    const picked = nodes.find((n) => n.id === sel);
+    nodes = nodes.slice(0, 400);
+    if (picked && !nodes.some((n) => n.id === picked.id)) nodes.unshift(picked);
+    more = `<div class="item dim"><span class="nm">${p.nodes.length - nodes.length} more instances</span></div>`;
+  }
+  const rows = nodes.map((n) => {
     const on = n.id === sel ? " on" : "";
     return `<div class="item${on}" data-id="${n.id}"><span class="nm">${n.type === "group" ? "▸ " : ""}${n.name || n.id}</span><span>${n.layer === "collision" ? "UCX" : ""}</span></div>`;
   }).join("");
-  return `<div class="list">${rows || "<span class='dim'>Empty scene. Add a primitive.</span>"}</div>
+  return `<div class="list">${rows || "<span class='dim'>Empty scene. Add a primitive.</span>"}${more}</div>
     <div class="row"><button id="group" type="button">Group</button><button id="join" type="button">Join</button></div>`;
 }
 

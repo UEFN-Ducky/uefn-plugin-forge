@@ -84,9 +84,9 @@ def register_tools(api: Any) -> None:
         return _run(api, name, "redo")
 
     @api.tool(**host)
-    def forge_add(name: str, kind: str, params: dict | None = None, pos: list | None = None, material: str = "", layer: str = "default", object_name: str = "") -> dict:
-        """Add a primitive: box, rounded_box, plane, grid, sphere, cylinder, cone, torus, capsule, wedge, stairs, arch, lathe, extrude. Sizes are centimetres."""
-        body: dict = {"kind": kind, "params": params or {}, "layer": layer}
+    def forge_add(name: str, kind: str, params: dict | None = None, pos: list | None = None, material: str = "", layer: str = "default", object_name: str = "", count: int = 1) -> dict:
+        """Add a primitive, or count instances of one shared prototype. Sizes are centimetres."""
+        body: dict = {"kind": kind, "params": params or {}, "layer": layer, "count": max(1, int(count or 1))}
         if pos:
             body["pos"] = pos
         if material:

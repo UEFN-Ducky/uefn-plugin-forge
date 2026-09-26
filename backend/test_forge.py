@@ -76,6 +76,35 @@ def test_kernel_and_scene() -> None:
     meta = json.loads(blob[20:20 + js_len].decode().strip())
     assert meta["meshes"][0]["primitives"]
 
+    dispatch("", "scene_new", {"name": "Twin"}, actor="user")
+    dispatch("Twin", "add", {"kind": "box", "name": "A"}, actor="user")
+    dispatch("Twin", "add", {"kind": "box", "name": "B", "pos": [150, 0, 0]}, actor="user")
+    twin = dispatch("Twin", "scene_payload", {})
+    assert len(twin["prototypes"]) == 1, twin["prototypes"]
+    assert len(twin["instances"]) == 2
+    shared = twin["instances"][0][1]
+    assert twin["instances"][1][1] == shared
+    dispatch("Twin", "select", {"object": twin["instances"][0][0], "query": "top"}, actor="user")
+    dispatch("Twin", "mesh_op", {"op": "extrude", "distance": 5}, actor="user")
+    forked = dispatch("Twin", "scene_payload", {})
+    assert len(forked["prototypes"]) == 2
+    by_id = {row[0]: row[1] for row in forked["instances"]}
+    assert by_id[twin["instances"][1][0]] == shared
+    assert by_id[twin["instances"][0][0]] != shared
+
+    dispatch("", "scene_new", {"name": "Crowd"}, actor="user")
+    dispatch("Crowd", "add", {"kind": "box", "count": 20000}, actor="user")
+    from backend.scene import load as load_scene
+
+    crowd = load_scene("Crowd")
+    assert len(crowd.data["prototypes"]) == 1
+    t_crowd = time.perf_counter()
+    packed = crowd.payload()
+    assert time.perf_counter() - t_crowd < 0.05, "instance payload over 50 ms"
+    assert len(packed["prototypes"]) == 1
+    assert len(packed["instances"]) == 20000
+    assert packed["prototypes"][0]["tris"] == 12
+
     t1 = time.perf_counter()
     pngs = render_png(mesh, root / "caps" / "crate.png", ["three"])
     assert time.perf_counter() - t1 < 0.3

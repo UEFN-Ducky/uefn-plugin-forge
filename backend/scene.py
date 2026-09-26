@@ -28,6 +28,7 @@ from .kernel.ops import (
     loop_cut,
     merge_by_distance,
     merge_center,
+    mirror_mesh,
     move_elements,
     recalculate_normals,
     separate_by_material,
@@ -74,8 +75,77 @@ def _blank(name: str) -> dict[str, Any]:
             {"id": "collision", "name": "Collision", "visible": True, "locked": False, "color": "#e85"},
         ],
         "materials": [_mat(mat, "Default")],
+        "prototypes": [],
         "nodes": [],
+        "geom": 1,
         "activity": [],
+    }
+
+
+def _proto_key(kind: str, params: dict) -> str:
+    return json.dumps([kind, params], sort_keys=True, separators=(",", ":"))
+
+
+def _placements(node: dict) -> list[dict]:
+    t = node.get("transform") or {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]}
+    out = [t]
+    for mod in node.get("modifiers") or []:
+        if str(mod.get("type") or "") != "array":
+            continue
+        count = max(1, int(mod.get("count") or 2))
+        off = list(mod.get("offset") or [100, 0, 0])
+        while len(off) < 3:
+            off.append(0.0)
+        nxt = []
+        for base in out:
+            pos, rot, scale = base["pos"], base["rot"], base["scale"]
+            for i in range(count):
+                nxt.append({
+                    "pos": [pos[0] + off[0] * i, pos[1] + off[1] * i, pos[2] + off[2] * i],
+                    "rot": rot,
+                    "scale": scale,
+                })
+        out = nxt
+    return out
+
+
+def _indexed(mesh: Mesh, pid: str) -> dict[str, Any]:
+    """Shared vertices. Flat faces keep a vertex per corner so edges stay sharp."""
+    positions: list[float] = []
+    normals: list[float] = []
+    uvs: list[float] = []
+    indices: list[int] = []
+    face_ids: list[int] = []
+    corner: dict[tuple, int] = {}
+
+    def add(vi: int, nrm: list[float], uv: list[float]) -> int:
+        key = (vi, round(nrm[0], 3), round(nrm[1], 3), round(nrm[2], 3))
+        hit = corner.get(key)
+        if hit is not None:
+            return hit
+        idx = len(positions) // 3
+        positions.extend(mesh.verts[vi])
+        normals.extend(nrm)
+        uvs.extend(uv)
+        corner[key] = idx
+        return idx
+
+    for a, b, c, fi in mesh.triangles():
+        nrm = mesh.face_normal(fi)
+        face = mesh.faces[fi]
+        uvf = mesh.uvs[fi] if fi < len(mesh.uvs) else []
+
+        def uv_of(vi: int) -> list[float]:
+            try:
+                return uvf[face.index(vi)]
+            except ValueError:
+                return [0.0, 0.0]
+
+        indices.extend((add(a, nrm, uv_of(a)), add(b, nrm, uv_of(b)), add(c, nrm, uv_of(c))))
+        face_ids.append(fi)
+    return {
+        "id": pid, "positions": positions, "normals": normals, "uvs": uvs,
+        "indices": indices, "face_ids": face_ids, "tris": len(face_ids),
     }
 
 
@@ -145,8 +215,90 @@ class Scene:
     def materials(self) -> dict[str, dict]:
         return {m["id"]: m for m in self.data["materials"]}
 
-    def base_mesh(self, node: dict) -> Mesh:
+    def touch_geom(self) -> None:
+        self.data["geom"] = int(self.data.get("geom") or 0) + 1
+
+    def proto(self, node: dict | None) -> dict[str, Any] | None:
+        if not node:
+            return None
+        self._ensure_proto(node)
+        pid = node.get("prototype")
+        for p in self.data.get("prototypes") or []:
+            if p.get("id") == pid:
+                return p
+        return None
+
+    def user_count(self, pid: str | None) -> int:
+        if not pid:
+            return 0
+        return sum(1 for n in self.data["nodes"] if n.get("prototype") == pid)
+
+    def _ensure_proto(self, node: dict) -> None:
+        if node.get("type") != "object" or node.get("prototype"):
+            return
+        self.data.setdefault("prototypes", [])
         if node.get("mesh"):
+            pid = _nid("p")
+            self.data["prototypes"].append({
+                "id": pid, "kind": "mesh", "params": {}, "key": "", "mesh": node.pop("mesh"),
+            })
+            node["prototype"] = pid
+            node.pop("primitive", None)
+            return
+        prim = node.get("primitive") or {"kind": "box", "params": {}}
+        proto = self.share_primitive(str(prim.get("kind") or "box"), prim.get("params") or {})
+        node["prototype"] = proto["id"]
+        node.pop("primitive", None)
+        node.pop("mesh", None)
+
+    def share_primitive(self, kind: str, params: dict | None) -> dict[str, Any]:
+        self.data.setdefault("prototypes", [])
+        key = _proto_key(kind, params or {})
+        for p in self.data["prototypes"]:
+            if p.get("key") == key and not p.get("mesh"):
+                return p
+        proto = {"id": _nid("p"), "kind": kind, "params": dict(params or {}), "key": key, "mesh": None}
+        self.data["prototypes"].append(proto)
+        return proto
+
+    def adopt_mesh(self, mesh: Mesh) -> str:
+        self.data.setdefault("prototypes", [])
+        pid = _nid("p")
+        self.data["prototypes"].append({
+            "id": pid, "kind": "mesh", "params": {}, "key": "", "mesh": mesh.to_dict(),
+        })
+        return pid
+
+    def write_mesh(self, node: dict, mesh: Mesh) -> None:
+        """Copy-on-write. Shared prototypes stay shared until this object is edited."""
+        proto = self.proto(node)
+        if proto and self.user_count(proto["id"]) <= 1:
+            proto["mesh"] = mesh.to_dict()
+            proto["kind"] = "mesh"
+            proto["params"] = {}
+            proto["key"] = ""
+        else:
+            node["prototype"] = self.adopt_mesh(mesh)
+        node.pop("mesh", None)
+        node.pop("primitive", None)
+        self.touch_geom()
+
+    def _gc_protos(self) -> None:
+        used = {n.get("prototype") for n in self.data["nodes"]}
+        self.data["prototypes"] = [p for p in self.data.get("prototypes") or [] if p.get("id") in used]
+
+    def _mesh_of(self, proto: dict, material: str = "default") -> Mesh:
+        if proto.get("mesh"):
+            mesh = Mesh.from_dict(proto["mesh"])
+        else:
+            mesh = build_primitive(str(proto.get("kind") or "box"), proto.get("params") or {}, mat=material or "default")
+        return mesh
+
+    def base_mesh(self, node: dict) -> Mesh:
+        proto = self.proto(node)
+        if proto:
+            mesh = self._mesh_of(proto, node.get("material") or "default")
+        elif node.get("mesh"):
             mesh = Mesh.from_dict(node["mesh"])
         elif node.get("primitive"):
             prim = node["primitive"]
@@ -154,9 +306,25 @@ class Scene:
         else:
             mesh = Mesh()
         mat = node.get("material")
-        if mat:
+        if mat and not (proto and proto.get("mesh")):
             mesh.face_mat = [mat if m in ("", "default") else m for m in mesh.face_mat]
         return mesh
+
+    def shaped_mesh(self, node: dict) -> Mesh:
+        """Prototype plus mirror. Array stays instances and is not copied here."""
+        mesh = self.base_mesh(node)
+        for mod in node.get("modifiers") or []:
+            if str(mod.get("type") or "") == "mirror":
+                mesh = mirror_mesh(mesh, str(mod.get("axis") or "x"), float(mod.get("weld", 0.05)))
+        return mesh
+
+    def display_key(self, node: dict) -> str:
+        proto = self.proto(node)
+        pid = str((proto or {}).get("id") or node.get("id"))
+        mirrors = [m for m in (node.get("modifiers") or []) if str(m.get("type") or "") == "mirror"]
+        if not mirrors:
+            return pid
+        return pid + "|m|" + json.dumps(mirrors, sort_keys=True, separators=(",", ":"))
 
     def local_mesh(self, node: dict) -> Mesh:
         return apply_modifiers(self.base_mesh(node), node.get("modifiers") or [])
@@ -176,9 +344,9 @@ class Scene:
         return mesh
 
     def _bake(self, node: dict) -> Mesh:
-        mesh = self.base_mesh(node)
-        node["mesh"] = mesh.to_dict()
-        node["primitive"] = None
+        mesh = self.local_mesh(node)
+        node["modifiers"] = []
+        self.write_mesh(node, mesh)
         return mesh
 
     def _active(self) -> dict[str, Any]:
@@ -189,88 +357,167 @@ class Scene:
             raise ValueError(f"{node.get('name')} is locked")
         return node
 
-    def summary(self) -> dict[str, Any]:
-        objects = []
+    def _proto_by_id(self) -> dict[str, dict]:
+        return {p["id"]: p for p in self.data.get("prototypes") or []}
+
+    def _catalog(self) -> tuple[dict, dict, dict, dict]:
         for n in self.data["nodes"]:
-            if n.get("type") != "object":
-                continue
-            mesh = self.local_mesh(n)
+            if n.get("type") == "object" and not n.get("prototype"):
+                self._ensure_proto(n)
+        prim_of: dict[str, dict] = {}
+        tris_of: dict[str, int] = {}
+        bounds_of: dict[str, tuple] = {}
+        meshes: dict[str, Mesh] = {}
+        for proto in self.data.get("prototypes") or []:
+            pid = proto["id"]
+            mesh = self._mesh_of(proto)
+            meshes[pid] = mesh
             lo, hi = mesh.bounds()
-            objects.append({
-                "id": n["id"], "name": n.get("name"), "tris": mesh.tri_count(),
-                "bounds": [lo, hi], "layer": n.get("layer"), "parent": n.get("parent"),
-            })
+            tris_of[pid] = mesh.tri_count()
+            bounds_of[pid] = (lo, hi)
+            if not proto.get("mesh"):
+                prim_of[pid] = {"kind": proto.get("kind"), "params": proto.get("params") or {}}
+        return prim_of, tris_of, bounds_of, meshes
+
+    def summary(self) -> dict[str, Any]:
+        prim_of, tris_of, bounds_of, _meshes = self._catalog()
+        nodes, objects = self._views(prim_of, tris_of, bounds_of)
+        return self._header(nodes, objects)
+
+    def _header(self, nodes: list, objects: list) -> dict[str, Any]:
         return {
             "name": self.name,
             "rev": self.data.get("rev"),
+            "geom": self.data.get("geom") or 0,
             "mode": self.data.get("mode"),
             "select_mode": self.data.get("select_mode"),
             "selection": self.data.get("selection"),
             "layers": self.data.get("layers"),
             "materials": self.data.get("materials"),
-            "nodes": [
-                {k: n.get(k) for k in ("id", "type", "name", "parent", "layer", "visible", "locked", "transform", "primitive", "modifiers", "material")}
-                for n in self.data["nodes"]
-            ],
+            "nodes": nodes,
             "objects": objects,
             "activity": self.data.get("activity") or [],
         }
 
-    def payload(self) -> dict[str, Any]:
-        """Triangulated meshes for the viewport. Local space; the client parents them."""
-        out_nodes = []
+    def _views(self, prim_of: dict, tris_of: dict, bounds_of: dict) -> tuple[list, list]:
+        nodes: list[dict] = []
+        objects: list[dict] = []
+        add_n = nodes.append
+        add_o = objects.append
         for n in self.data["nodes"]:
-            item: dict[str, Any] = {
-                "id": n["id"], "type": n.get("type"), "name": n.get("name"),
+            if n.get("type") != "object":
+                add_n({
+                    "id": n.get("id"), "type": n.get("type"), "name": n.get("name"),
+                    "parent": n.get("parent"), "layer": n.get("layer"),
+                    "visible": n.get("visible", True), "locked": bool(n.get("locked")),
+                    "transform": n.get("transform"),
+                })
+                continue
+            pid = n.get("prototype") or ""
+            mods = n.get("modifiers") or ()
+            tris = tris_of.get(pid, 0)
+            if mods:
+                copies = 1
+                for mod in mods:
+                    if str(mod.get("type") or "") == "array":
+                        copies *= max(1, int(mod.get("count") or 2))
+                tris *= copies
+            lo, hi = bounds_of.get(pid, ([0, 0, 0], [0, 0, 0]))
+            add_o({
+                "id": n["id"], "name": n.get("name"), "tris": tris,
+                "bounds": [lo, hi], "layer": n.get("layer"), "parent": n.get("parent"),
+                "prototype": pid,
+            })
+            add_n({
+                "id": n["id"], "type": "object", "name": n.get("name"),
                 "parent": n.get("parent"), "layer": n.get("layer"),
                 "visible": n.get("visible", True), "locked": bool(n.get("locked")),
-                "transform": n.get("transform"), "primitive": n.get("primitive"),
-                "modifiers": n.get("modifiers") or [], "material": n.get("material"),
-            }
-            if n.get("type") == "object":
-                mesh = self.local_mesh(n)
-                positions: list[float] = []
-                normals: list[float] = []
-                uvs: list[float] = []
-                indices: list[int] = []
-                face_ids: list[int] = []
-                for a, b, c, fi in mesh.triangles():
-                    nrm = mesh.face_normal(fi)
-                    face = mesh.faces[fi]
-                    uvf = mesh.uvs[fi] if fi < len(mesh.uvs) else []
-                    for vi in (a, b, c):
-                        positions.extend(mesh.verts[vi])
-                        normals.extend(nrm)
-                        try:
-                            uv = uvf[face.index(vi)]
-                        except ValueError:
-                            uv = [0.0, 0.0]
-                        uvs.extend(uv)
-                        indices.append(len(indices))
-                    face_ids.append(fi)
-                item.update({
-                    "positions": positions, "normals": normals, "uvs": uvs,
-                    "indices": indices, "face_ids": face_ids,
-                    "verts": [v[:] for v in mesh.verts],
-                    "tris": mesh.tri_count(),
+                "transform": n.get("transform"), "prototype": pid,
+                "primitive": prim_of.get(pid), "modifiers": mods or [],
+                "material": n.get("material"), "tris": tris,
+            })
+        return nodes, objects
+
+    def payload(self) -> dict[str, Any]:
+        """One indexed mesh per prototype, plus a flat instance transform list."""
+        prim_of, tris_of, _bounds, meshes = self._catalog()
+        geos: dict[str, dict[str, Any]] = {}
+        instances: list[list] = []
+        nodes: list[dict] = []
+        add_i = instances.append
+        add_n = nodes.append
+        for n in self.data["nodes"]:
+            if n.get("type") != "object":
+                add_n({
+                    "id": n.get("id"), "type": n.get("type"), "name": n.get("name"),
+                    "parent": n.get("parent"), "layer": n.get("layer"),
+                    "visible": n.get("visible", True), "locked": bool(n.get("locked")),
+                    "transform": n.get("transform"),
                 })
-            out_nodes.append(item)
+                continue
+            pid = n.get("prototype") or n["id"]
+            mods = n.get("modifiers")
+            tris = tris_of.get(pid, 0)
+            mirrored = False
+            if mods:
+                copies = 1
+                for mod in mods:
+                    kind = str(mod.get("type") or "")
+                    if kind == "array":
+                        copies *= max(1, int(mod.get("count") or 2))
+                    elif kind == "mirror":
+                        mirrored = True
+                tris *= copies
+            add_n({
+                "id": n["id"], "type": "object", "name": n.get("name"),
+                "parent": n.get("parent"), "layer": n.get("layer"),
+                "visible": n.get("visible", True), "locked": bool(n.get("locked")),
+                "transform": n.get("transform"), "prototype": pid,
+                "primitive": prim_of.get(pid), "modifiers": mods or [],
+                "material": n.get("material"), "tris": tris,
+            })
+            if not n.get("visible", True):
+                continue
+            if mirrored:
+                key = self.display_key(n)
+                if key not in geos:
+                    geos[key] = _indexed(self.shaped_mesh(n), key)
+                places = _placements(n)
+            elif mods:
+                key = pid
+                if key not in geos:
+                    geos[key] = _indexed(meshes[key] if key in meshes else self.base_mesh(n), key)
+                places = _placements(n)
+            else:
+                key = pid
+                if key not in geos:
+                    geos[key] = _indexed(meshes[key] if key in meshes else self.base_mesh(n), key)
+                tr = n["transform"]
+                pos, rot, scale = tr["pos"], tr["rot"], tr["scale"]
+                add_i([
+                    n["id"], key, n.get("parent") or "",
+                    pos[0], pos[1], pos[2], rot[0], rot[1], rot[2],
+                    scale[0], scale[1], scale[2], n.get("material") or "",
+                ])
+                continue
+            parent = n.get("parent") or ""
+            mat = n.get("material") or ""
+            nid = n["id"]
+            for place in places:
+                pos, rot, scale = place["pos"], place["rot"], place["scale"]
+                add_i([
+                    nid, key, parent,
+                    pos[0], pos[1], pos[2], rot[0], rot[1], rot[2],
+                    scale[0], scale[1], scale[2], mat,
+                ])
+        info = self._header(nodes, [])
+        info["prototypes"] = list(geos.values())
+        info["instances"] = instances
         last = (self.data.get("activity") or [None])[-1]
-        flash = None
+        info["flash"] = None
         if last and last.get("kind") == "edit" and last.get("actor") == "agent":
-            flash = {"ids": last.get("ids") or [], "op": last.get("op"), "summary": last.get("summary")}
-        return {
-            "name": self.name,
-            "rev": self.data.get("rev"),
-            "mode": self.data.get("mode"),
-            "select_mode": self.data.get("select_mode"),
-            "selection": self.data.get("selection"),
-            "layers": self.data.get("layers"),
-            "materials": self.data.get("materials"),
-            "nodes": out_nodes,
-            "activity": self.data.get("activity") or [],
-            "flash": flash,
-        }
+            info["flash"] = {"ids": last.get("ids") or [], "op": last.get("op"), "summary": last.get("summary")}
+        return info
 
 
 def load(name: str) -> Scene:
@@ -345,28 +592,39 @@ def _sel_ids(scene: Scene, params: dict) -> list:
 
 def _op_add(scene: Scene, p: dict) -> dict[str, Any]:
     kind = str(p.get("kind") or "box")
+    params = dict(p.get("params") or {})
     mat = str(p.get("material") or scene.data["materials"][0]["id"])
-    node = {
-        "id": _nid("o"),
-        "type": "object",
-        "name": str(p.get("name") or kind.replace("_", " ").title()),
-        "parent": p.get("parent"),
-        "layer": str(p.get("layer") or "default"),
-        "visible": True,
-        "locked": False,
-        "transform": {
-            "pos": list(p.get("pos") or [0, 0, 0]),
-            "rot": list(p.get("rot") or [0, 0, 0]),
-            "scale": list(p.get("scale") or [1, 1, 1]),
-        },
-        "primitive": {"kind": kind, "params": dict(p.get("params") or {})},
-        "mesh": None,
-        "modifiers": [],
-        "material": mat,
-    }
-    scene.data["nodes"].append(node)
-    scene.data["selection"]["object"] = node["id"]
-    return {"summary": f"Add {node['name']}", "ids": [node["id"]], "id": node["id"]}
+    proto = scene.share_primitive(kind, params)
+    count = max(1, int(p.get("count") or 1))
+    base_name = str(p.get("name") or kind.replace("_", " ").title())
+    origin = list(p.get("pos") or [0, 0, 0])
+    stride = int(count ** 0.5) or 1
+    ids = []
+    first = None
+    for i in range(count):
+        node = {
+            "id": _nid("o"),
+            "type": "object",
+            "name": base_name if count == 1 else f"{base_name} {i + 1}",
+            "parent": p.get("parent"),
+            "layer": str(p.get("layer") or "default"),
+            "visible": True,
+            "locked": False,
+            "transform": {
+                "pos": [origin[0] + (i % stride) * 120.0, origin[1] + (i // stride) * 120.0, origin[2]],
+                "rot": list(p.get("rot") or [0, 0, 0]),
+                "scale": list(p.get("scale") or [1, 1, 1]),
+            },
+            "prototype": proto["id"],
+            "modifiers": [],
+            "material": mat,
+        }
+        scene.data["nodes"].append(node)
+        ids.append(node["id"])
+        first = first or node["id"]
+    scene.data["selection"]["object"] = first
+    scene.touch_geom()
+    return {"summary": f"Add {base_name}" + (f" x{count}" if count > 1 else ""), "ids": ids, "id": first}
 
 
 def _op_edit(scene: Scene, p: dict) -> dict[str, Any]:
@@ -390,8 +648,17 @@ def _op_edit(scene: Scene, p: dict) -> dict[str, Any]:
             t["rot"] = list(p["rot"])
         if "scale" in p:
             t["scale"] = list(p["scale"])
-    if "params" in p and node.get("primitive"):
-        node["primitive"]["params"].update(p["params"])
+    if "params" in p:
+        proto = scene.proto(node)
+        if proto and not proto.get("mesh"):
+            params = dict(proto.get("params") or {})
+            params.update(p["params"])
+            if scene.user_count(proto["id"]) > 1:
+                node["prototype"] = scene.share_primitive(str(proto.get("kind") or "box"), params)["id"]
+            else:
+                proto["params"] = params
+                proto["key"] = _proto_key(str(proto.get("kind") or "box"), params)
+    scene.touch_geom()
     return {"summary": f"Edit {node.get('name')}", "ids": [node["id"]]}
 
 
@@ -407,6 +674,7 @@ def _op_duplicate(scene: Scene, p: dict) -> dict[str, Any]:
     copy["transform"]["pos"] = [pos[i] + off[i] for i in range(3)]
     scene.data["nodes"].append(copy)
     scene.data["selection"]["object"] = copy["id"]
+    scene.touch_geom()
     return {"summary": f"Duplicate {node.get('name')}", "ids": [copy["id"]]}
 
 
@@ -416,6 +684,8 @@ def _op_delete(scene: Scene, p: dict) -> dict[str, Any]:
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] not in ids and n.get("parent") not in ids]
     if scene.data["selection"].get("object") in ids:
         scene.data["selection"]["object"] = None
+    scene._gc_protos()
+    scene.touch_geom()
     return {"summary": f"Delete {len(ids)}", "ids": list(ids)}
 
 
@@ -463,7 +733,7 @@ def _op_move(scene: Scene, p: dict) -> dict[str, Any]:
     mesh = scene._bake(node)
     kind = str(p.get("kind") or scene.data.get("select_mode") or "vert")
     n = move_elements(mesh, kind, _sel_ids(scene, p), p.get("delta") or [0, 0, 0])
-    node["mesh"] = mesh.to_dict()
+    scene.write_mesh(node, mesh)
     return {"summary": f"Move {n}", "ids": [node["id"]]}
 
 
@@ -514,7 +784,7 @@ def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
         t["pos"] = [t["pos"][i] + shift[i] for i in range(3)]
     else:
         raise ValueError(f"Unknown mesh op {which!r}")
-    node["mesh"] = mesh.to_dict()
+    scene.write_mesh(node, mesh)
     return {"summary": which or "mesh", "ids": [node["id"]], "tris": mesh.tri_count()}
 
 
@@ -529,13 +799,15 @@ def _op_bool(scene: Scene, p: dict) -> dict[str, Any]:
         "parent": a.get("parent"), "layer": a.get("layer") or "default",
         "visible": True, "locked": False,
         "transform": {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]},
-        "primitive": None, "mesh": result.to_dict(), "modifiers": [],
+        "prototype": scene.adopt_mesh(result), "modifiers": [],
         "material": a.get("material"),
     }
     drop = {a["id"], b["id"]}
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] not in drop]
     scene.data["nodes"].append(node)
     scene.data["selection"]["object"] = node["id"]
+    scene._gc_protos()
+    scene.touch_geom()
     return {"summary": f"Boolean {p.get('op') or 'difference'}", "ids": [node["id"]]}
 
 
@@ -547,12 +819,12 @@ def _op_modifier(scene: Scene, p: dict) -> dict[str, Any]:
         mods.append({"type": p.get("type") or "mirror", "axis": p.get("axis") or "x", "count": p.get("count") or 3, "offset": p.get("offset") or [120, 0, 0]})
     elif action == "apply":
         mesh = scene.local_mesh(node)
-        node["mesh"] = mesh.to_dict()
-        node["primitive"] = None
+        scene.write_mesh(node, mesh)
         mods = []
     elif action == "clear":
         mods = []
     node["modifiers"] = mods
+    scene.touch_geom()
     return {"summary": f"Modifier {action}", "ids": [node["id"]]}
 
 
@@ -570,13 +842,15 @@ def _op_join(scene: Scene, p: dict) -> dict[str, Any]:
         "parent": nodes[0].get("parent"), "layer": nodes[0].get("layer") or "default",
         "visible": True, "locked": False,
         "transform": {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]},
-        "primitive": None, "mesh": mesh.to_dict(), "modifiers": [],
+        "prototype": scene.adopt_mesh(mesh), "modifiers": [],
         "material": nodes[0].get("material"),
     }
     drop = {n["id"] for n in nodes}
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] not in drop]
     scene.data["nodes"].append(node)
     scene.data["selection"]["object"] = node["id"]
+    scene._gc_protos()
+    scene.touch_geom()
     return {"summary": f"Join {len(nodes)}", "ids": [node["id"]]}
 
 
@@ -590,13 +864,16 @@ def _op_separate(scene: Scene, p: dict) -> dict[str, Any]:
         child = json.loads(json.dumps(node))
         child["id"] = _nid("o")
         child["name"] = f"{node.get('name')}_{i + 1}"
-        child["mesh"] = part.to_dict()
-        child["primitive"] = None
+        child.pop("mesh", None)
+        child.pop("primitive", None)
+        child["prototype"] = scene.adopt_mesh(part)
         child["modifiers"] = []
         child["material"] = part.face_mat[0] if part.face_mat else node.get("material")
         scene.data["nodes"].append(child)
         ids.append(child["id"])
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] != node["id"]]
+    scene._gc_protos()
+    scene.touch_geom()
     return {"summary": f"Separate into {len(ids)}", "ids": ids}
 
 
@@ -626,17 +903,13 @@ def _op_material_assign(scene: Scene, p: dict) -> dict[str, Any]:
     faces = p.get("faces")
     if not faces:
         node["material"] = mid
-        mesh = scene.base_mesh(node)
-        mesh.face_mat = [mid] * len(mesh.faces)
-        if node.get("mesh") or node.get("primitive"):
-            node["mesh"] = mesh.to_dict()
-            node["primitive"] = None
+        scene.touch_geom()
     else:
         mesh = scene._bake(node)
         for fi in faces:
             if 0 <= int(fi) < len(mesh.face_mat):
                 mesh.face_mat[int(fi)] = mid
-        node["mesh"] = mesh.to_dict()
+        scene.write_mesh(node, mesh)
     return {"summary": "Assign material", "ids": [node["id"]]}
 
 
@@ -644,7 +917,7 @@ def _op_uv(scene: Scene, p: dict) -> dict[str, Any]:
     node = scene._active()
     mesh = scene._bake(node)
     n = project(mesh, str(p.get("mode") or "box"), p.get("faces"), float(p.get("density", 0.01)))
-    node["mesh"] = mesh.to_dict()
+    scene.write_mesh(node, mesh)
     return {"summary": f"UV {p.get('mode') or 'box'} on {n} faces", "ids": [node["id"]]}
 
 
@@ -675,7 +948,15 @@ def _op_revert(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Revert to rev {p.get('rev')}", "ids": []}
 
 
-def _op_get(scene: Scene, _p: dict) -> dict[str, Any]:
+def _op_get(scene: Scene, p: dict) -> dict[str, Any]:
+    if p.get("brief"):
+        data = scene.data
+        return {
+            "summary": "scene", "ids": [], "name": scene.name,
+            "rev": data.get("rev"), "geom": data.get("geom") or 0,
+            "mode": data.get("mode"), "select_mode": data.get("select_mode"),
+            "selection": data.get("selection"),
+        }
     info = scene.summary()
     info["summary"] = "scene"
     info["ids"] = []
@@ -733,7 +1014,7 @@ def _op_fix(scene: Scene, p: dict) -> dict[str, Any]:
         mesh = scene._bake(n)
         before = mesh.tri_count()
         done = fix_mesh(mesh, wanted)
-        n["mesh"] = mesh.to_dict()
+        scene.write_mesh(n, mesh)
         fixed.append({"id": n["id"], "before_tris": before, "after_tris": mesh.tri_count(), "fixes": done})
     return {"summary": f"Fix {len(fixed)}", "ids": [f["id"] for f in fixed], "fixed": fixed}
 

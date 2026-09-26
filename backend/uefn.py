@@ -65,8 +65,17 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
         for n in loose:
             exports.append({"name": n.get("name") or n["id"], "mesh": bake([n]), "collision": ucx_for(n.get("parent"))})
     else:
+        # One SM per shared prototype. Instances stay in the viewer.
+        seen: set[str] = set()
         for n in visible:
-            exports.append({"name": n.get("name") or n["id"], "mesh": bake([n]), "collision": ucx_for(n.get("parent"))})
+            key = scene.display_key(n)
+            if key in seen:
+                continue
+            seen.add(key)
+            mesh = scene.shaped_mesh(n)
+            if mesh.verts:
+                set_origin(mesh, "base")
+            exports.append({"name": n.get("name") or n["id"], "mesh": mesh, "collision": ucx_for(n.get("parent"))})
     return [e for e in exports if e["mesh"].verts]
 
 
