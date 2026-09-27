@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 from typing import Sequence
 
-from .mesh import Mesh, Vec3, lerp, vadd, vdot, vlen, vmul, vnorm, vsub
+from .mesh import Mesh, Vec3, lerp, vadd, vcross, vdot, vlen, vmul, vnorm, vsub
 
 
 def _faces_or_all(mesh: Mesh, face_ids: Sequence[int] | None) -> list[int]:
@@ -127,14 +128,29 @@ def _short_edges(mesh: Mesh, limit: float) -> set[tuple[int, int]]:
 
 
 def _chamfer_once(mesh: Mesh, edge_set: set[tuple[int, int]], width: float) -> int:
+    """Cut selected corners and weld the new points so the mesh stays closed.
+
+    Each (vertex, neighbor) cut is one shared point. Face loops use the chord
+    across the cut, so corners stay filled instead of opening a hole.
+    """
     from .mesh import _uv_for_face
 
     def selected(a: int, b: int) -> bool:
         return ((a, b) if a < b else (b, a)) in edge_set
 
+    weld: dict[tuple[int, int], int] = {}
+
+    def cut(origin: int, toward: int) -> int:
+        key = (origin, toward)
+        hit = weld.get(key)
+        if hit is None:
+            hit = mesh.add_vert(_offset_along(mesh, origin, toward, width))
+            weld[key] = hit
+        return hit
+
     new_loops: list[list[int]] = []
-    strip: dict[tuple[int, int], list[int]] = {}
-    for fi, face in enumerate(mesh.faces):
+    corners: dict[int, list[int]] = {}
+    for face in mesh.faces:
         loop: list[int] = []
         n = len(face)
         for i, vi in enumerate(face):
@@ -142,30 +158,57 @@ def _chamfer_once(mesh: Mesh, edge_set: set[tuple[int, int]], width: float) -> i
             nxt = face[(i + 1) % n]
             sel_in = selected(prev, vi)
             sel_out = selected(vi, nxt)
-            if not sel_in and not sel_out:
-                loop.append(mesh.add_vert(mesh.verts[vi]))
-                continue
             if sel_in:
-                vid = mesh.add_vert(_offset_along(mesh, vi, prev, width))
+                vid = cut(vi, prev)
                 loop.append(vid)
-                strip.setdefault((prev, vi) if prev < vi else (vi, prev), []).append(vid)
+                corners.setdefault(vi, []).append(vid)
             if sel_out:
-                vid = mesh.add_vert(_offset_along(mesh, vi, nxt, width))
+                vid = cut(vi, nxt)
                 loop.append(vid)
-                strip.setdefault((vi, nxt) if vi < nxt else (nxt, vi), []).append(vid)
-        new_loops.append(loop)
+                corners.setdefault(vi, []).append(vid)
+            if not sel_in and not sel_out:
+                loop.append(vi)
+        compact: list[int] = []
+        for vid in loop:
+            if not compact or compact[-1] != vid:
+                compact.append(vid)
+        if len(compact) >= 2 and compact[0] == compact[-1]:
+            compact = compact[:-1]
+        new_loops.append(compact)
+    changed = 0
     for fi, loop in enumerate(new_loops):
         if len(loop) >= 3:
             mesh.faces[fi] = loop
             mesh.uvs[fi] = _uv_for_face(mesh.verts, loop)
-    made = 0
+            changed += 1
     mat = mesh.face_mat[0] if mesh.face_mat else "default"
-    for ids in strip.values():
-        if len(ids) == 4:
-            mesh.add_face(ids, mat)
-            made += 1
+    for origin, vids in corners.items():
+        changed += _corner_face(mesh, origin, vids, mat)
     mesh.drop_unused()
-    return made
+    return changed
+
+
+def _corner_face(mesh: Mesh, origin: int, vids: list[int], mat: str) -> int:
+    """Fill the hole where three or more cut edges meet."""
+    uniq: list[int] = []
+    for vid in vids:
+        if vid not in uniq:
+            uniq.append(vid)
+    if len(uniq) < 3 or origin >= len(mesh.verts):
+        return 0
+    center = _avg([mesh.verts[vid] for vid in uniq])
+    outward = vsub(mesh.verts[origin], center)
+    if vlen(outward) < 1e-8:
+        return 0
+    axis = vnorm(outward)
+    tmp = (1.0, 0.0, 0.0) if abs(axis[2]) > 0.9 else (0.0, 0.0, 1.0)
+    tang = vnorm(vcross(axis, tmp))
+    bit = vcross(axis, tang)
+    ordered = sorted(uniq, key=lambda vid: math.atan2(
+        vdot(vsub(mesh.verts[vid], center), bit),
+        vdot(vsub(mesh.verts[vid], center), tang),
+    ))
+    return 1 if mesh.add_face(ordered, mat) >= 0 else 0
 
 
 def _offset_along(mesh: Mesh, origin: int, toward: int, width: float) -> Vec3:

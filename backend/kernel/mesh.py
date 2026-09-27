@@ -108,7 +108,7 @@ class Mesh:
             if raw and len(raw) == len(face):
                 m.uvs.append([[float(u[0]), float(u[1])] for u in raw])
             else:
-                m.uvs.append(_uv_for_face(m.verts, face))
+                m.uvs.append([[0.0, 0.0] for _ in face])
         m.smooth = bool(data.get("smooth"))
         return m
 

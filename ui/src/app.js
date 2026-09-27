@@ -161,14 +161,27 @@ function composeRow(row, target) {
   return target.compose(_pos, _quat, _scl);
 }
 
+function b64buf(text) {
+  const bin = atob(text);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
 function geometryFor(proto) {
   let geo = geoCache.get(proto.id);
   if (geo) return geo;
   geo = new THREE.BufferGeometry();
-  geo.setAttribute("position", new THREE.Float32BufferAttribute(proto.positions, 3));
-  geo.setAttribute("normal", new THREE.Float32BufferAttribute(proto.normals, 3));
-  if (proto.uvs && proto.uvs.length) geo.setAttribute("uv", new THREE.Float32BufferAttribute(proto.uvs, 2));
-  geo.setIndex(proto.indices);
+  if (proto.pb) {
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(b64buf(proto.pb)), 3));
+    geo.setIndex(new THREE.BufferAttribute(new Uint32Array(b64buf(proto.ib)), 1));
+    if (proto.fb) geo.userData.faceIds = new Uint32Array(b64buf(proto.fb));
+  } else {
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(proto.positions, 3));
+    if (proto.normals) geo.setAttribute("normal", new THREE.Float32BufferAttribute(proto.normals, 3));
+    geo.setIndex(proto.indices);
+    geo.userData.faceIds = proto.face_ids || [];
+  }
   geoCache.set(proto.id, geo);
   return geo;
 }
@@ -177,7 +190,7 @@ function materialFor(matId, materials) {
   const color = colorOf(matId, materials);
   let mat = matCache.get(matId || "");
   if (!mat) {
-    mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 });
+    mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true });
     matCache.set(matId || "", mat);
     return mat;
   }
@@ -339,7 +352,7 @@ function buildBatches() {
       composeRow(pulled, local);
       mesh.matrix.multiplyMatrices(world(pulled[2]), local);
       mesh.matrixAutoUpdate = false;
-      mesh.userData = { id: pulled[0], faceIds: proto.face_ids || [], matId: pulled[12] || "" };
+      mesh.userData = { id: pulled[0], faceIds: geometryFor(proto).userData.faceIds || [], matId: pulled[12] || "" };
       content.add(mesh);
       state.pick = mesh;
       state.parentOf.set(pulled[0], world(pulled[2]));
@@ -456,14 +469,19 @@ renderer.domElement.addEventListener("pointerdown", (ev) => {
 });
 
 async function op(name, params) {
-  setStatus("");
-  const result = await rpc("forge_call", { op: name, name: state.name, params: params || {}, actor: "user" });
-  if (result && result.ok === false) {
-    setStatus(result.error || "Failed", true);
+  try {
+    setStatus("");
+    const result = await rpc("forge_call", { op: name, name: state.name, params: params || {}, actor: "user" });
+    if (result && result.ok === false) {
+      setStatus(result.error || "Failed", true);
+      return result;
+    }
+    state.rev = -1;
     return result;
+  } catch (err) {
+    setStatus(err.message || String(err), true);
+    return { ok: false, error: err.message || String(err) };
   }
-  state.rev = -1;
-  return result;
 }
 
 function setStatus(text, isErr) {
@@ -617,6 +635,7 @@ function outliner(p) {
         <button class="icon-btn${shown ? "" : " off"}" type="button" data-eye="node" data-node="${n.id}" data-on="${shown ? 1 : 0}" title="Show or hide">${EYE}</button>
         <i class="dot" style="background:${layerColor(p, n.layer)}"></i>
         <span class="nm">${mark}${n.name || n.id}</span>
+        ${n.type === "group" ? `<button class="icon-btn" type="button" data-nest="${n.id}" title="Put the shift-clicked shapes in this group">→</button>` : ""}
       </div>`);
       walk(n.id, depth + 1);
     }
@@ -707,6 +726,9 @@ function activity(p) {
 function exportPanel() {
   return `<div class="row"><label>Mode</label><select id="ex-mode"><option value="each">Each shape</option><option value="group">Groups combined</option><option value="all">Everything</option></select></div>
     <div class="row"><button id="send" type="button">Send to UEFN</button></div>
+    <h2>File</h2>
+    <div class="row"><input id="blend-path" placeholder="C:\\path\\stadium.blend" style="flex:1" /></div>
+    <div class="row"><button id="import-blend" type="button">Import Blend</button></div>
     <p class="dim">Writes one SM_ per shape or group, imports T_ color, normal, and ORM, and creates an MI_ on M_Forge_Master for each material. The Collision layer is the simple collision. UEFN needs to be open.</p>`;
 }
 
@@ -745,9 +767,18 @@ function bindPanel() {
   });
   const addLayer = document.getElementById("add-layer");
   if (addLayer) addLayer.onclick = () => {
-    const name = prompt("Layer name", "Layer");
-    if (name) op("layer", { action: "add", name });
+    const n = ((state.payload && state.payload.layers) || []).length + 1;
+    const colors = ["#6c8cff", "#7dba6a", "#d4a017", "#c46ad4", "#5ec8c8", "#d27b4a"];
+    op("layer", { action: "add", name: "Layer " + n, color: colors[n % colors.length] });
   };
+  document.querySelectorAll("[data-nest]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const ids = objectIds().filter((id) => id !== el.dataset.nest);
+      if (!ids.length) { setStatus("Shift-click the shapes, then this arrow", true); return; }
+      op("group", { into: el.dataset.nest, ids });
+    };
+  });
   const group = document.getElementById("group");
   if (group) group.onclick = () => {
     const ids = objectIds();
@@ -758,9 +789,10 @@ function bindPanel() {
   if (nest) nest.onclick = () => {
     const ids = chosen();
     const groupNode = ids.map(nodeById).find((n) => n && n.type === "group");
-    const rest = ids.filter((id) => !groupNode || id !== groupNode.id);
-    if (!groupNode || !rest.length) { setStatus("Shift-click shapes and a group, then Nest", true); return; }
-    op("group", { into: groupNode.id, ids: rest });
+    const rest = objectIds().filter((id) => !groupNode || id !== groupNode.id);
+    if (groupNode && rest.length) op("group", { into: groupNode.id, ids: rest });
+    else if (rest.length) op("group", { ids: rest, name: "Group" });
+    else setStatus("Shift-click shapes, then Nest", true);
   };
   const ungroup = document.getElementById("ungroup");
   if (ungroup) ungroup.onclick = () => {
@@ -862,6 +894,19 @@ function bindPanel() {
   };
   const fix = document.getElementById("fix-all");
   if (fix) fix.onclick = () => op("fix", { issues: "all" });
+  const importBlend = document.getElementById("import-blend");
+  if (importBlend) importBlend.onclick = async () => {
+    const path = document.getElementById("blend-path").value.trim();
+    if (!path) { setStatus("Paste the path to a .blend file", true); return; }
+    setStatus("Importing Blend…");
+    const opened = await op("scene_import_blend", { path });
+    if (!opened || opened.ok === false) return;
+    const sceneName = opened.opened || opened.name;
+    await refreshScenes(sceneName);
+    state.name = sceneName;
+    state.rev = -1;
+    setStatus(`Imported ${opened.objects || 0} objects into ${sceneName}`);
+  };
   const send = document.getElementById("send");
   if (send) send.onclick = async () => {
     setStatus("Sending to UEFN…");
@@ -908,11 +953,43 @@ function wire() {
     op("join", { ids });
   };
   document.getElementById("new").onclick = async () => {
-    const name = prompt("Scene name", "Prop");
-    if (!name) return;
-    await rpc("forge_call", { op: "scene_new", name: "", params: { name }, actor: "user" });
-    await refreshScenes(name);
+    const name = "Scene " + (document.getElementById("scene").options.length + 1);
+    const made = await rpc("forge_call", { op: "scene_new", name: "", params: { name }, actor: "user" });
+    if (!made || made.ok === false) { setStatus((made && made.error) || "Could not make a scene", true); return; }
+    await refreshScenes(made.name || name);
     state.rev = -1;
+  };
+  document.getElementById("save-file").onclick = async () => {
+    const saved = await op("scene_save", {});
+    if (saved && saved.path) setStatus("Saved " + saved.path);
+  };
+  document.getElementById("open-file").onclick = async () => {
+    const box = document.getElementById("files");
+    if (!box.hidden) { box.hidden = true; return; }
+    const listed = await rpc("forge_call", { op: "scene_files", name: state.name, params: {}, actor: "user" });
+    const files = (listed && listed.files) || [];
+    box.innerHTML = "";
+    if (!files.length) {
+      box.hidden = false;
+      box.textContent = "No saved files yet";
+      return;
+    }
+    for (const file of files) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = file.name;
+      b.onclick = async () => {
+        box.hidden = true;
+        const opened = await op("scene_open", { path: file.path });
+        const sceneName = (opened && (opened.opened || opened.name)) || file.name;
+        await refreshScenes(sceneName);
+        state.name = sceneName;
+        state.rev = -1;
+        setStatus("Opened " + sceneName);
+      };
+      box.appendChild(b);
+    }
+    box.hidden = false;
   };
   document.getElementById("scene").onchange = (ev) => { state.name = ev.target.value; state.rev = -1; };
   document.getElementById("follow").onchange = (ev) => { state.follow = ev.target.checked; };

@@ -29,8 +29,23 @@ def test_kernel_and_scene() -> None:
     before = m.tri_count()
     extrude_faces(m, [0], 10)
     assert m.tri_count() > before
+    def open_edges(mesh):
+        counts = {}
+        for face in mesh.faces:
+            n = len(face)
+            for i, a in enumerate(face):
+                b = face[(i + 1) % n]
+                key = (a, b) if a < b else (b, a)
+                counts[key] = counts.get(key, 0) + 1
+        return sum(1 for v in counts.values() if v != 2)
+
     m = box()
     assert bevel_edges(m, m.edge_keys()[:4], 6) >= 1
+    whole = box()
+    bevel_edges(whole, whole.edge_keys(), 8)
+    assert open_edges(whole) == 0
+    from backend.kernel.mesh import build_primitive
+    assert open_edges(build_primitive("rounded_box", {"radius": 8})) == 0
 
     a = box(100, 100, 100)
     b = box(100, 100, 100)
@@ -57,6 +72,10 @@ def test_kernel_and_scene() -> None:
     after = dispatch("Crate", "undo", {}, actor="user")
     assert after["summary"] == "Undo"
     assert dispatch("Crate", "scene_get", {})["objects"][0]["tris"] == extruded
+    from backend.files import open_forge, save_forge
+    saved = save_forge("Crate")
+    assert Path(saved["path"]).is_file()
+    assert open_forge(saved["path"])["name"] == "Crate"
     dispatch("Crate", "check", {})
     fixed = dispatch("Crate", "fix", {"issues": "all", "id": oid}, actor="agent")
     assert fixed["fixed"]

@@ -31,14 +31,14 @@
       background:#2b2b2bee; border-radius:8px; box-shadow:0 2px 10px #0008;
     }
     .add-wrap { position:relative; }
-    #prims {
-      position:absolute; z-index:5; top:28px; left:0; width:160px;
+    #prims, #files {
+      position:absolute; z-index:5; top:28px; left:0; width:220px;
       background:var(--surface); border:1px solid #444; border-radius:6px; padding:4px;
       display:flex; flex-direction:column; gap:2px; max-height:280px; overflow:auto;
     }
-    #prims[hidden] { display:none; }
-    #prims button { text-align:left; padding:4px 8px; background:transparent; }
-    #prims button:hover { background:#3a3a3a; }
+    #prims[hidden], #files[hidden] { display:none; }
+    #prims button, #files button { text-align:left; padding:4px 8px; background:transparent; }
+    #prims button:hover, #files button:hover { background:#3a3a3a; }
     .side { overflow:auto; background:var(--surface); border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; }
     .tabs { display:flex; gap:2px; padding:4px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--surface); z-index:1; }
     .tabs button { width:32px; height:28px; padding:0; display:grid; place-items:center; background:transparent; }
@@ -71,6 +71,11 @@
   <div class="top">
     <select id="scene" title="Scene"></select>
     <button id="new" class="menu" type="button" title="New scene">New</button>
+    <button id="save-file" class="menu" type="button" title="Save this scene, its groups, and its meshes as a .forge file">Save</button>
+    <div class="add-wrap">
+      <button id="open-file" class="menu" type="button" title="Open a saved .forge file">Open</button>
+      <div id="files" hidden></div>
+    </div>
     <button id="mode" class="menu" type="button" title="Object or Edit mode">Object</button>
     <div class="add-wrap">
       <button id="add-btn" class="menu" type="button" title="Add a primitive">Add</button>

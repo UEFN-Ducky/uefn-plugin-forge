@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import array
+import base64
 import json
 import os
 import secrets
@@ -39,7 +41,7 @@ from .kernel.ops import (
 from .uv import project
 
 _LOCK = threading.Lock()
-_READ = {"stats", "scene_get", "scene_list", "scene_payload"}
+_READ = {"stats", "scene_get", "scene_list", "scene_payload", "scene_save", "scene_open", "scene_files", "scene_import_blend"}
 _LOOK = {"check", "render"}
 
 
@@ -109,44 +111,21 @@ def _placements(node: dict) -> list[dict]:
     return out
 
 
+def _b64(values: array.array) -> str:
+    return base64.b64encode(values.tobytes()).decode("ascii")
+
+
 def _indexed(mesh: Mesh, pid: str) -> dict[str, Any]:
-    """Shared vertices. Flat faces keep a vertex per corner so edges stay sharp."""
-    positions: list[float] = []
-    normals: list[float] = []
-    uvs: list[float] = []
-    indices: list[int] = []
-    face_ids: list[int] = []
-    corner: dict[tuple, int] = {}
-
-    def add(vi: int, nrm: list[float], uv: list[float]) -> int:
-        key = (vi, round(nrm[0], 3), round(nrm[1], 3), round(nrm[2], 3))
-        hit = corner.get(key)
-        if hit is not None:
-            return hit
-        idx = len(positions) // 3
-        positions.extend(mesh.verts[vi])
-        normals.extend(nrm)
-        uvs.extend(uv)
-        corner[key] = idx
-        return idx
-
+    """Packed float32 positions and uint32 indices. The view shades flat from these."""
+    pos = array.array("f")
+    idx = array.array("I")
+    faces = array.array("I")
+    for v in mesh.verts:
+        pos.extend((float(v[0]), float(v[1]), float(v[2])))
     for a, b, c, fi in mesh.triangles():
-        nrm = mesh.face_normal(fi)
-        face = mesh.faces[fi]
-        uvf = mesh.uvs[fi] if fi < len(mesh.uvs) else []
-
-        def uv_of(vi: int) -> list[float]:
-            try:
-                return uvf[face.index(vi)]
-            except ValueError:
-                return [0.0, 0.0]
-
-        indices.extend((add(a, nrm, uv_of(a)), add(b, nrm, uv_of(b)), add(c, nrm, uv_of(c))))
-        face_ids.append(fi)
-    return {
-        "id": pid, "positions": positions, "normals": normals, "uvs": uvs,
-        "indices": indices, "face_ids": face_ids, "tris": len(face_ids),
-    }
+        idx.extend((int(a), int(b), int(c)))
+        faces.append(int(fi))
+    return {"id": pid, "pb": _b64(pos), "ib": _b64(idx), "fb": _b64(faces), "tris": len(faces)}
 
 
 def _mat(mid: str, name: str, color: list[float] | None = None) -> dict[str, Any]:
@@ -740,6 +719,7 @@ def _op_layer(scene: Scene, p: dict) -> dict[str, Any]:
             "id": lid, "name": str(p.get("name") or "Layer"),
             "visible": True, "locked": False, "color": str(p.get("color") or "#6c8cff"),
         })
+        scene.touch_geom()
         return {"summary": "Add layer", "ids": [lid], "id": lid}
     if action == "assign":
         lid = str(p.get("id") or p.get("layer") or "default")
@@ -794,18 +774,44 @@ def _op_move(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Move {n}", "ids": [node["id"]]}
 
 
+def _face_edges(mesh: Mesh, faces: list) -> list[list[int]]:
+    edges: list[list[int]] = []
+    seen: set[tuple[int, int]] = set()
+    for fi in faces:
+        if not (0 <= int(fi) < len(mesh.faces)):
+            continue
+        face = mesh.faces[int(fi)]
+        for i, a in enumerate(face):
+            b = face[(i + 1) % len(face)]
+            key = (a, b) if a < b else (b, a)
+            if key not in seen:
+                seen.add(key)
+                edges.append([a, b])
+    return edges
+
+
 def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
     node = scene._active()
-    mesh = scene._bake(node)
     which = str(p.get("op") or "")
     sel = scene.data["selection"]
     faces = list(p.get("faces") or sel.get("faces") or [])
+    if which in {"extrude", "inset", "subdivide", "delete"} and not faces and not (which == "delete" and (p.get("verts") or sel.get("verts"))):
+        raise ValueError("Click a face in Edit mode first")
+    if which == "bevel" and not (p.get("edges") or sel.get("edges") or faces):
+        raise ValueError("Click an edge, or a face, then Bevel")
+    if which == "loopcut" and not (p.get("edge") or sel.get("edges")):
+        raise ValueError("Click an edge, then Loop cut")
+    mesh = scene._bake(node)
     if which == "extrude":
         extrude_faces(mesh, faces, float(p.get("distance", 10)))
     elif which == "inset":
         inset_faces(mesh, faces, float(p.get("amount", 5)))
     elif which == "bevel":
-        edges = p.get("edges") or sel.get("edges") or mesh.edge_keys()
+        edges = p.get("edges") or sel.get("edges") or []
+        if not edges and faces:
+            edges = _face_edges(mesh, faces)
+        if not edges:
+            raise ValueError("Click an edge, or a face, then Bevel")
         bevel_edges(mesh, edges, float(p.get("width", 4)), int(p.get("segments", 1)))
     elif which == "loopcut":
         loop_cut(mesh, (p.get("edge") or (sel.get("edges") or [None])[0]), float(p.get("t", 0.5)))
@@ -1005,6 +1011,33 @@ def _op_revert(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Revert to rev {p.get('rev')}", "ids": []}
 
 
+def _op_save_file(scene: Scene, p: dict) -> dict[str, Any]:
+    from .files import save_forge
+
+    saved = save_forge(scene.name, str(p.get("path") or ""))
+    return {"summary": f"Saved {saved['path']}", "ids": [], "path": saved["path"], "file_name": saved["name"]}
+
+
+def _op_open_file(_scene: Scene, p: dict) -> dict[str, Any]:
+    from .files import open_forge
+
+    opened = open_forge(str(p.get("path") or ""))
+    return {"summary": f"Opened {opened['name']}", "ids": [], "opened": opened["name"], "path": opened["path"]}
+
+
+def _op_list_files(_scene: Scene, _p: dict) -> dict[str, Any]:
+    from .files import list_files
+
+    return {"summary": "files", "ids": [], "files": list_files()}
+
+
+def _op_import_blend(_scene: Scene, p: dict) -> dict[str, Any]:
+    from .blend_import import import_blend
+
+    imported = import_blend(str(p.get("path") or ""), str(p.get("name") or ""))
+    return {"summary": f"Imported {imported['name']}", "ids": [], **imported}
+
+
 def _op_get(scene: Scene, p: dict) -> dict[str, Any]:
     if p.get("brief"):
         data = scene.data
@@ -1156,4 +1189,8 @@ _OPS = {
     "fix": _op_fix,
     "render": _op_render,
     "texture": _op_texture,
+    "scene_save": _op_save_file,
+    "scene_open": _op_open_file,
+    "scene_files": _op_list_files,
+    "scene_import_blend": _op_import_blend,
 }
