@@ -49,6 +49,8 @@ const state = {
   batchEdit: false,
   editId: "",
   flashIds: [],
+  picked: new Set(),
+  matId: "",
 };
 
 const CHUNK = 16384;
@@ -278,9 +280,21 @@ function buildBatches() {
   }
   const sel = (payload.selection && payload.selection.object) || "";
   const editing = state.mode === "edit" && !!sel;
+  const layerOff = new Set((payload.layers || []).filter((l) => l.visible === false).map((l) => l.id));
+  function culled(id) {
+    let n = byId.get(id);
+    const seen = new Set();
+    while (n && !seen.has(n.id)) {
+      seen.add(n.id);
+      if (n.visible === false || layerOff.has(n.layer)) return true;
+      n = n.parent ? byId.get(n.parent) : null;
+    }
+    return false;
+  }
   let pulled = null;
   const groups = new Map();
   for (const row of payload.instances || []) {
+    if (culled(row[0])) continue;
     if (editing && !pulled && row[0] === sel) {
       pulled = row;
       continue;
@@ -365,7 +379,7 @@ function syncSelection() {
   }
   attachGizmo();
   paintPanels();
-  document.getElementById("mode").textContent = editing ? "Edit" : "Object";
+  syncChrome();
 }
 
 function rebuild(payload) {
@@ -389,7 +403,7 @@ function rebuild(payload) {
     }
   }
   paintPanels();
-  document.getElementById("mode").textContent = state.mode === "edit" ? "Edit" : "Object";
+  syncChrome();
 }
 
 async function commitXform() {
@@ -437,6 +451,7 @@ renderer.domElement.addEventListener("pointerdown", (ev) => {
     ? hit.object.userData.ids[hit.instanceId]
     : hit.object.userData.id;
   const face = hit.instanceId == null ? (hit.object.userData.faceIds || [])[hit.faceIndex] : undefined;
+  rememberPick(id, ev.shiftKey);
   op("select", { object: id, faces: state.mode === "edit" && state.selectMode === "face" && face != null ? [face] : undefined });
 });
 
@@ -506,9 +521,58 @@ async function poll() {
   }
 }
 
+function syncChrome() {
+  const mode = document.getElementById("mode");
+  if (mode) mode.textContent = state.mode === "edit" ? "Edit" : "Object";
+  for (const [id, value] of [["sm-face", "face"], ["sm-edge", "edge"], ["sm-vert", "vert"]]) {
+    const button = document.getElementById(id);
+    if (button) button.classList.toggle("on", state.selectMode === value);
+  }
+  const gizmoId = { translate: "g-move", rotate: "g-rot", scale: "g-scale" }[state.gizmo];
+  for (const id of ["g-move", "g-rot", "g-scale"]) {
+    const button = document.getElementById(id);
+    if (button) button.classList.toggle("on", id === gizmoId);
+  }
+  document.querySelectorAll(".tabs button").forEach((button) => {
+    button.classList.toggle("on", button.dataset.tab === state.tab);
+  });
+}
+
+function rememberPick(id, shift) {
+  if (!id) return;
+  if (shift) {
+    if (state.picked.has(id)) state.picked.delete(id);
+    else state.picked.add(id);
+  } else state.picked = new Set([id]);
+}
+
+function chosen() {
+  const ids = [...state.picked];
+  const sel = state.payload && state.payload.selection && state.payload.selection.object;
+  if (sel && !ids.includes(sel)) ids.unshift(sel);
+  return ids.filter(Boolean);
+}
+
+function nodeById(id) {
+  return ((state.payload && state.payload.nodes) || []).find((n) => n.id === id);
+}
+
+function objectIds() {
+  return chosen().filter((id) => {
+    const n = nodeById(id);
+    return n && n.type === "object";
+  });
+}
+
+const EYE = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>`;
+
 function paintPanels() {
   const p = state.payload;
   if (!p) return;
+  const live = new Set((p.nodes || []).map((n) => n.id));
+  for (const id of [...state.picked]) if (!live.has(id)) state.picked.delete(id);
+  const sel = p.selection && p.selection.object;
+  if (sel && !state.picked.size) state.picked.add(sel);
   const panel = document.getElementById("panel");
   if (state.tab === "outliner") panel.innerHTML = outliner(p);
   else if (state.tab === "props") panel.innerHTML = props(p);
@@ -517,24 +581,63 @@ function paintPanels() {
   else if (state.tab === "activity") panel.innerHTML = activity(p);
   else panel.innerHTML = exportPanel();
   bindPanel();
+  syncChrome();
+}
+
+function layerColor(p, id) {
+  const layer = (p.layers || []).find((l) => l.id === id);
+  return (layer && layer.color) || "#8aa";
 }
 
 function outliner(p) {
-  const sel = (p.selection && p.selection.object) || "";
-  let nodes = p.nodes || [];
-  let more = "";
-  if (nodes.length > 400) {
-    const picked = nodes.find((n) => n.id === sel);
-    nodes = nodes.slice(0, 400);
-    if (picked && !nodes.some((n) => n.id === picked.id)) nodes.unshift(picked);
-    more = `<div class="item dim"><span class="nm">${p.nodes.length - nodes.length} more instances</span></div>`;
-  }
-  const rows = nodes.map((n) => {
-    const on = n.id === sel ? " on" : "";
-    return `<div class="item${on}" data-id="${n.id}"><span class="nm">${n.type === "group" ? "▸ " : ""}${n.name || n.id}</span><span>${n.layer === "collision" ? "UCX" : ""}</span></div>`;
+  const layers = p.layers || [];
+  const layerRows = layers.map((l) => {
+    const on = l.visible !== false;
+    return `<div class="item">
+      <button class="icon-btn${on ? "" : " off"}" type="button" data-eye="layer" data-layer="${l.id}" data-on="${on ? 1 : 0}" title="${on ? "Hide layer" : "Show layer"}">${EYE}</button>
+      <i class="dot" style="background:${l.color || "#8aa"}"></i>
+      <span class="nm">${l.name}</span>
+      <button class="icon-btn" type="button" data-assign="${l.id}" title="Put the selection on ${l.name}">→</button>
+    </div>`;
   }).join("");
-  return `<div class="list">${rows || "<span class='dim'>Empty scene. Add a primitive.</span>"}${more}</div>
-    <div class="row"><button id="group" type="button">Group</button><button id="join" type="button">Join</button></div>`;
+  const kids = new Map();
+  for (const n of p.nodes || []) {
+    const key = n.parent || "";
+    if (!kids.has(key)) kids.set(key, []);
+    kids.get(key).push(n);
+  }
+  const rows = [];
+  function walk(parent, depth) {
+    for (const n of kids.get(parent) || []) {
+      if (rows.length > 500) return;
+      const on = state.picked.has(n.id) ? " on" : "";
+      const shown = n.visible !== false;
+      const mark = n.type === "group" ? "▸ " : "";
+      rows.push(`<div class="item${on}" data-id="${n.id}" style="padding-left:${4 + depth * 14}px">
+        <button class="icon-btn${shown ? "" : " off"}" type="button" data-eye="node" data-node="${n.id}" data-on="${shown ? 1 : 0}" title="Show or hide">${EYE}</button>
+        <i class="dot" style="background:${layerColor(p, n.layer)}"></i>
+        <span class="nm">${mark}${n.name || n.id}</span>
+      </div>`);
+      walk(n.id, depth + 1);
+    }
+  }
+  walk("", 0);
+  const more = (p.nodes || []).length > rows.length ? `<div class="dim">${(p.nodes || []).length - rows.length} more</div>` : "";
+  return `<h2>Layers</h2><div class="list">${layerRows}</div>
+    <div class="row"><button id="add-layer" type="button">+ Layer</button></div>
+    <h2>Scene</h2>
+    <div class="list">${rows.join("") || "<span class='dim'>Empty scene. Use Add.</span>"}${more}</div>
+    <div class="row">
+      <button id="group" type="button" title="Group the shift-clicked shapes">Group</button>
+      <button id="nest" type="button" title="Put the other selected shapes inside the selected group">Nest</button>
+      <button id="ungroup" type="button">Ungroup</button>
+    </div>
+    <div class="row">
+      <button id="join-sel" type="button">Join</button>
+      <button id="union-sel" type="button">Union</button>
+      <button id="cut-sel" type="button">Cut</button>
+    </div>
+    <p class="dim">Shift-click to select more than one. Join welds shapes. Union and Cut are booleans. Groups export as one mesh.</p>`;
 }
 
 function props(p) {
@@ -542,33 +645,55 @@ function props(p) {
   const n = (p.nodes || []).find((x) => x.id === id);
   if (!n) return "<span class='dim'>Select an object.</span>";
   const t = n.transform || { pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] };
-  const prim = n.primitive ? `<h2>${n.primitive.kind}</h2>` + Object.entries(n.primitive.params || {}).map(([k, v]) =>
-    `<div class="row"><label>${k}</label><input data-param="${k}" value="${v}" /></div>`).join("") : "<span class='dim'>Converted to a mesh.</span>";
+  const layers = (p.layers || []).map((l) => `<option value="${l.id}"${l.id === n.layer ? " selected" : ""}>${l.name}</option>`).join("");
+  const groups = (p.nodes || []).filter((x) => x.type === "group" && x.id !== n.id)
+    .map((g) => `<option value="${g.id}"${g.id === n.parent ? " selected" : ""}>${g.name}</option>`).join("");
+  const prim = n.type === "group"
+    ? "<span class='dim'>Group. Children move with it. Combine them on Export.</span>"
+    : n.primitive ? `<h2>${n.primitive.kind}</h2>` + Object.entries(n.primitive.params || {}).map(([k, v]) =>
+      `<div class="row"><label>${k}</label><input data-param="${k}" value="${v}" /></div>`).join("") : "<span class='dim'>Converted to a mesh.</span>";
   return `<h2>${n.name}</h2>
     <div class="row"><label>X</label><input id="px" value="${t.pos[0]}" /></div>
     <div class="row"><label>Y</label><input id="py" value="${t.pos[1]}" /></div>
     <div class="row"><label>Z</label><input id="pz" value="${t.pos[2]}" /></div>
+    <div class="row"><label>Layer</label><select id="prop-layer">${layers}</select></div>
+    <div class="row"><label>Parent</label><select id="prop-parent"><option value="">Scene</option>${groups}</select></div>
     <div class="row"><span class="dim">${n.tris || 0} tris</span></div>
     ${prim}
-    <div class="row"><button id="apply-props" type="button">Apply</button>
-    <button id="to-col" type="button">Collision layer</button></div>`;
+    <div class="row"><button id="apply-props" type="button">Apply</button></div>`;
+}
+
+function hexOf(color) {
+  const c = color || [0.8, 0.8, 0.8];
+  const n = (v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0");
+  return `#${n(c[0])}${n(c[1])}${n(c[2])}`;
 }
 
 function materials(p) {
+  const current = (p.materials || []).find((m) => m.id === state.matId) || (p.materials || [])[0];
+  if (current) state.matId = current.id;
   const rows = (p.materials || []).map((m) => {
-    const c = m.base_color || [0.7, 0.7, 0.7];
-    const css = `rgb(${c.map((x) => Math.round(x * 255)).join(",")})`;
-    return `<div class="item" data-mat="${m.id}"><span class="swatch" style="background:${css}"></span><span class="nm">${m.name}</span></div>`;
+    const css = hexOf(m.base_color);
+    const on = current && m.id === current.id ? " on" : "";
+    return `<div class="item${on}" data-mat="${m.id}"><span class="swatch" style="background:${css}"></span><span class="nm">${m.name}</span></div>`;
   }).join("");
+  const tex = (current && current.textures) || {};
+  const thumb = (slot, label) => `<figure><img data-tex="${tex[slot] || ""}" alt="" ${tex[slot] ? "" : "hidden"} /><figcaption>${label}</figcaption></figure>`;
   return `<div class="list">${rows}</div>
-    <div class="row"><input id="mat-name" placeholder="Name" /><input id="mat-color" type="color" value="#cccccc" /></div>
-    <div class="row"><label>Rough</label><input id="rough" type="range" min="0" max="1" step="0.01" value="0.5" /></div>
-    <div class="row"><label>Metal</label><input id="metal" type="range" min="0" max="1" step="0.01" value="0" /></div>
-    <div class="row"><button id="mat-save" type="button">Save material</button><button id="mat-assign" type="button">Assign</button></div>
-    <h2>AI texture</h2>
+    <div class="row"><button id="mat-new" type="button">New</button></div>
+    <div class="row"><label>Name</label><input id="mat-name" value="${(current && current.name) || ""}" /></div>
+    <div class="row"><label>Color</label><input id="mat-color" type="color" value="${hexOf(current && current.base_color)}" /></div>
+    <div class="row"><label>Rough</label><input id="rough" type="range" min="0" max="1" step="0.01" value="${current ? current.roughness ?? 0.5 : 0.5}" /></div>
+    <div class="row"><label>Metal</label><input id="metal" type="range" min="0" max="1" step="0.01" value="${current ? current.metallic ?? 0 : 0}" /></div>
+    <div class="row"><button id="mat-save" type="button">Save</button><button id="mat-assign" type="button">Assign</button></div>
+    <h2>Textures</h2>
+    <div class="thumbs">${thumb("base_color", "Color")}${thumb("normal", "Normal")}${thumb("orm", "ORM")}</div>
+    <div class="row"><input id="tex-file" type="file" accept="image/*" /><button id="tex-import" type="button">Import</button></div>
     <div class="row"><input id="prompt" placeholder="worn painted metal, tileable" style="flex:1" /></div>
-    <div class="row"><button id="gen" type="button">Generate</button></div>
-    <div id="thumbs"></div>`;
+    <div class="row"><button id="gen" type="button">Generate maps</button></div>
+    <h2>UVs</h2>
+    <div class="row"><button id="uv-box" type="button">Box</button><button id="uv-planar" type="button">Planar</button><button id="uv-cyl" type="button">Cylinder</button></div>
+    <p class="dim">Send to UEFN builds MI_ on M_Forge_Master and imports these as T_ textures.</p>`;
 }
 
 function activity(p) {
@@ -580,15 +705,79 @@ function activity(p) {
 }
 
 function exportPanel() {
-  return `<div class="row"><label>Mode</label><select id="ex-mode"><option value="each">Each object</option><option value="group">Groups combined</option><option value="all">Everything</option></select></div>
+  return `<div class="row"><label>Mode</label><select id="ex-mode"><option value="each">Each shape</option><option value="group">Groups combined</option><option value="all">Everything</option></select></div>
     <div class="row"><button id="send" type="button">Send to UEFN</button></div>
-    <p class="dim">Writes SM_ meshes, T_ textures, and MI_ materials on M_Forge_Master. UEFN needs to be open.</p>`;
+    <p class="dim">Writes one SM_ per shape or group, imports T_ color, normal, and ORM, and creates an MI_ on M_Forge_Master for each material. The Collision layer is the simple collision. UEFN needs to be open.</p>`;
+}
+
+function pairBool(kind) {
+  const ids = objectIds();
+  if (ids.length < 2) {
+    setStatus("Shift-click two shapes first", true);
+    return;
+  }
+  op("boolean", { a: ids[0], b: ids[1], op: kind });
 }
 
 function bindPanel() {
   document.querySelectorAll("[data-id]").forEach((el) => {
-    el.onclick = () => op("select", { object: el.dataset.id });
+    el.onclick = (ev) => {
+      if (ev.target.closest(".icon-btn")) return;
+      rememberPick(el.dataset.id, ev.shiftKey);
+      op("select", { object: el.dataset.id });
+    };
   });
+  document.querySelectorAll("[data-eye]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const show = el.dataset.on !== "1";
+      if (el.dataset.eye === "layer") op("layer", { action: "set", id: el.dataset.layer, visible: show });
+      else op("edit", { id: el.dataset.node, visible: show });
+    };
+  });
+  document.querySelectorAll("[data-assign]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const ids = chosen();
+      if (!ids.length) { setStatus("Select something first", true); return; }
+      op("layer", { action: "assign", id: el.dataset.assign, ids });
+    };
+  });
+  const addLayer = document.getElementById("add-layer");
+  if (addLayer) addLayer.onclick = () => {
+    const name = prompt("Layer name", "Layer");
+    if (name) op("layer", { action: "add", name });
+  };
+  const group = document.getElementById("group");
+  if (group) group.onclick = () => {
+    const ids = objectIds();
+    if (!ids.length) { setStatus("Select shapes to group", true); return; }
+    op("group", { ids, name: "Group" });
+  };
+  const nest = document.getElementById("nest");
+  if (nest) nest.onclick = () => {
+    const ids = chosen();
+    const groupNode = ids.map(nodeById).find((n) => n && n.type === "group");
+    const rest = ids.filter((id) => !groupNode || id !== groupNode.id);
+    if (!groupNode || !rest.length) { setStatus("Shift-click shapes and a group, then Nest", true); return; }
+    op("group", { into: groupNode.id, ids: rest });
+  };
+  const ungroup = document.getElementById("ungroup");
+  if (ungroup) ungroup.onclick = () => {
+    const groupNode = chosen().map(nodeById).find((n) => n && n.type === "group");
+    if (!groupNode) { setStatus("Select a group", true); return; }
+    op("ungroup", { id: groupNode.id });
+  };
+  const joinSel = document.getElementById("join-sel");
+  if (joinSel) joinSel.onclick = () => {
+    const ids = objectIds();
+    if (ids.length < 2) { setStatus("Shift-click two shapes to join", true); return; }
+    op("join", { ids });
+  };
+  const unionSel = document.getElementById("union-sel");
+  if (unionSel) unionSel.onclick = () => pairBool("union");
+  const cutSel = document.getElementById("cut-sel");
+  if (cutSel) cutSel.onclick = () => pairBool("difference");
   document.querySelectorAll("[data-undo]").forEach((el) => {
     el.onclick = (ev) => {
       ev.stopPropagation();
@@ -600,41 +789,67 @@ function bindPanel() {
     const id = state.payload.selection.object;
     const params = {};
     document.querySelectorAll("[data-param]").forEach((input) => { params[input.dataset.param] = Number(input.value); });
+    const parent = document.getElementById("prop-parent").value;
     op("edit", {
       id,
       pos: [Number(document.getElementById("px").value), Number(document.getElementById("py").value), Number(document.getElementById("pz").value)],
+      layer: document.getElementById("prop-layer").value,
+      parent: parent || "",
       params,
     });
   };
-  const col = document.getElementById("to-col");
-  if (col) col.onclick = () => op("edit", { id: state.payload.selection.object, layer: "collision" });
   const save = document.getElementById("mat-save");
   if (save) save.onclick = () => {
     const hex = document.getElementById("mat-color").value;
     const rgb = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
     op("material_set", {
+      id: state.matId,
       name: document.getElementById("mat-name").value || "Material",
       base_color: rgb,
       roughness: Number(document.getElementById("rough").value),
       metallic: Number(document.getElementById("metal").value),
     });
   };
+  const matNew = document.getElementById("mat-new");
+  if (matNew) matNew.onclick = () => {
+    state.matId = "";
+    op("material_set", { name: "Material", base_color: [0.75, 0.75, 0.78, 1] });
+  };
   const assign = document.getElementById("mat-assign");
   if (assign) assign.onclick = () => {
-    const mat = document.querySelector(".item.on[data-mat]") || document.querySelector("[data-mat]");
-    if (mat) op("material_assign", { material: mat.dataset.mat });
+    if (state.matId) op("material_assign", { material: state.matId });
   };
   document.querySelectorAll("[data-mat]").forEach((el) => {
     el.onclick = () => {
-      document.querySelectorAll("[data-mat]").forEach((x) => x.classList.remove("on"));
-      el.classList.add("on");
+      state.matId = el.dataset.mat;
+      paintPanels();
     };
   });
+  document.querySelectorAll("[data-tex]").forEach(async (img) => {
+    if (!img.dataset.tex) return;
+    const res = await rpc("forge_texture", { name: state.name, file: img.dataset.tex });
+    if (res && res.ok && res.base64) img.src = `data:${res.mime || "image/png"};base64,${res.base64}`;
+  });
+  const importer = document.getElementById("tex-import");
+  if (importer) importer.onclick = () => {
+    const file = document.getElementById("tex-file").files[0];
+    if (!file) { setStatus("Choose an image first", true); return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      setStatus("Importing texture…");
+      await op("texture", { png_base64: String(reader.result || ""), material: state.matId, tileable: false, derive_maps: true });
+      setStatus("Texture imported. Send to UEFN to create the MI_.");
+    };
+    reader.readAsDataURL(file);
+  };
+  for (const [id, mode] of [["uv-box", "box"], ["uv-planar", "planar"], ["uv-cyl", "cylinder"]]) {
+    const button = document.getElementById(id);
+    if (button) button.onclick = () => op("uv", { mode });
+  }
   const gen = document.getElementById("gen");
   if (gen) gen.onclick = async () => {
     setStatus("Generating texture…");
-    const mat = (document.querySelector(".item.on[data-mat]") || {}).dataset;
-    await op("texture", { prompt: document.getElementById("prompt").value, material: mat && mat.mat, tileable: true, derive_maps: true });
+    await op("texture", { prompt: document.getElementById("prompt").value, material: state.matId, tileable: true, derive_maps: true });
     setStatus("Texture ready");
   };
   const check = document.getElementById("run-check");
@@ -654,16 +869,6 @@ function bindPanel() {
     if (!result || result.ok === false) setStatus((result && result.error) || "Send failed", true);
     else setStatus(`Imported ${result.count} mesh${result.count === 1 ? "" : "es"}`);
   };
-  const group = document.getElementById("group");
-  if (group) group.onclick = () => {
-    const id = state.payload.selection && state.payload.selection.object;
-    if (id) op("group", { ids: [id], name: "Group" });
-  };
-  const join = document.getElementById("join");
-  if (join) join.onclick = () => {
-    const ids = (state.payload.nodes || []).filter((n) => n.type === "object").map((n) => n.id);
-    op("join", { ids });
-  };
 }
 
 function wire() {
@@ -671,17 +876,21 @@ function wire() {
   for (const kind of PRIMS) {
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = kind.replace("_", " ");
-    b.onclick = () => op("add", { kind, name: kind });
+    b.textContent = kind.replaceAll("_", " ");
+    b.onclick = () => {
+      prims.hidden = true;
+      op("add", { kind, name: kind });
+    };
     prims.appendChild(b);
   }
+  document.getElementById("add-btn").onclick = () => { prims.hidden = !prims.hidden; };
   document.getElementById("mode").onclick = () => op("select", { mode: state.mode === "object" ? "edit" : "object" });
   for (const [id, mode] of [["sm-face", "face"], ["sm-edge", "edge"], ["sm-vert", "vert"]]) {
     document.getElementById(id).onclick = () => op("select", { select_mode: mode, mode: "edit" });
   }
-  document.getElementById("g-move").onclick = () => { state.gizmo = "translate"; gizmo.setMode("translate"); };
-  document.getElementById("g-rot").onclick = () => { state.gizmo = "rotate"; gizmo.setMode("rotate"); };
-  document.getElementById("g-scale").onclick = () => { state.gizmo = "scale"; gizmo.setMode("scale"); };
+  document.getElementById("g-move").onclick = () => { state.gizmo = "translate"; gizmo.setMode("translate"); syncChrome(); };
+  document.getElementById("g-rot").onclick = () => { state.gizmo = "rotate"; gizmo.setMode("rotate"); syncChrome(); };
+  document.getElementById("g-scale").onclick = () => { state.gizmo = "scale"; gizmo.setMode("scale"); syncChrome(); };
   document.getElementById("undo").onclick = () => op("undo", {});
   document.getElementById("redo").onclick = () => op("redo", {});
   document.getElementById("extrude").onclick = () => op("mesh_op", { op: "extrude", distance: 10 });
@@ -691,10 +900,12 @@ function wire() {
   document.getElementById("sub").onclick = () => op("mesh_op", { op: "subdivide" });
   document.getElementById("fill").onclick = () => op("mesh_op", { op: "fill" });
   document.getElementById("del").onclick = () => op("mesh_op", { op: "delete", kind: "face" });
-  document.getElementById("bool").onclick = () => {
-    const ids = (state.payload.nodes || []).filter((n) => n.type === "object").map((n) => n.id);
-    if (ids.length >= 2) op("boolean", { a: ids[0], b: ids[1], op: "difference" });
-    else setStatus("Boolean needs two objects", true);
+  document.getElementById("bool").onclick = () => pairBool("difference");
+  document.getElementById("union").onclick = () => pairBool("union");
+  document.getElementById("join").onclick = () => {
+    const ids = objectIds();
+    if (ids.length < 2) { setStatus("Shift-click two shapes to join", true); return; }
+    op("join", { ids });
   };
   document.getElementById("new").onclick = async () => {
     const name = prompt("Scene name", "Prop");
@@ -706,10 +917,20 @@ function wire() {
   document.getElementById("scene").onchange = (ev) => { state.name = ev.target.value; state.rev = -1; };
   document.getElementById("follow").onchange = (ev) => { state.follow = ev.target.checked; };
   const tabs = document.getElementById("tabs");
-  for (const [id, label] of [["outliner", "Outliner"], ["props", "Props"], ["materials", "Materials"], ["check", "Check"], ["activity", "Activity"], ["export", "Export"]]) {
+  const tabIcons = {
+    outliner: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M8 12h12M8 18h12M4 12h.01M4 18h.01"/></svg>`,
+    props: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="4" y="4" width="16" height="16"/><path d="M8 9h8M8 13h5"/></svg>`,
+    materials: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="7"/><path d="M12 5v14M5 12h14"/></svg>`,
+    check: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 13l4 4L19 7"/></svg>`,
+    activity: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18V6M4 18h16M8 14l3-4 3 2 4-6"/></svg>`,
+    export: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 20h14"/></svg>`,
+  };
+  for (const [id, label] of [["outliner", "Outliner"], ["props", "Object"], ["materials", "Material"], ["check", "Check"], ["activity", "Activity"], ["export", "UEFN"]]) {
     const b = document.createElement("button");
     b.type = "button";
-    b.textContent = label;
+    b.dataset.tab = id;
+    b.title = label;
+    b.innerHTML = tabIcons[id];
     b.onclick = () => { state.tab = id; paintPanels(); };
     tabs.appendChild(b);
   }
@@ -729,10 +950,11 @@ function wire() {
     else if (ev.ctrlKey && k === "b") op("mesh_op", { op: "bevel", width: 4 });
     else if (ev.ctrlKey && k === "r") op("mesh_op", { op: "loopcut" });
     else if (ev.ctrlKey && k === "j") {
-      const ids = (state.payload.nodes || []).filter((n) => n.type === "object").map((n) => n.id);
-      op("join", { ids });
+      const ids = objectIds();
+      if (ids.length >= 2) op("join", { ids });
     }
     gizmo.setMode(state.gizmo);
+    syncChrome();
   });
 }
 

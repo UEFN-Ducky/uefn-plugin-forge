@@ -130,9 +130,33 @@ def register_tools(api: Any) -> None:
         return _run(api, name, "delete", {"ids": ids or []})
 
     @api.tool(**host)
-    def forge_group(name: str, ids: list, object_name: str = "Group") -> dict:
-        """Parent objects under a new group. Groups can export as one mesh."""
-        return _run(api, name, "group", {"ids": ids, "name": object_name, "combine": True})
+    def forge_group(name: str, ids: list, object_name: str = "Group", into: str = "") -> dict:
+        """Parent objects under a new group, or nest them into an existing group id."""
+        body: dict = {"ids": ids, "name": object_name, "combine": True}
+        if into:
+            body["into"] = into
+        return _run(api, name, "group", body)
+
+    @api.tool(**host)
+    def forge_ungroup(name: str, id: str = "") -> dict:
+        """Lift a group's children up to its parent and remove the group."""
+        return _run(api, name, "ungroup", {"id": id})
+
+    @api.tool(**host)
+    def forge_layer(name: str, action: str = "add", id: str = "", object_name: str = "", ids: list | None = None, visible: bool | None = None, color: str = "") -> dict:
+        """Add a layer, hide or show it, or assign objects onto it. Collision exports as UCX."""
+        body: dict = {"action": action}
+        if id:
+            body["id"] = id
+        if object_name:
+            body["name"] = object_name
+        if ids:
+            body["ids"] = ids
+        if visible is not None:
+            body["visible"] = visible
+        if color:
+            body["color"] = color
+        return _run(api, name, "layer", body)
 
     @api.tool(**host)
     def forge_join(name: str, ids: list) -> dict:

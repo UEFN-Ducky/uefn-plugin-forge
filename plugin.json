@@ -1,9 +1,9 @@
 {
   "id": "forge",
   "kind": "plugin",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "label": "Ducky Forge",
-  "description": "Model props inside UEFN-Ducky. You and the agent edit the same scene: primitives, extrude, bevel, booleans, groups, materials, AI textures, check-and-fix, then send SM_ meshes and MI_ materials into UEFN. No Blender.",
+  "description": "Model props inside UEFN-Ducky with a Blender-style viewport: icon tools, layers, nested groups, join and booleans, materials and textures that Send turns into SM_ meshes and MI_ materials.",
   "min_app_version": "1.0.0",
   "default_enabled": true,
   "secret_keys": [],

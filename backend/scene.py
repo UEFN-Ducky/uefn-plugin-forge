@@ -633,7 +633,7 @@ def _op_edit(scene: Scene, p: dict) -> dict[str, Any]:
         raise ValueError("object not found")
     for key in ("name", "parent", "layer", "visible", "locked", "material"):
         if key in p:
-            node[key] = p[key]
+            node[key] = p[key] or None if key == "parent" else p[key]
     if p.get("transform"):
         node["transform"] = {
             "pos": list(p["transform"].get("pos") or node["transform"]["pos"]),
@@ -690,7 +690,15 @@ def _op_delete(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_group(scene: Scene, p: dict) -> dict[str, Any]:
-    ids = list(p.get("ids") or [])
+    ids = [str(i) for i in (p.get("ids") or []) if i]
+    into = p.get("into")
+    if into:
+        for nid in ids:
+            node = scene.node(nid)
+            if node and node["id"] != into:
+                node["parent"] = into
+        scene.touch_geom()
+        return {"summary": "Nest", "ids": ids}
     gid = _nid("g")
     scene.data["nodes"].append({
         "id": gid, "type": "group", "name": str(p.get("name") or "Group"),
@@ -699,10 +707,59 @@ def _op_group(scene: Scene, p: dict) -> dict[str, Any]:
         "combine": bool(p.get("combine", True)),
     })
     for nid in ids:
-        node = scene.node(str(nid))
-        if node:
+        node = scene.node(nid)
+        if node and node["id"] != gid:
             node["parent"] = gid
+    scene.data["selection"]["object"] = gid
+    scene.touch_geom()
     return {"summary": "Group", "ids": [gid], "id": gid}
+
+
+def _op_ungroup(scene: Scene, p: dict) -> dict[str, Any]:
+    gid = str(p.get("id") or scene.data["selection"].get("object") or "")
+    group = scene.node(gid)
+    if not group or group.get("type") != "group":
+        raise ValueError("Select a group to ungroup")
+    parent = group.get("parent")
+    for node in scene.data["nodes"]:
+        if node.get("parent") == gid:
+            node["parent"] = parent
+    scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] != gid]
+    if scene.data["selection"].get("object") == gid:
+        scene.data["selection"]["object"] = parent
+    scene.touch_geom()
+    return {"summary": "Ungroup", "ids": [gid]}
+
+
+def _op_layer(scene: Scene, p: dict) -> dict[str, Any]:
+    layers = scene.data.setdefault("layers", [])
+    action = str(p.get("action") or "set")
+    if action == "add":
+        lid = _nid("l")
+        layers.append({
+            "id": lid, "name": str(p.get("name") or "Layer"),
+            "visible": True, "locked": False, "color": str(p.get("color") or "#6c8cff"),
+        })
+        return {"summary": "Add layer", "ids": [lid], "id": lid}
+    if action == "assign":
+        lid = str(p.get("id") or p.get("layer") or "default")
+        ids = [str(i) for i in (p.get("ids") or [scene.data["selection"].get("object")]) if i]
+        for nid in ids:
+            node = scene.node(nid)
+            if node:
+                node["layer"] = lid
+        scene.touch_geom()
+        return {"summary": "Assign layer", "ids": ids}
+    lid = str(p.get("id") or "")
+    layer = next((item for item in layers if item.get("id") == lid), None)
+    if layer is None:
+        raise ValueError("layer not found")
+    for key in ("name", "visible", "locked", "color"):
+        if key in p:
+            layer[key] = p[key]
+    if "visible" in p:
+        scene.touch_geom()
+    return {"summary": f"Layer {layer.get('name')}", "ids": [lid]}
 
 
 def _op_select(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1036,16 +1093,24 @@ def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_texture(scene: Scene, p: dict) -> dict[str, Any]:
+    import base64
+    from io import BytesIO
+
     from PIL import Image
 
     from .textures import generate_image, save_set
 
     mid = str(p.get("material") or "")
-    mat = next((m for m in scene.data["materials"] if m["id"] == mid or m["name"] == p.get("name")), None)
+    mat = next((m for m in scene.data["materials"] if m["id"] == mid or (p.get("name") and m["name"] == p.get("name"))), None)
     if mat is None:
         mat = _mat(_nid("m"), str(p.get("name") or "Texture"))
         scene.data["materials"].append(mat)
-    if p.get("path"):
+    if p.get("png_base64"):
+        raw = str(p["png_base64"])
+        if "," in raw[:80]:
+            raw = raw.split(",", 1)[1]
+        color = Image.open(BytesIO(base64.b64decode(raw))).convert("RGB")
+    elif p.get("path"):
         color = Image.open(p["path"]).convert("RGB")
     else:
         color = generate_image(str(p.get("prompt") or ""))
@@ -1072,6 +1137,8 @@ _OPS = {
     "duplicate": _op_duplicate,
     "delete": _op_delete,
     "group": _op_group,
+    "ungroup": _op_ungroup,
+    "layer": _op_layer,
     "select": _op_select,
     "move": _op_move,
     "mesh_op": _op_mesh,

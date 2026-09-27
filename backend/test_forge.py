@@ -92,6 +92,32 @@ def test_kernel_and_scene() -> None:
     assert by_id[twin["instances"][1][0]] == shared
     assert by_id[twin["instances"][0][0]] != shared
 
+    dispatch("", "scene_new", {"name": "Nest"}, actor="user")
+    box_a = dispatch("Nest", "add", {"kind": "box", "name": "A"}, actor="user")["id"]
+    box_b = dispatch("Nest", "add", {"kind": "box", "name": "B", "pos": [80, 0, 0]}, actor="user")["id"]
+    gid = dispatch("Nest", "group", {"ids": [box_a, box_b], "name": "Body"}, actor="user")["id"]
+    nested = dispatch("Nest", "scene_payload", {})
+    parents = {row[0]: row[2] for row in nested["instances"]}
+    assert parents[box_a] == gid and parents[box_b] == gid
+    lid = dispatch("Nest", "layer", {"action": "add", "name": "Glass"}, actor="user")["id"]
+    dispatch("Nest", "layer", {"action": "assign", "id": lid, "ids": [box_a]}, actor="user")
+    dispatch("Nest", "layer", {"action": "set", "id": lid, "visible": False}, actor="user")
+    hidden = dispatch("Nest", "scene_payload", {})
+    assert any(layer["id"] == lid and layer["visible"] is False for layer in hidden["layers"])
+    assert any(node["id"] == box_a and node["layer"] == lid for node in hidden["nodes"])
+    dispatch("Nest", "ungroup", {"id": gid}, actor="user")
+    flat = {row[0]: row[2] for row in dispatch("Nest", "scene_payload", {})["instances"]}
+    assert flat[box_a] in ("", None)
+    dispatch("Nest", "texture", {
+        "png_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "name": "Swatch", "tileable": False, "derive_maps": True,
+    }, actor="user")
+    tex = dispatch("Nest", "scene_get", {})
+    swatch = next(m for m in tex["materials"] if m["name"] == "Swatch")
+    assert swatch["textures"]["base_color"] and swatch["textures"]["normal"] and swatch["textures"]["orm"]
+    dispatch("Nest", "join", {"ids": [box_a, box_b]}, actor="user")
+    assert len([n for n in dispatch("Nest", "scene_payload", {})["nodes"] if n.get("type") == "object"]) == 1
+
     dispatch("", "scene_new", {"name": "Crowd"}, actor="user")
     dispatch("Crowd", "add", {"kind": "box", "count": 20000}, actor="user")
     from backend.scene import load as load_scene
