@@ -1,6 +1,9 @@
 import * as THREE from "three";
+import { version } from "../../plugin.json";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+
+document.getElementById("forge-version").textContent = `Forge ${version}`;
 
 const CHANNEL = "uefn-plugin-ui";
 const PRIMS = ["box", "rounded_box", "plane", "sphere", "cylinder", "cone", "torus", "capsule", "wedge", "stairs", "arch"];
@@ -14,7 +17,7 @@ function call(method, params) {
     }, 120000);
     function onMsg(ev) {
       const d = ev.data;
-      if (!d || d.channel !== CHANNEL || d.id !== id) return;
+      if (ev.source !== parent || !d || d.channel !== CHANNEL || d.id !== id) return;
       clearTimeout(timer);
       window.removeEventListener("message", onMsg);
       if (d.ok) resolve(d.result);
@@ -37,7 +40,13 @@ const state = {
   mode: "object",
   selectMode: "face",
   gizmo: "translate",
-  tab: "outliner",
+  tab: "props",
+  collapsed: new Set(),
+  search: "",
+  pending: 0,
+  epoch: 0,
+  nodeMap: new Map(),
+  locked: new Set(),
   follow: false,
   dragging: false,
   flying: false,
@@ -51,13 +60,14 @@ const state = {
   editId: "",
   flashIds: [],
   picked: new Set(),
+  tinted: new Set(),
   matId: "",
 };
 
 const CHUNK = 16384;
 const WHITE = new THREE.Color(1, 1, 1);
-const TINT = new THREE.Color(0.65, 0.78, 1);
-const FLASH = new THREE.Color(0.45, 0.6, 1);
+const TINT = new THREE.Color();
+const FLASH = new THREE.Color();
 const _pos = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 const _scl = new THREE.Vector3();
@@ -74,7 +84,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(1);
 host.appendChild(renderer.domElement);
 const scene3 = new THREE.Scene();
-scene3.background = new THREE.Color(0x141418);
+scene3.background = new THREE.Color();
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200000);
 camera.up.set(0, 0, 1);
 camera.position.set(1200, -1600, 900);
@@ -84,8 +94,8 @@ orbit.mouseButtons.LEFT = -1;
 orbit.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
 orbit.mouseButtons.RIGHT = -1;
 orbit.update();
-scene3.add(new THREE.AmbientLight(0xffffff, 0.55));
-const sun = new THREE.DirectionalLight(0xffffff, 1.1);
+scene3.add(new THREE.AmbientLight(WHITE, 0.55));
+const sun = new THREE.DirectionalLight(WHITE, 1.1);
 sun.position.set(400, -800, 1200);
 scene3.add(sun);
 function fortniteGrid(cell, tiles, color, opacity) {
@@ -97,8 +107,9 @@ function fortniteGrid(cell, tiles, color, opacity) {
   }
   return g;
 }
-scene3.add(fortniteGrid(128, 192, 0x2a3140, 0.35));
-scene3.add(fortniteGrid(512, 48, 0x5d7ea3, 0.9));
+const minorGrid = fortniteGrid(128, 192, WHITE, 0.35);
+const majorGrid = fortniteGrid(512, 48, WHITE, 0.9);
+scene3.add(minorGrid, majorGrid);
 const content = new THREE.Group();
 scene3.add(content);
 const gizmo = new TransformControls(camera, renderer.domElement);
@@ -119,10 +130,10 @@ gizmo.addEventListener("dragging-changed", (ev) => {
     state.dragStart = pivot.matrix.clone();
     for (const slot of slots) slot.mesh.frustumCulled = false;
   } else {
-    for (const slot of state.dragSlots || []) {
-      slot.mesh.frustumCulled = true;
-      slot.mesh.computeBoundingBox();
-      slot.mesh.computeBoundingSphere();
+    for (const mesh of new Set((state.dragSlots || []).map(slot => slot.mesh))) {
+      mesh.frustumCulled = true;
+      mesh.computeBoundingBox();
+      mesh.computeBoundingSphere();
     }
     commitXform();
   }
@@ -165,11 +176,11 @@ function composeRow(row, target) {
     THREE.MathUtils.degToRad(row[6] || 0),
     THREE.MathUtils.degToRad(row[7] || 0),
     THREE.MathUtils.degToRad(row[8] || 0),
-    "XYZ",
+    "ZYX",
   );
   _pos.set(row[3] || 0, row[4] || 0, row[5] || 0);
   _quat.setFromEuler(_euler);
-  _scl.set(row[9] || 1, row[10] || 1, row[11] || 1);
+  _scl.set(row[9] ?? 1, row[10] ?? 1, row[11] ?? 1);
   return target.compose(_pos, _quat, _scl);
 }
 
@@ -182,7 +193,8 @@ function b64buf(text) {
 
 function geometryFor(proto) {
   let geo = geoCache.get(proto.id);
-  if (geo) return geo;
+  if (geo && geo.userData.source.pb === proto.pb && geo.userData.source.ib === proto.ib && geo.userData.source.fb === proto.fb && geo.userData.source.smooth === proto.smooth) return geo;
+  if (geo) geo.dispose();
   geo = new THREE.BufferGeometry();
   if (proto.pb) {
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(b64buf(proto.pb)), 3));
@@ -195,6 +207,7 @@ function geometryFor(proto) {
     geo.setIndex(proto.indices);
     geo.userData.faceIds = proto.face_ids || [];
   }
+  geo.userData.source = proto;
   geoCache.set(proto.id, geo);
   return geo;
 }
@@ -206,20 +219,21 @@ function materialFor(matId, materials, smooth) {
   if (!mat) {
     mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: !smooth });
     matCache.set(key, mat);
-    return mat;
   }
   mat.color.copy(color);
+  const authored = (materials || []).find(m => m.id === matId);
+  mat.roughness = authored?.roughness ?? 0.5;
+  mat.metalness = authored?.metallic ?? 0;
   return mat;
 }
 
 function clearView() {
   gizmo.detach();
-  for (const mesh of state.batches) mesh.removeFromParent();
+  for (const mesh of state.batches) { mesh.removeFromParent(); mesh.dispose(); }
   state.batches = [];
   state.slots = new Map();
   state.parentOf = new Map();
   if (state.pick) {
-    if (state.pick.material && state.pick.material !== matCache.get(state.pick.userData.matId)) state.pick.material.dispose();
     state.pick.removeFromParent();
     state.pick = null;
   }
@@ -231,17 +245,32 @@ function clearView() {
   }
 }
 
+function tintSlot(id, color) {
+  const slots = state.slots.get(id);
+  if (!slots) return;
+  for (const slot of slots) {
+    slot.mesh.setColorAt(slot.index, color);
+    if (slot.mesh.instanceColor) slot.mesh.instanceColor.needsUpdate = true;
+  }
+}
+
+function markSelection(force) {
+  const want = new Set(state.mode === "object" ? state.picked : []);
+  const sel = state.payload && state.payload.selection && state.payload.selection.object;
+  if (sel && state.mode === "object") want.add(sel);
+  const prev = force ? new Set() : state.tinted;
+  for (const id of prev) if (!want.has(id)) tintSlot(id, WHITE);
+  for (const id of want) if (force || !prev.has(id)) tintSlot(id, TINT);
+  state.tinted = want;
+}
+
 function paintColors() {
-  const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
-  const flash = new Set(state.flashIds || []);
   for (const batch of state.batches) {
-    const ids = batch.userData.ids;
-    for (let i = 0; i < ids.length; i++) {
-      const id = ids[i];
-      batch.setColorAt(i, flash.has(id) ? FLASH : id === sel && state.mode === "object" ? TINT : WHITE);
-    }
+    for (let i = 0; i < batch.count; i++) batch.setColorAt(i, WHITE);
     if (batch.instanceColor) batch.instanceColor.needsUpdate = true;
   }
+  markSelection(true);
+  for (const id of state.flashIds || []) tintSlot(id, FLASH);
 }
 
 function paintFaceLines() {
@@ -252,7 +281,7 @@ function paintFaceLines() {
     state.faceLines = null;
   }
   const picked = new Set((state.payload && state.payload.selection && state.payload.selection.faces) || []);
-  if (!state.pick || !picked.size || state.mode !== "edit") return;
+  if (!state.pick || state.mode !== "edit") return;
   const geo = state.pick.geometry;
   const pos = geo.attributes.position.array;
   const index = geo.index.array;
@@ -267,10 +296,20 @@ function paintFaceLines() {
       pts.push(pos[i0], pos[i0 + 1], pos[i0 + 2], pos[i1], pos[i1 + 1], pos[i1 + 2]);
     }
   }
+  const selection = state.payload.selection || {};
+  for (const [a,b] of selection.edges || []) {
+    if (a < 0 || b < 0 || a*3 >= pos.length || b*3 >= pos.length) continue;
+    pts.push(pos[a*3], pos[a*3+1], pos[a*3+2], pos[b*3], pos[b*3+1], pos[b*3+2]);
+  }
+  for (const id of selection.verts || []) {
+    if (id < 0 || id*3 >= pos.length) continue;
+    const point = [pos[id*3],pos[id*3+1],pos[id*3+2]];
+    for (let axis=0;axis<3;axis++) { const a=point.slice(), b=point.slice(); a[axis]-=6; b[axis]+=6; pts.push(...a,...b); }
+  }
   if (!pts.length) return;
   const lines = new THREE.BufferGeometry();
   lines.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
-  state.faceLines = new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ color: 0x6c8cff }));
+  state.faceLines = new THREE.LineSegments(lines, new THREE.LineBasicMaterial({ color: TINT }));
   state.faceLines.matrix.copy(state.pick.matrix);
   state.faceLines.matrixAutoUpdate = false;
   content.add(state.faceLines);
@@ -294,14 +333,30 @@ function buildBatches() {
     }
   }
   const byId = new Map((payload.nodes || []).map((n) => [n.id, n]));
+  state.nodeMap = byId;
+  state.locked = new Set();
+  const lockedLayers = new Set((payload.layers || []).filter(l => l.locked).map(l => l.id));
+  for (const n of byId.values()) {
+    let current = n;
+    const seen = new Set();
+    while (current && !seen.has(current.id)) {
+      seen.add(current.id);
+      if (current.locked || lockedLayers.has(current.layer)) { state.locked.add(n.id); break; }
+      current = byId.get(current.parent);
+    }
+  }
   const worldCache = new Map();
+  const visiting = new Set();
   function world(id) {
     if (!id || !byId.has(id)) return _ident;
     if (worldCache.has(id)) return worldCache.get(id);
+    if (visiting.has(id)) throw new Error("Scene hierarchy contains a cycle");
+    visiting.add(id);
     const n = byId.get(id);
     const t = n.transform || { pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] };
     const local = composeRow([0, "", "", t.pos[0], t.pos[1], t.pos[2], t.rot[0], t.rot[1], t.rot[2], t.scale[0], t.scale[1], t.scale[2]], new THREE.Matrix4());
     const m = new THREE.Matrix4().multiplyMatrices(world(n.parent), local);
+    visiting.delete(id);
     worldCache.set(id, m);
     return m;
   }
@@ -372,9 +427,23 @@ function buildBatches() {
       state.parentOf.set(pulled[0], world(pulled[2]));
     }
   }
+  // Groups point at their descendants' existing instance slots; no mesh copies.
+  for (const [id, slots] of [...state.slots]) {
+    let parent = byId.get(id)?.parent;
+    const seen = new Set();
+    while (parent && !seen.has(parent)) {
+      seen.add(parent);
+      if (!state.slots.has(parent)) state.slots.set(parent, []);
+      state.slots.get(parent).push(...slots);
+      parent = byId.get(parent)?.parent;
+    }
+  }
+  state.world = worldCache;
+  for (const n of byId.values()) world(n.id);
   state.batchEdit = state.mode === "edit";
   state.editId = sel;
-  paintColors();
+  state.tinted = new Set();
+  markSelection(true);
   paintFaceLines();
 }
 
@@ -404,7 +473,8 @@ function attachGizmo() {
     gizmo.detach();
     return;
   }
-  slots[0].mesh.getMatrixAt(slots[0].index, _m);
+  if (state.locked.has(sel)) { gizmo.detach(); return; }
+  _m.copy(state.world.get(sel));
   _m.decompose(pivot.position, pivot.quaternion, pivot.scale);
   pivot.updateMatrix();
   pivot.userData.id = sel;
@@ -417,22 +487,27 @@ function syncSelection() {
   const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
   const editing = state.mode === "edit";
   if (editing !== state.batchEdit || (editing && sel !== state.editId)) buildBatches();
-  else {
-    paintColors();
-    paintFaceLines();
-  }
+  else paintFaceLines();
+  if (sel && !state.picked.has(sel)) state.picked = new Set([sel]);
+  if (!sel) state.picked.clear();
+  markSelection(false);
   attachGizmo();
-  paintPanels();
+  paintTree();
+  paintPanels(false);
   syncChrome();
 }
 
 function rebuild(payload) {
   state.payload = payload;
+  const selected = payload.selection?.object;
+  if (selected && !state.picked.has(selected)) state.picked = new Set([selected]);
+  if (!selected) state.picked.clear();
   state.mode = payload.mode || "object";
   state.selectMode = payload.select_mode || "face";
   state.geom = payload.geom || 0;
   state.flashIds = (payload.flash && payload.flash.ids) || [];
   buildBatches();
+  markSelection(true);
   attachGizmo();
   if (state.flashIds.length) {
     flashUntil = performance.now() + 700;
@@ -454,11 +529,11 @@ async function commitXform() {
   const id = pivot.userData.id;
   const slots = state.dragSlots;
   if (!id || !slots || !slots.length || !state.dragBase) return;
-  slots[0].mesh.getMatrixAt(slots[0].index, _m);
-  const parent = state.parentOf.get(id);
+  _m.copy(pivot.matrix);
+  const parent = state.world.get(nodeById(id)?.parent);
   if (parent && parent !== _ident) _m.premultiply(_inv.copy(parent).invert());
   _m.decompose(_pos, _quat, _scl);
-  _euler.setFromQuaternion(_quat, "XYZ");
+  _euler.setFromQuaternion(_quat, "ZYX");
   state.dragBase = null;
   await op("edit", {
     id,
@@ -477,6 +552,7 @@ const _worldUp = new THREE.Vector3(0, 0, 1);
 
 function stepFly(dt) {
   if (!state.flying) return;
+  camera.updateMatrixWorld(true);
   camera.getWorldDirection(_fwd);
   _right.setFromMatrixColumn(camera.matrixWorld, 0);
   let x = 0, y = 0, z = 0;
@@ -508,22 +584,31 @@ function look(dx, dy) {
   camera.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(_right, applied));
 }
 
-function beginFly() {
+let rightDown = false;
+
+function beginFly(ev) {
   if (state.dragging || state.flying) return;
   state.flying = true;
+  rightDown = true;
   orbit.enabled = false;
   orbit.enableZoom = false;
   camera.getWorldDirection(_fwd);
   flyPitch = Math.asin(THREE.MathUtils.clamp(_fwd.z, -1, 1));
-  renderer.domElement.requestPointerLock?.();
+  renderer.domElement.style.cursor = "none";
+  try { renderer.domElement.setPointerCapture(ev.pointerId); } catch { /* already captured */ }
 }
 
-function endFly() {
+function endFly(ev) {
+  rightDown = false;
+  held.clear();
   if (!state.flying) return;
   state.flying = false;
   orbit.enableZoom = true;
   orbit.enabled = !state.dragging;
-  if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+  renderer.domElement.style.cursor = "";
+  if (ev && renderer.domElement.hasPointerCapture?.(ev.pointerId)) {
+    try { renderer.domElement.releasePointerCapture(ev.pointerId); } catch { /* released */ }
+  }
 }
 
 let lastFrame = performance.now();
@@ -543,14 +628,20 @@ function animate() {
 animate();
 
 renderer.domElement.addEventListener("contextmenu", (ev) => ev.preventDefault());
-document.addEventListener("mousemove", (ev) => {
-  if (state.flying) look(ev.movementX, ev.movementY);
+renderer.domElement.addEventListener("pointermove", (ev) => {
+  if (state.flying && (ev.buttons & 2) === 0) { endFly(ev); return; }
+  if (!state.flying) return;
+  const dx = ev.movementX || 0;
+  const dy = ev.movementY || 0;
+  if (!dx && !dy) return;
+  look(dx, dy);
 });
-document.addEventListener("pointerup", (ev) => {
-  if (ev.button === 2) endFly();
+renderer.domElement.addEventListener("pointerup", (ev) => {
+  if (ev.button === 2) endFly(ev);
 });
-document.addEventListener("pointerlockchange", () => {
-  if (state.flying && document.pointerLockElement !== renderer.domElement) endFly();
+renderer.domElement.addEventListener("pointercancel", (ev) => endFly(ev));
+renderer.domElement.addEventListener("lostpointercapture", (ev) => {
+  if (state.flying) endFly(ev);
 });
 renderer.domElement.addEventListener("wheel", (ev) => {
   if (!state.flying) return;
@@ -563,38 +654,151 @@ renderer.domElement.addEventListener("wheel", (ev) => {
 
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
+const _pickRay = new THREE.Ray();
+const _pickHit = new THREE.Vector3();
+const _pickInv = new THREE.Matrix4();
+
+function pickBounds(ray) {
+  let best = null;
+  let bestD = Infinity;
+  for (const batch of state.batches) {
+    const geo = batch.geometry;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    const box = geo.boundingBox;
+    const ids = batch.userData.ids;
+    if (batch.boundingBox && !ray.intersectsBox(batch.boundingBox)) continue;
+    for (let i = 0; i < ids.length; i++) {
+      if (state.locked.has(ids[i])) continue;
+      batch.getMatrixAt(i, _m);
+      if (Math.abs(_m.determinant()) < 1e-12) continue;
+      _pickInv.copy(_m).invert();
+      _pickRay.copy(ray).applyMatrix4(_pickInv);
+      if (!_pickRay.intersectBox(box, _pickHit)) continue;
+      _pickHit.applyMatrix4(_m);
+      const dist = _pickHit.distanceToSquared(ray.origin);
+      if (dist < bestD) {
+        bestD = dist;
+        best = ids[i];
+      }
+    }
+  }
+  return best;
+}
+
+function choose(id, additive, faces, elements) {
+  if (!state.payload) return;
+  if ((faces || elements) && state.mode === "edit") {
+    const previous = state.payload.selection?.faces || [];
+    if (faces) faces = additive ? [...new Set([...previous, ...faces])] : faces;
+    state.picked = new Set([id]);
+  } else rememberPick(id, additive);
+  const primary = id && state.picked.has(id) ? id : ([...state.picked].pop() || null);
+  const oldSelection = state.payload.selection;
+  const old = oldSelection?.object;
+  state.payload.selection = { object: primary, verts: [], edges: [], faces: faces || (old === primary ? state.payload.selection?.faces || [] : []) };
+  if (elements) for (const [key, values] of Object.entries(elements)) {
+    state.payload.selection[key] = additive ? [...new Map([...(oldSelection?.[key] || []), ...values].map(v => [JSON.stringify(v), v])).values()] : values;
+  }
+  syncSelection();
+  op("select", { ...state.payload.selection });
+}
+
 renderer.domElement.addEventListener("pointerdown", (ev) => {
-  if (ev.button === 2) { beginFly(); return; }
+  if (ev.button === 2) { beginFly(ev); return; }
   if (ev.button !== 0 || state.dragging || state.flying || gizmo.axis) return;
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
-  const hits = raycaster.intersectObjects(state.batches.concat(state.pick ? [state.pick] : []), false);
-  if (!hits.length) return;
-  const hit = hits[0];
-  const id = hit.instanceId != null && hit.object.userData.ids
-    ? hit.object.userData.ids[hit.instanceId]
-    : hit.object.userData.id;
-  const face = hit.instanceId == null ? (hit.object.userData.faceIds || [])[hit.faceIndex] : undefined;
-  rememberPick(id, ev.shiftKey);
-  op("select", { object: id, faces: state.mode === "edit" && state.selectMode === "face" && face != null ? [face] : undefined });
+  const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+  if (state.mode === "edit" && state.pick) {
+    const hits = raycaster.intersectObject(state.pick, false);
+    if (!hits.length) { choose(null, false); return; }
+    const face = (state.pick.userData.faceIds || [])[hits[0].faceIndex];
+    if (face == null) return;
+    if (state.selectMode === "face") choose(state.pick.userData.id, additive, [face]);
+    else {
+      const geo = state.pick.geometry;
+      const point = state.pick.worldToLocal(hits[0].point.clone());
+      const edges = new Map(), verts = new Set();
+      for (let i = 0; i < geo.userData.faceIds.length; i++) {
+        if (geo.userData.faceIds[i] !== face) continue;
+        const tri = [geo.index.getX(i*3), geo.index.getX(i*3+1), geo.index.getX(i*3+2)];
+        for (let j = 0; j < 3; j++) {
+          verts.add(tri[j]);
+          const edge = [tri[j], tri[(j+1)%3]].sort((a,b) => a-b);
+          const key = edge.join(",");
+          const entry = edges.get(key);
+          edges.set(key, { edge, count: (entry?.count || 0) + 1 });
+        }
+      }
+      const vertex = id => new THREE.Vector3().fromBufferAttribute(geo.attributes.position, id);
+      if (state.selectMode === "vert") {
+        const id = [...verts].sort((a,b) => vertex(a).distanceToSquared(point) - vertex(b).distanceToSquared(point))[0];
+        choose(state.pick.userData.id, additive, undefined, { verts: [id] });
+      } else {
+        const candidates = [...edges.values()].filter(e => e.count === 1);
+        const distance = e => new THREE.Line3(vertex(e.edge[0]), vertex(e.edge[1])).closestPointToPoint(point, true, new THREE.Vector3()).distanceToSquared(point);
+        candidates.sort((a,b) => distance(a)-distance(b));
+        if (candidates.length) choose(state.pick.userData.id, additive, undefined, { edges: [candidates[0].edge] });
+      }
+    }
+    return;
+  }
+  choose(pickBounds(raycaster.ray), additive);
 });
 
-async function op(name, params) {
-  try {
-    setStatus("");
-    const result = await rpc("forge_call", { op: name, name: state.name, params: params || {}, actor: "user" });
-    if (result && result.ok === false) {
-      setStatus(result.error || "Failed", true);
+let operations = Promise.resolve();
+function op(name, params) {
+  const sceneName = state.name;
+  const epoch = ++state.epoch;
+  state.pending++;
+  const run = async () => {
+    try {
+      if (name !== "select") setStatus("Working…");
+      const result = await rpc("forge_call", { op: name, name: sceneName, params: params || {}, actor: "user" });
+      if (result?.ok === false) throw new Error(result.error || "Operation failed");
+      if (sceneName !== state.name) return result;
+      if (name === "select") {
+        if (epoch === state.epoch && state.payload) {
+          state.payload.selection = result.selection;
+          state.mode = result.mode || state.mode;
+          state.selectMode = result.select_mode || state.selectMode;
+          state.rev = result.rev;
+          syncSelection();
+        }
+      } else {
+        if (result.material?.id) state.matId = result.material.id;
+        state.rev = -1;
+        if (name === "scene_open" || name === "scene_import_blend") resetScene();
+        setStatus(result.summary || "Ready");
+      }
       return result;
-    }
-    state.rev = -1;
-    return result;
-  } catch (err) {
-    setStatus(err.message || String(err), true);
-    return { ok: false, error: err.message || String(err) };
-  }
+    } catch (err) {
+      setStatus(err.message || String(err), true);
+      state.rev = -1;
+      return { ok: false, error: err.message || String(err) };
+    } finally { state.pending--; }
+  };
+  const task = operations.then(run);
+  operations = task.catch(() => {});
+  return task;
+}
+
+function resetScene() {
+  state.epoch++;
+  state.rev = -1;
+  state.geom = -1;
+  state.payload = null;
+  state.picked.clear();
+  state.collapsed.clear();
+  state.search = "";
+  endFly();
+  clearView();
+  for (const geo of geoCache.values()) geo.dispose();
+  geoCache.clear();
+  for (const mat of matCache.values()) mat.dispose();
+  matCache.clear();
 }
 
 const LOAD_SCENE = [
@@ -670,7 +874,7 @@ function hideLoading() {
 
 function setStatus(text, isErr) {
   const el = document.getElementById("status");
-  el.textContent = text || "";
+  document.getElementById("status-text").textContent = text || "Ready";
   el.className = "status" + (isErr ? " err" : "");
 }
 
@@ -694,12 +898,17 @@ async function refreshScenes(select) {
 }
 
 async function poll() {
-  if (!state.name || state.dragging || state.polling) return;
+  if (!state.name || state.dragging || state.polling || state.pending) return;
+  const sceneName = state.name;
+  const epoch = state.epoch;
+  const stale = () => state.name !== sceneName || epoch !== state.epoch || state.pending;
   state.polling = true;
   try {
     const info = await rpc("forge_call", { op: "scene_get", name: state.name, params: { brief: true }, actor: "user" });
-    if (!info || info.ok === false || info.rev === state.rev) return;
-    if (!state.payload || info.geom !== state.geom) {
+    if (stale()) return;
+    if (!info || info.ok === false) throw new Error(info?.error || "Could not read scene");
+    if (info.rev === state.rev && state.payload?.name === sceneName) return;
+    if (!state.payload || state.payload.name !== sceneName || info.geom !== state.geom) {
       const switching = !state.payload || state.payload.name !== state.name;
       if (switching) {
         const overlay = document.getElementById("loading");
@@ -707,22 +916,21 @@ async function poll() {
         const objects = Number(info.objects) || 0;
         const meshes = Number(info.prototypes) || 0;
         loadStep("pack", objects
-          ? `Packing ${objects.toLocaleString()} objects from ${meshes.toLocaleString()} unique meshes. This is the long step: every mesh is copied before the view can draw.`
+          ? `Packing ${objects.toLocaleString()} objects from ${meshes.toLocaleString()} unique meshes. This is the long step: each unique mesh is packed once and shared by its instances.`
           : "Packing the meshes for this scene.");
         await frame();
       }
       const payload = await rpc("forge_call", { op: "scene_payload", name: state.name, params: {}, actor: "user" });
-      if (!payload || payload.ok === false) {
-        if (switching) hideLoading();
-        return;
-      }
+      if (stale()) return;
+      if (!payload || payload.ok === false) throw new Error(payload?.error || "Could not load scene");
       if (switching) {
         await prepareGeometry(payload);
         const pieces = (payload.instances || []).length;
         const rows = (payload.nodes || []).length;
-        loadStep("place", `Placing ${pieces.toLocaleString()} pieces and listing ${rows.toLocaleString()} outliner rows. The panel stays here until the last piece is in, which is why a stadium pauses at the end.`);
+        loadStep("place", `Placing ${pieces.toLocaleString()} pieces and indexing ${rows.toLocaleString()} Outliner entries. The panel stays here until the last piece is in, which is why a stadium pauses at the end.`);
         await frame();
       }
+      if (stale()) return;
       state.rev = payload.rev;
       rebuild(payload);
       if (switching) hideLoading();
@@ -739,6 +947,7 @@ async function poll() {
       syncSelection();
     }
   } catch (err) {
+    if (stale()) return;
     hideLoading();
     setStatus(err.message || String(err), true);
   } finally {
@@ -747,6 +956,14 @@ async function poll() {
 }
 
 function syncChrome() {
+  document.getElementById("scene-stats").textContent = state.payload ? `${(state.payload.instances || []).length.toLocaleString()} instances · ${state.picked.size} selected` : "";
+  for (const button of document.querySelectorAll("button[title]")) button.setAttribute("aria-label", button.title);
+  for (const button of document.querySelectorAll(".rail button, .hud button, .tabs button")) button.setAttribute("aria-pressed", String(button.classList.contains("on")));
+  const activeNode = nodeById(state.payload?.selection?.object);
+  const editable = activeNode?.type === "object" && !state.locked.has(activeNode.id);
+  for (const id of ["sm-face", "sm-edge", "sm-vert"]) document.getElementById(id).disabled = !editable;
+  for (const id of ["extrude", "inset", "bevel", "loop", "sub", "fill"]) document.getElementById(id).disabled = !editable;
+  document.getElementById("del").disabled = !state.picked.size;
   const mode = document.getElementById("mode");
   if (mode) mode.textContent = state.mode === "edit" ? "Edit" : "Object";
   for (const [id, value] of [["sm-face", "face"], ["sm-edge", "edge"], ["sm-vert", "vert"]]) {
@@ -761,10 +978,14 @@ function syncChrome() {
   document.querySelectorAll(".tabs button").forEach((button) => {
     button.classList.toggle("on", button.dataset.tab === state.tab);
   });
+  for (const button of document.querySelectorAll(".rail button, .hud button, .tabs button")) button.setAttribute("aria-pressed", String(button.classList.contains("on")));
 }
 
 function rememberPick(id, shift) {
-  if (!id) return;
+  if (!id) {
+    if (!shift) state.picked = new Set();
+    return;
+  }
   if (shift) {
     if (state.picked.has(id)) state.picked.delete(id);
     else state.picked.add(id);
@@ -779,7 +1000,7 @@ function chosen() {
 }
 
 function nodeById(id) {
-  return ((state.payload && state.payload.nodes) || []).find((n) => n.id === id);
+  return state.nodeMap.get(id);
 }
 
 function objectIds() {
@@ -791,15 +1012,16 @@ function objectIds() {
 
 const EYE = `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="2.5"/></svg>`;
 
-function paintPanels() {
+function paintPanels(refreshTree = true) {
   const p = state.payload;
   if (!p) return;
   const live = new Set((p.nodes || []).map((n) => n.id));
   for (const id of [...state.picked]) if (!live.has(id)) state.picked.delete(id);
   const sel = p.selection && p.selection.object;
   if (sel && !state.picked.size) state.picked.add(sel);
+  if (refreshTree) paintOutliner(p);
   const panel = document.getElementById("panel");
-  if (state.tab === "outliner") panel.innerHTML = outliner(p);
+  if (state.tab === "layers") panel.innerHTML = layersPanel(p);
   else if (state.tab === "props") panel.innerHTML = props(p);
   else if (state.tab === "materials") panel.innerHTML = materials(p);
   else if (state.tab === "check") panel.innerHTML = `<div id="check"></div><div class="row"><button id="run-check" type="button">Check</button><button id="fix-all" type="button">Fix all</button></div>`;
@@ -809,84 +1031,118 @@ function paintPanels() {
   syncChrome();
 }
 
-function layerColor(p, id) {
-  const layer = (p.layers || []).find((l) => l.id === id);
-  return (layer && layer.color) || "#8aa";
+function esc(value) {
+  return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-function outliner(p) {
-  const layers = p.layers || [];
-  const layerRows = layers.map((l) => {
-    const on = l.visible !== false;
-    return `<div class="item">
-      <button class="icon-btn${on ? "" : " off"}" type="button" data-eye="layer" data-layer="${l.id}" data-on="${on ? 1 : 0}" title="${on ? "Hide layer" : "Show layer"}">${EYE}</button>
-      <i class="dot" style="background:${l.color || "#8aa"}"></i>
-      <span class="nm">${l.name}</span>
-      <button class="icon-btn" type="button" data-assign="${l.id}" title="Put the selection on ${l.name}">→</button>
-    </div>`;
-  }).join("");
+let treeRows = [];
+function paintOutliner(p) {
+  const container = document.getElementById("outliner");
+  const scroll = document.getElementById("tree")?.scrollTop || 0;
+  container.innerHTML = `<h1 class="panel-title">Outliner <span>${p.nodes.length.toLocaleString()} entries</span></h1>
+    <div class="tree-tools"><input id="tree-search" type="search" placeholder="Search scene…" aria-label="Search Outliner" value="${esc(state.search)}" /><button id="collapse-tree" title="Collapse all groups">−</button><button id="expand-tree" title="Expand all groups">+</button></div>
+    <div id="tree" role="tree" aria-label="Scene hierarchy"><div class="tree-space"></div></div>
+    <div class="tree-footer">Ctrl / Shift-click to add · F to frame</div>`;
+  const tree = document.getElementById("tree");
+  tree.onscroll = paintTree;
+  document.getElementById("tree-search").oninput = ev => { state.search = ev.target.value; tree.scrollTop = 0; indexTree(); };
+  document.getElementById("collapse-tree").onclick = () => { state.collapsed = new Set(p.nodes.filter(n => n.type === "group").map(n => n.id)); indexTree(); };
+  document.getElementById("expand-tree").onclick = () => { state.collapsed.clear(); indexTree(); };
+  indexTree();
+  tree.scrollTop = scroll;
+  paintTree();
+}
+
+function indexTree() {
+  const nodes = state.payload?.nodes || [];
   const kids = new Map();
-  for (const n of p.nodes || []) {
-    const key = n.parent || "";
-    if (!kids.has(key)) kids.set(key, []);
-    kids.get(key).push(n);
+  for (const n of nodes) {
+    const parent = state.nodeMap.has(n.parent) ? n.parent : "";
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent).push(n);
   }
-  const rows = [];
-  function walk(parent, depth) {
-    for (const n of kids.get(parent) || []) {
-      if (rows.length > 500) return;
-      const on = state.picked.has(n.id) ? " on" : "";
-      const shown = n.visible !== false;
-      const mark = n.type === "group" ? "▸ " : "";
-      rows.push(`<div class="item${on}" data-id="${n.id}" style="padding-left:${4 + depth * 14}px">
-        <button class="icon-btn${shown ? "" : " off"}" type="button" data-eye="node" data-node="${n.id}" data-on="${shown ? 1 : 0}" title="Show or hide">${EYE}</button>
-        <i class="dot" style="background:${layerColor(p, n.layer)}"></i>
-        <span class="nm">${mark}${n.name || n.id}</span>
-        ${n.type === "group" ? `<button class="icon-btn" type="button" data-nest="${n.id}" title="Put the shift-clicked shapes in this group">→</button>` : ""}
-      </div>`);
-      walk(n.id, depth + 1);
-    }
+  const query = state.search.trim().toLowerCase();
+  const matches = new Set();
+  if (query) for (const n of nodes) {
+    if (!String(n.name || n.id).toLowerCase().includes(query)) continue;
+    let current = n;
+    while (current && !matches.has(current.id)) { matches.add(current.id); current = nodeById(current.parent); }
   }
-  walk("", 0);
-  const more = (p.nodes || []).length > rows.length ? `<div class="dim">${(p.nodes || []).length - rows.length} more</div>` : "";
-  return `<h2>Layers</h2><div class="list">${layerRows}</div>
-    <div class="row"><button id="add-layer" type="button">+ Layer</button></div>
-    <h2>Scene</h2>
-    <div class="list">${rows.join("") || "<span class='dim'>Empty scene. Use Add.</span>"}${more}</div>
-    <div class="row">
-      <button id="group" type="button" title="Group the shift-clicked shapes">Group</button>
-      <button id="nest" type="button" title="Put the other selected shapes inside the selected group">Nest</button>
-      <button id="ungroup" type="button">Ungroup</button>
-    </div>
-    <div class="row">
-      <button id="join-sel" type="button">Join</button>
-      <button id="union-sel" type="button">Union</button>
-      <button id="cut-sel" type="button">Cut</button>
-    </div>
-    <p class="dim">Shift-click to select more than one. Join welds shapes. Union and Cut are booleans. Groups export as one mesh.</p>`;
+  treeRows = [];
+  const seen = new Set();
+  const stack = (kids.get("") || []).slice().reverse().map(n => [n, 0]);
+  while (stack.length) {
+    const [n, depth] = stack.pop();
+    if (seen.has(n.id) || (query && !matches.has(n.id))) continue;
+    seen.add(n.id);
+    treeRows.push({ n, depth, children: kids.has(n.id) });
+    if (!query && state.collapsed.has(n.id)) continue;
+    for (const child of (kids.get(n.id) || []).slice().reverse()) stack.push([child, depth + 1]);
+  }
+  paintTree();
+}
+
+function paintTree() {
+  const tree = document.getElementById("tree");
+  if (!tree) return;
+  const start = Math.max(0, Math.floor(tree.scrollTop / 30) - 4);
+  const end = Math.min(treeRows.length, start + Math.ceil(tree.clientHeight / 30) + 9);
+  const space = tree.firstElementChild;
+  space.style.height = `${Math.max(40, treeRows.length * 30)}px`;
+  space.innerHTML = treeRows.length ? treeRows.slice(start, end).map(({ n, depth, children }, i) => {
+    const selected = state.picked.has(n.id), locked = state.locked.has(n.id), expanded = !state.collapsed.has(n.id) || !!state.search;
+    return `<div class="tree-row${selected ? " on" : ""}${n.visible === false ? " is-hidden" : ""}${locked ? " is-locked" : ""}" role="treeitem" tabindex="0" aria-selected="${selected}" aria-level="${depth+1}" ${children ? `aria-expanded="${expanded}"` : ""} data-id="${esc(n.id)}" style="top:${(start+i)*30}px;padding-left:${6+Math.min(depth,12)*14}px" title="${esc(n.name)}">
+      <button class="icon-btn" data-fold="${esc(n.id)}" aria-label="${expanded ? "Collapse" : "Expand"} ${esc(n.name)}" ${children ? "" : 'disabled aria-hidden="true"'}>${children ? expanded ? "▾" : "▸" : "·"}</button>
+      <span class="nm">${esc(n.name || n.id)}</span><span class="kind">${n.type === "group" ? "Group" : "Mesh"}</span>
+      <button class="icon-btn${n.visible === false ? " off" : ""}" data-eye="node" data-node="${esc(n.id)}" data-on="${n.visible !== false ? 1 : 0}" title="Toggle visibility">${EYE}</button>
+    </div>`;
+  }).join("") : `<div class="empty">${state.search ? "No matching objects." : "Empty scene. Use Add to create a primitive."}</div>`;
+  space.querySelectorAll("[data-fold]").forEach(button => button.onclick = ev => {
+    ev.stopPropagation();
+    const id = button.dataset.fold;
+    if (state.collapsed.has(id)) state.collapsed.delete(id); else state.collapsed.add(id);
+    indexTree();
+  });
+  space.querySelectorAll("[data-id]").forEach(row => {
+    row.onclick = ev => { if (!ev.target.closest("button")) choose(row.dataset.id, ev.ctrlKey || ev.shiftKey || ev.metaKey); };
+    row.onkeydown = ev => {
+      if (ev.target !== row) return;
+      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); choose(row.dataset.id, ev.ctrlKey || ev.shiftKey); }
+      if (ev.key === "ArrowLeft" || ev.key === "ArrowRight") { ev.preventDefault(); if (ev.key === "ArrowLeft") state.collapsed.add(row.dataset.id); else state.collapsed.delete(row.dataset.id); indexTree(); }
+    };
+  });
+  space.querySelectorAll("[data-eye]").forEach(button => button.onclick = ev => { ev.stopPropagation(); op("edit", { id: button.dataset.node, visible: button.dataset.on !== "1" }); });
+}
+
+function layersPanel(p) {
+  return `<h2>Layers</h2><div class="list">${(p.layers || []).map(l => `<div class="item">
+    <button class="icon-btn${l.visible === false ? " off" : ""}" data-eye="layer" data-layer="${esc(l.id)}" data-on="${l.visible !== false ? 1 : 0}" title="Toggle layer visibility">${EYE}</button>
+    <input class="nm" data-layer-name="${esc(l.id)}" aria-label="Layer name" value="${esc(l.name)}" />
+    <button class="icon-btn" data-lock-layer="${esc(l.id)}" title="${l.locked ? "Unlock" : "Lock"} layer">${l.locked ? "◆" : "◇"}</button>
+    <button class="icon-btn" data-assign="${esc(l.id)}" title="Assign selection to layer">→</button></div>`).join("")}</div>
+    <div class="row"><button id="add-layer">+ Layer</button></div><h2>Hierarchy</h2>
+    <div class="row"><button id="group">Group</button><button id="nest">Nest</button><button id="ungroup">Ungroup</button></div>
+    <h2>Combine selected meshes</h2><div class="row"><button id="join-sel">Join</button><button id="union-sel">Union</button><button id="cut-sel">Cut</button></div>
+    <p class="dim">Grouping preserves world positions. Nest uses the selected group. Union and Cut require two convex meshes.</p>`;
 }
 
 function props(p) {
-  const id = p.selection && p.selection.object;
-  const n = (p.nodes || []).find((x) => x.id === id);
-  if (!n) return "<span class='dim'>Select an object.</span>";
-  const t = n.transform || { pos: [0, 0, 0], rot: [0, 0, 0], scale: [1, 1, 1] };
-  const layers = (p.layers || []).map((l) => `<option value="${l.id}"${l.id === n.layer ? " selected" : ""}>${l.name}</option>`).join("");
-  const groups = (p.nodes || []).filter((x) => x.type === "group" && x.id !== n.id)
-    .map((g) => `<option value="${g.id}"${g.id === n.parent ? " selected" : ""}>${g.name}</option>`).join("");
-  const prim = n.type === "group"
-    ? "<span class='dim'>Group. Children move with it. Combine them on Export.</span>"
-    : n.primitive ? `<h2>${n.primitive.kind}</h2>` + Object.entries(n.primitive.params || {}).map(([k, v]) =>
-      `<div class="row"><label>${k}</label><input data-param="${k}" value="${v}" /></div>`).join("") : "<span class='dim'>Converted to a mesh.</span>";
-  return `<h2>${n.name}</h2>
-    <div class="row"><label>X</label><input id="px" value="${t.pos[0]}" /></div>
-    <div class="row"><label>Y</label><input id="py" value="${t.pos[1]}" /></div>
-    <div class="row"><label>Z</label><input id="pz" value="${t.pos[2]}" /></div>
-    <div class="row"><label>Layer</label><select id="prop-layer">${layers}</select></div>
-    <div class="row"><label>Parent</label><select id="prop-parent"><option value="">Scene</option>${groups}</select></div>
-    <div class="row"><span class="dim">${n.tris || 0} tris</span></div>
-    ${prim}
-    <div class="row"><button id="apply-props" type="button">Apply</button></div>`;
+  const n = nodeById(p.selection?.object);
+  if (!n) return `<div class="empty">Select an object or group to edit its details.</div>`;
+  const t = n.transform || { pos: [0,0,0], rot: [0,0,0], scale: [1,1,1] };
+  const layers = (p.layers || []).map(l => `<option value="${esc(l.id)}"${l.id === n.layer ? " selected" : ""}>${esc(l.name)}</option>`).join("");
+  const descendant = g => { const seen = new Set(); while (g && !seen.has(g.id)) { if (g.id === n.id) return true; seen.add(g.id); g = nodeById(g.parent); } return false; };
+  const groups = p.nodes.filter(g => g.type === "group" && !descendant(g)).map(g => `<option value="${esc(g.id)}"${g.id === n.parent ? " selected" : ""}>${esc(g.name)}</option>`).join("");
+  const transforms = [["Location", "pos", "p"], ["Rotation", "rot", "r"], ["Scale", "scale", "s"]].map(([label,key,prefix]) => `<div class="transform-row"><span>${label}</span>${["x","y","z"].map((axis,i) => `<label>${axis.toUpperCase()}<input id="${prefix+axis}" type="number" step="any" aria-label="${label} ${axis.toUpperCase()}" value="${Number(t[key][i].toFixed(5))}" /></label>`).join("")}</div>`).join("");
+  const primitive = n.primitive ? `<h2>Primitive · ${esc(n.primitive.kind)}</h2>` + Object.entries(n.primitive.params || {}).map(([k,v]) => `<div class="row"><label>${esc(k)}</label><input type="number" step="any" data-param="${esc(k)}" value="${esc(v)}" /></div>`).join("") : "";
+  return `<h2>${n.type === "group" ? "Group" : "Object"}${state.picked.size > 1 ? " · active selection" : ""}</h2>
+    <div class="row"><label for="prop-name">Name</label><input id="prop-name" value="${esc(n.name)}" /></div>
+    <div class="row"><label for="prop-lock">Locked</label><input id="prop-lock" type="checkbox" ${n.locked ? "checked" : ""} /></div>
+    <h2>Local transform · cm / degrees</h2>${transforms}
+    <h2>Organization</h2><div class="row"><label for="prop-layer">Layer</label><select id="prop-layer">${layers}</select></div>
+    <div class="row"><label for="prop-parent">Parent</label><select id="prop-parent"><option value="">Scene root</option>${groups}</select></div>
+    ${primitive}<div class="row"><button id="apply-props" ${state.locked.has(n.id) ? "disabled" : ""}>Apply changes</button><span class="dim">${(n.tris || 0).toLocaleString()} triangles</span></div>
+    ${state.locked.has(n.id) ? '<p class="dim">Unlock the object or its layer before editing.</p>' : ""}`;
 }
 
 function hexOf(color) {
@@ -901,13 +1157,13 @@ function materials(p) {
   const rows = (p.materials || []).map((m) => {
     const css = hexOf(m.base_color);
     const on = current && m.id === current.id ? " on" : "";
-    return `<div class="item${on}" data-mat="${m.id}"><span class="swatch" style="background:${css}"></span><span class="nm">${m.name}</span></div>`;
+    return `<div class="item${on}" data-mat="${m.id}"><span class="swatch" style="background:${css}"></span><span class="nm">${esc(m.name)}</span></div>`;
   }).join("");
   const tex = (current && current.textures) || {};
-  const thumb = (slot, label) => `<figure><img data-tex="${tex[slot] || ""}" alt="" ${tex[slot] ? "" : "hidden"} /><figcaption>${label}</figcaption></figure>`;
+  const thumb = (slot, label) => `<figure><img data-tex="${esc(tex[slot] || "")}" alt="" ${tex[slot] ? "" : "hidden"} /><figcaption>${label}</figcaption></figure>`;
   return `<div class="list">${rows}</div>
     <div class="row"><button id="mat-new" type="button">New</button></div>
-    <div class="row"><label>Name</label><input id="mat-name" value="${(current && current.name) || ""}" /></div>
+    <div class="row"><label>Name</label><input id="mat-name" value="${esc((current && current.name) || "")}" /></div>
     <div class="row"><label>Color</label><input id="mat-color" type="color" value="${hexOf(current && current.base_color)}" /></div>
     <div class="row"><label>Rough</label><input id="rough" type="range" min="0" max="1" step="0.01" value="${current ? current.roughness ?? 0.5 : 0.5}" /></div>
     <div class="row"><label>Metal</label><input id="metal" type="range" min="0" max="1" step="0.01" value="${current ? current.metallic ?? 0 : 0}" /></div>
@@ -925,35 +1181,43 @@ function materials(p) {
 function activity(p) {
   const rows = [...(p.activity || [])].reverse().map((a) => {
     const dim = a.kind === "look" ? " dim" : "";
-    return `<div class="item${dim}" data-rev="${a.rev}" data-id="${(a.ids || [])[0] || ""}"><span class="nm">${a.actor === "agent" ? "AI" : "You"}: ${a.summary}</span><button data-undo="${a.rev}" type="button">Undo</button></div>`;
+    return `<div class="item${dim}" data-rev="${a.rev}" data-id="${(a.ids || [])[0] || ""}"><span class="nm">${a.actor === "agent" ? "AI" : "You"}: ${esc(a.summary)}</span><button data-undo="${a.rev}" type="button">Undo</button></div>`;
   }).join("");
   return `<div class="list">${rows || "<span class='dim'>No edits yet.</span>"}</div>`;
 }
 
 function exportPanel() {
-  return `<div class="row"><label>Mode</label><select id="ex-mode"><option value="each">Each shape</option><option value="group">Groups combined</option><option value="all">Everything</option></select></div>
+  return `<div class="row"><label>Mode</label><select id="ex-mode"><option value="each">Unique meshes</option><option value="group">Groups combined</option><option value="all">Everything</option></select></div>
     <div class="row"><button id="send" type="button">Send to UEFN</button></div>
     <h2>File</h2>
     <div class="row"><input id="blend-path" placeholder="C:\\path\\stadium.blend" style="flex:1" /></div>
     <div class="row"><button id="import-blend" type="button">Import Blend</button></div>
-    <p class="dim">Writes one SM_ per shape or group, imports T_ color, normal, and ORM, and creates an MI_ on M_Forge_Master for each material. The Collision layer is the simple collision. UEFN needs to be open.</p>`;
+    <p class="dim">Writes one SM_ per shape or group, imports T_ color, normal, and ORM, and creates an MI_ on M_Forge_Master for each material. Collision uses the simple fallback; custom collision meshes are not imported. UEFN needs to be open.</p>`;
 }
 
 function pairBool(kind) {
   const ids = objectIds();
-  if (ids.length < 2) {
-    setStatus("Shift-click two shapes first", true);
+  if (ids.length !== 2) {
+    setStatus("Select exactly two shapes", true);
     return;
   }
   op("boolean", { a: ids[0], b: ids[1], op: kind });
 }
 
 function bindPanel() {
-  document.querySelectorAll("[data-id]").forEach((el) => {
+  document.querySelectorAll("[data-layer-name]").forEach(input => input.onchange = () => op("layer", { action: "set", id: input.dataset.layerName, name: input.value.trim() || "Layer" }));
+  document.querySelectorAll("[data-lock-layer]").forEach(button => button.onclick = () => {
+    const layer = state.payload.layers.find(l => l.id === button.dataset.lockLayer);
+    op("layer", { action: "set", id: layer.id, locked: !layer.locked });
+  });
+  const lock = document.getElementById("prop-lock");
+  if (lock) lock.onchange = () => op("edit", { id: state.payload.selection.object, locked: lock.checked });
+  const parentSelect = document.getElementById("prop-parent");
+  if (parentSelect) parentSelect.onchange = () => op("edit", { id: state.payload.selection.object, parent: parentSelect.value });
+  document.querySelectorAll("#panel [data-id]").forEach((el) => {
     el.onclick = (ev) => {
-      if (ev.target.closest(".icon-btn")) return;
-      rememberPick(el.dataset.id, ev.shiftKey);
-      op("select", { object: el.dataset.id });
+      if (ev.target.closest("button")) return;
+      choose(el.dataset.id, ev.shiftKey || ev.ctrlKey || ev.metaKey);
     };
   });
   document.querySelectorAll("[data-eye]").forEach((el) => {
@@ -975,20 +1239,19 @@ function bindPanel() {
   const addLayer = document.getElementById("add-layer");
   if (addLayer) addLayer.onclick = () => {
     const n = ((state.payload && state.payload.layers) || []).length + 1;
-    const colors = ["#6c8cff", "#7dba6a", "#d4a017", "#c46ad4", "#5ec8c8", "#d27b4a"];
-    op("layer", { action: "add", name: "Layer " + n, color: colors[n % colors.length] });
+    op("layer", { action: "add", name: "Layer " + n });
   };
   document.querySelectorAll("[data-nest]").forEach((el) => {
     el.onclick = (ev) => {
       ev.stopPropagation();
-      const ids = objectIds().filter((id) => id !== el.dataset.nest);
+      const ids = chosen().filter((id) => id !== el.dataset.nest);
       if (!ids.length) { setStatus("Shift-click the shapes, then this arrow", true); return; }
       op("group", { into: el.dataset.nest, ids });
     };
   });
   const group = document.getElementById("group");
   if (group) group.onclick = () => {
-    const ids = objectIds();
+    const ids = chosen();
     if (!ids.length) { setStatus("Select shapes to group", true); return; }
     op("group", { ids, name: "Group" });
   };
@@ -996,7 +1259,7 @@ function bindPanel() {
   if (nest) nest.onclick = () => {
     const ids = chosen();
     const groupNode = ids.map(nodeById).find((n) => n && n.type === "group");
-    const rest = objectIds().filter((id) => !groupNode || id !== groupNode.id);
+    const rest = chosen().filter((id) => !groupNode || id !== groupNode.id);
     if (groupNode && rest.length) op("group", { into: groupNode.id, ids: rest });
     else if (rest.length) op("group", { ids: rest, name: "Group" });
     else setStatus("Shift-click shapes, then Nest", true);
@@ -1028,12 +1291,12 @@ function bindPanel() {
     const id = state.payload.selection.object;
     const params = {};
     document.querySelectorAll("[data-param]").forEach((input) => { params[input.dataset.param] = Number(input.value); });
-    const parent = document.getElementById("prop-parent").value;
+    if ([...document.querySelectorAll("#panel input[type=number]")].some(input => !input.value.trim() || !Number.isFinite(Number(input.value)))) { setStatus("Enter valid numbers for all transform values", true); return; }
     op("edit", {
       id,
-      pos: [Number(document.getElementById("px").value), Number(document.getElementById("py").value), Number(document.getElementById("pz").value)],
+      name: document.getElementById("prop-name").value.trim() || nodeById(id).name,
+      ...Object.fromEntries([["pos", "p"], ["rot", "r"], ["scale", "s"]].map(([key, prefix]) => [key, ["x", "y", "z"].map(axis => Number(document.getElementById(prefix + axis).value))])),
       layer: document.getElementById("prop-layer").value,
-      parent: parent || "",
       params,
     });
   };
@@ -1052,7 +1315,10 @@ function bindPanel() {
   const matNew = document.getElementById("mat-new");
   if (matNew) matNew.onclick = () => {
     state.matId = "";
-    op("material_set", { name: "Material", base_color: [0.75, 0.75, 0.78, 1] });
+    const names = new Set((state.payload.materials || []).map(m => m.name));
+    let number = 1;
+    while (names.has(`Material ${number}`)) number++;
+    op("material_set", { name: `Material ${number}`, base_color: [0.75, 0.75, 0.78, 1] });
   };
   const assign = document.getElementById("mat-assign");
   if (assign) assign.onclick = () => {
@@ -1066,7 +1332,7 @@ function bindPanel() {
   });
   document.querySelectorAll("[data-tex]").forEach(async (img) => {
     if (!img.dataset.tex) return;
-    const res = await rpc("forge_texture", { name: state.name, file: img.dataset.tex });
+    const res = await rpc("forge_texture", { name: state.name, file: img.dataset.tex }).catch(() => null);
     if (res && res.ok && res.base64) img.src = `data:${res.mime || "image/png"};base64,${res.base64}`;
   });
   const importer = document.getElementById("tex-import");
@@ -1076,8 +1342,8 @@ function bindPanel() {
     const reader = new FileReader();
     reader.onload = async () => {
       setStatus("Importing texture…");
-      await op("texture", { png_base64: String(reader.result || ""), material: state.matId, tileable: false, derive_maps: true });
-      setStatus("Texture imported. Send to UEFN to create the MI_.");
+      const result = await op("texture", { png_base64: String(reader.result || ""), material: state.matId, tileable: false, derive_maps: true });
+      if (result?.ok !== false) setStatus("Texture imported. Send to UEFN to create the MI_.");
     };
     reader.readAsDataURL(file);
   };
@@ -1088,15 +1354,17 @@ function bindPanel() {
   const gen = document.getElementById("gen");
   if (gen) gen.onclick = async () => {
     setStatus("Generating texture…");
-    await op("texture", { prompt: document.getElementById("prompt").value, material: state.matId, tileable: true, derive_maps: true });
-    setStatus("Texture ready");
+    const result = await op("texture", { prompt: document.getElementById("prompt").value, material: state.matId, tileable: true, derive_maps: true });
+    if (result?.ok !== false) setStatus("Texture ready");
   };
   const check = document.getElementById("run-check");
   if (check) check.onclick = async () => {
     const result = await op("check", {});
+    if (result?.ok === false) return;
     const box = document.getElementById("check");
+    if (!box) return;
     const issues = (result && result.issues) || [];
-    box.innerHTML = issues.map((i) => `<div class="item" data-id="${i.object}"><span class="nm">${i.message}</span></div>`).join("") || "<span class='dim'>No issues.</span>";
+    box.innerHTML = issues.map((i) => `<div class="item" data-id="${i.object}"><span class="nm">${esc(i.message)}</span></div>`).join("") || "<span class='dim'>No issues.</span>";
     bindPanel();
   };
   const fix = document.getElementById("fix-all");
@@ -1120,7 +1388,9 @@ function bindPanel() {
   const send = document.getElementById("send");
   if (send) send.onclick = async () => {
     setStatus("Sending to UEFN…");
-    const result = await rpc("forge_send", { name: state.name, mode: document.getElementById("ex-mode").value, collision: "simple" });
+    send.disabled = true;
+    const result = await rpc("forge_send", { name: state.name, mode: document.getElementById("ex-mode").value, collision: "simple" }).catch(err => ({ ok: false, error: err.message }));
+    send.disabled = false;
     if (!result || result.ok === false) setStatus((result && result.error) || "Send failed", true);
     else setStatus(`Imported ${result.count} mesh${result.count === 1 ? "" : "es"}`);
   };
@@ -1158,7 +1428,7 @@ function wire() {
   document.getElementById("loop").onclick = () => op("mesh_op", { op: "loopcut" });
   document.getElementById("sub").onclick = () => op("mesh_op", { op: "subdivide" });
   document.getElementById("fill").onclick = () => op("mesh_op", { op: "fill" });
-  document.getElementById("del").onclick = () => op("mesh_op", { op: "delete", kind: "face" });
+  document.getElementById("del").onclick = deleteSelection;
   document.getElementById("bool").onclick = () => pairBool("difference");
   document.getElementById("union").onclick = () => pairBool("union");
   document.getElementById("join").onclick = () => {
@@ -1167,9 +1437,13 @@ function wire() {
     op("join", { ids });
   };
   document.getElementById("new").onclick = async () => {
-    const name = "Scene " + (document.getElementById("scene").options.length + 1);
+    const names = new Set([...document.getElementById("scene").options].map(option => option.value));
+    let number = 1;
+    while (names.has(`Scene_${number}`)) number++;
+    const name = `Scene ${number}`;
     const made = await rpc("forge_call", { op: "scene_new", name: "", params: { name }, actor: "user" });
     if (!made || made.ok === false) { setStatus((made && made.error) || "Could not make a scene", true); return; }
+    resetScene();
     await refreshScenes(made.name || name);
     state.rev = -1;
   };
@@ -1210,6 +1484,7 @@ function wire() {
   };
   document.getElementById("scene").onchange = (ev) => {
     if (ev.target.value === state.name) return;
+    resetScene();
     state.name = ev.target.value;
     state.rev = -1;
     showLoading(state.name);
@@ -1225,40 +1500,53 @@ function wire() {
     activity: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18V6M4 18h16M8 14l3-4 3 2 4-6"/></svg>`,
     export: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 20h14"/></svg>`,
   };
-  for (const [id, label] of [["outliner", "Outliner"], ["props", "Object"], ["materials", "Material"], ["check", "Check"], ["activity", "Activity"], ["export", "UEFN"]]) {
+  for (const [id, label] of [["props", "Details"], ["layers", "Layers"], ["materials", "Materials"], ["check", "Validate"], ["activity", "History"], ["export", "UEFN"]]) {
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.tab = id;
     b.title = label;
-    b.innerHTML = tabIcons[id];
+    b.innerHTML = (tabIcons[id] || tabIcons.outliner) + `<span>${label}</span>`;
     b.onclick = () => { state.tab = id; paintPanels(); };
     tabs.appendChild(b);
   }
   function focusSelection() {
-    const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
-    const slots = state.slots.get(sel);
-    if (!slots || !slots[0]) return;
-    slots[0].mesh.getMatrixAt(slots[0].index, _m);
-    const p = new THREE.Vector3().setFromMatrixPosition(_m);
-    const offset = camera.position.clone().sub(orbit.target);
-    if (offset.length() < 256) offset.set(1200, -1600, 640);
-    orbit.target.copy(p);
-    camera.position.copy(p).add(offset);
+    const bounds = new THREE.Box3();
+    const slotSet = new Set(chosen().flatMap(id => state.slots.get(id) || []));
+    for (const slot of slotSet) {
+      const geo = slot.mesh.geometry;
+      if (!geo.boundingBox) geo.computeBoundingBox();
+      slot.mesh.getMatrixAt(slot.index, _m);
+      bounds.union(geo.boundingBox.clone().applyMatrix4(_m));
+    }
+    if (bounds.isEmpty()) return;
+    const center = bounds.getCenter(new THREE.Vector3());
+    const radius = bounds.getSize(new THREE.Vector3()).length() / 2;
+    const direction = camera.position.clone().sub(orbit.target).normalize();
+    const fov = Math.min(camera.fov * Math.PI / 180, 2 * Math.atan(Math.tan(camera.fov * Math.PI / 360) * camera.aspect));
+    orbit.target.copy(center);
+    camera.position.copy(center).addScaledVector(direction, Math.max(128, radius / Math.sin(fov / 2) * 1.15));
     orbit.update();
   }
+
   window.addEventListener("keydown", (ev) => {
     if (ev.target.matches("input, textarea, select")) return;
     const k = ev.key.toLowerCase();
     if (!ev.repeat) held.add(k);
-    if (state.flying) return;
-    if (k === "tab") { ev.preventDefault(); op("select", { mode: state.mode === "object" ? "edit" : "object" }); }
+    if (k === "escape") endFly();
+    if (state.flying || rightDown) {
+      if (k === "w" || k === "a" || k === "s" || k === "d" || k === "q" || k === "e") ev.preventDefault();
+      return;
+    }
+    if (k === "escape") { endFly(); document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; return; }
+    if ((ev.ctrlKey || ev.metaKey) && ["z", "b", "r", "j"].includes(k)) ev.preventDefault();
+    if (k === "tab") return;
     else if (k === "q") setWidget("select");
     else if (k === "w") setWidget("translate");
     else if (k === "e") setWidget("rotate");
     else if (k === "r" && !ev.ctrlKey) setWidget("scale");
     else if (k === "f") focusSelection();
     else if (k === "i") op("mesh_op", { op: "inset", amount: 32 });
-    else if (k === "x") op("mesh_op", { op: "delete", kind: "face" });
+    else if (k === "x" || k === "delete") deleteSelection();
     else if (k === "z" && (ev.ctrlKey || ev.metaKey)) op(ev.shiftKey ? "redo" : "undo", {});
     else if (k === "d" && ev.shiftKey) op("duplicate", {});
     else if (ev.ctrlKey && k === "b") op("mesh_op", { op: "bevel", width: 32 });
@@ -1269,8 +1557,53 @@ function wire() {
     }
   });
   window.addEventListener("keyup", (ev) => held.delete(ev.key.toLowerCase()));
-  window.addEventListener("blur", () => held.clear());
+  window.addEventListener("blur", () => { held.clear(); endFly(); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) endFly(); });
 }
 
+function deleteSelection() {
+  if (state.mode === "edit") return op("mesh_op", { op: "delete", kind: state.selectMode });
+  const ids = chosen().filter(id => !state.locked.has(id));
+  if (ids.length) return op("delete", { ids });
+}
+
+// The parent ThemeProvider is the sole source of Appearance values.
+let themeVersion = 0;
+function applyTheme(vars) {
+  if (!vars || typeof vars !== "object") return;
+  for (const [key, value] of Object.entries(vars)) {
+    if (/^[a-z][a-z0-9-]*$/.test(key) && typeof value === "string") document.documentElement.style.setProperty(`--${key}`, value);
+  }
+  const probe = document.createElement("span");
+  document.body.appendChild(probe);
+  const color = token => {
+    probe.style.color = `var(--${token})`;
+    return new THREE.Color(getComputedStyle(probe).color);
+  };
+  scene3.background.copy(color("bg"));
+  for (const mat of [].concat(minorGrid.material)) mat.color.copy(color("border-light"));
+  for (const mat of [].concat(majorGrid.material)) mat.color.copy(color("muted"));
+  TINT.copy(color("accent")).lerp(WHITE, 0.5);
+  gizmo.setColors(color("red"), color("green"), color("blue"), color("accent"));
+  FLASH.copy(color("blue"));
+  // Native form controls follow the luminance of the host background too.
+  document.documentElement.style.colorScheme = scene3.background.getHSL({}, THREE.SRGBColorSpace).l >= .5 ? "light" : "dark";
+  probe.remove();
+  markSelection(true);
+  paintColors();
+  if (state.faceLines) state.faceLines.material.color.copy(TINT);
+}
+window.addEventListener("message", ev => {
+  if (ev.source !== parent || ev.data?.channel !== CHANNEL || ev.data?.event?.type !== "appearance_theme") return;
+  themeVersion++;
+  applyTheme(ev.data.event.vars);
+});
+const requestedThemeVersion = themeVersion;
+call("theme.get").then(theme => { if (requestedThemeVersion === themeVersion) applyTheme(theme.vars); }).catch(err => setStatus(`Appearance unavailable: ${err.message}`, true));
+
 wire();
+document.addEventListener("click", ev => {
+  if (!ev.target.closest(".add-wrap")) { document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; }
+});
+window.addEventListener("unhandledrejection", ev => { setStatus(ev.reason?.message || "Operation failed", true); });
 refreshScenes().then(() => { state.rev = -1; poll(); setInterval(poll, 250); }).catch((err) => setStatus(err.message || String(err), true));

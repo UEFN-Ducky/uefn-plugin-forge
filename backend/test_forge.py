@@ -149,7 +149,13 @@ def test_kernel_and_scene() -> None:
     assert len(crowd.data["prototypes"]) == 1
     t_crowd = time.perf_counter()
     packed = crowd.payload()
-    assert time.perf_counter() - t_crowd < 0.05, "instance payload over 50 ms"
+    elapsed = time.perf_counter() - t_crowd
+    assert elapsed < 0.05, f"instance payload over 50 ms: {elapsed * 1000:.2f} ms"
+    print(f"20,000 boxes cold payload: {elapsed * 1000:.2f} ms (budget 50 ms)")
+    t_cached = time.perf_counter()
+    cached = crowd.payload()
+    assert cached["instances"] is packed["instances"]
+    print(f"20,000 boxes cached payload: {(time.perf_counter() - t_cached) * 1000:.3f} ms")
     assert len(packed["prototypes"]) == 1
     assert len(packed["instances"]) == 20000
     assert packed["prototypes"][0]["tris"] == 12
@@ -182,4 +188,9 @@ def test_kernel_and_scene() -> None:
 
 if __name__ == "__main__":
     test_kernel_and_scene()
+    import unittest
+    from .test_regressions import SceneRegressions
+    result = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(SceneRegressions))
+    if not result.wasSuccessful():
+        raise SystemExit(1)
     print("forge self-check ok")

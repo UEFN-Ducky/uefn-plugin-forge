@@ -6,7 +6,7 @@ import json
 import zipfile
 from pathlib import Path
 
-from .scene import _safe, load, scenes_root
+from .scene import _safe, load, scenes_root, forget
 
 
 def files_root() -> Path:
@@ -28,7 +28,7 @@ def save_forge(name: str, dest: str = "") -> dict:
     out = Path(dest) if dest else files_root() / f"{_safe(scene.name)}.forge"
     out.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.write(folder / "scene.json", "scene.json")
+        zf.writestr("scene.json", json.dumps(scene.data))
         textures = folder / "textures"
         if textures.is_dir():
             for path in textures.iterdir():
@@ -55,4 +55,5 @@ def open_forge(path: str) -> dict:
                 continue
             target = textures / Path(info.filename).name
             target.write_bytes(zf.read(info))
+    forget(name)
     return {"name": name, "path": str(src)}

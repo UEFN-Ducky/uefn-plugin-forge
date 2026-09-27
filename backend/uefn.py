@@ -24,9 +24,19 @@ def _call(listener: Listener, command: str, params: dict | None = None, timeout:
 
 
 def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
-    """One record per static mesh we will import. Collision-layer objects become UCX parts."""
+    """One record per exported mesh; collision parts use the simple-collision fallback."""
     mode = (mode or "each").lower()
-    objects = [n for n in scene.data["nodes"] if n.get("type") == "object" and n.get("visible", True)]
+    by_id = {n["id"]: n for n in scene.data["nodes"]}
+    hidden_layers = {layer["id"] for layer in scene.data.get("layers", []) if layer.get("visible") is False}
+    def visible_in_hierarchy(node):
+        seen = set()
+        while node and node["id"] not in seen:
+            seen.add(node["id"])
+            if node.get("visible") is False or node.get("layer") in hidden_layers:
+                return False
+            node = by_id.get(node.get("parent"))
+        return node is None
+    objects = [n for n in scene.data["nodes"] if n.get("type") == "object" and visible_in_hierarchy(n)]
     collision = [n for n in objects if n.get("layer") == "collision"]
     visible = [n for n in objects if n.get("layer") != "collision"]
 
@@ -65,10 +75,10 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
         for n in loose:
             exports.append({"name": n.get("name") or n["id"], "mesh": bake([n]), "collision": ucx_for(n.get("parent"))})
     else:
-        # One SM per shared prototype. Instances stay in the viewer.
-        seen: set[str] = set()
+        # One SM per shared shape/material combination. Instances stay in the viewer.
+        seen: set[tuple] = set()
         for n in visible:
-            key = scene.display_key(n)
+            key = (scene.display_key(n), n.get("material"), bool(n.get("material_override")))
             if key in seen:
                 continue
             seen.add(key)
@@ -87,8 +97,15 @@ def _safe_name(name: str) -> str:
 def export_glbs(scene: Scene, mode: str, folder: Path) -> list[dict[str, Any]]:
     mats = scene.materials()
     out = []
+    used_names = set()
     for item in collect_exports(scene, mode):
         name = "SM_" + _safe_name(str(item["name"]))
+        base = name
+        suffix = 2
+        while name.casefold() in used_names:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        used_names.add(name.casefold())
         path = write_glb(item["mesh"], folder / f"{name}.glb", mats)
         order = []
         seen = set()

@@ -1,7 +1,7 @@
 {
   "id": "forge",
   "kind": "plugin",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "label": "Ducky Forge",
   "description": "Model props inside UEFN-Ducky: Fortnite 512-unit grid, editor fly camera, QWER select/move/rotate/scale, layers, nested groups, join and booleans, materials and textures that Send turns into SM_ meshes and MI_ materials.",
   "min_app_version": "1.0.0",

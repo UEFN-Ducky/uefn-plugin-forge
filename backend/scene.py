@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import base64
 import json
+import copy
 import os
 import secrets
 import threading
@@ -43,6 +44,7 @@ from .uv import project
 _LOCK = threading.Lock()
 _READ = {"stats", "scene_get", "scene_list", "scene_payload", "scene_save", "scene_open", "scene_files", "scene_import_blend"}
 _LOOK = {"check", "render"}
+_OPEN: dict[str, "Scene"] = {}
 
 
 def scenes_root() -> Path:
@@ -149,6 +151,13 @@ class Scene:
     def __init__(self, data: dict[str, Any], folder: Path):
         self.data = data
         self.folder = folder
+        self._packed = None
+        self._packed_key = None
+        self._packed_data = None
+        self._stamp = None
+        self._node_source = None
+        self._node_count = -1
+        self._node_index = {}
 
     @property
     def name(self) -> str:
@@ -159,6 +168,7 @@ class Scene:
         tmp = self.folder / "scene.json.tmp"
         tmp.write_text(json.dumps(self.data), encoding="utf-8")
         tmp.replace(self.folder / "scene.json")
+        self._stamp = (self.folder / "scene.json").stat().st_mtime_ns
 
     def _hist(self) -> Path:
         return self.folder / "history.json"
@@ -189,10 +199,12 @@ class Scene:
     def node(self, nid: str | None) -> dict[str, Any] | None:
         if not nid:
             return None
-        for n in self.data["nodes"]:
-            if n["id"] == nid:
-                return n
-        return None
+        nodes = self.data["nodes"]
+        if self._node_source is not nodes or self._node_count != len(nodes):
+            self._node_index = {n["id"]: n for n in nodes}
+            self._node_source = nodes
+            self._node_count = len(nodes)
+        return self._node_index.get(nid)
 
     def materials(self) -> dict[str, dict]:
         return {m["id"]: m for m in self.data["materials"]}
@@ -263,6 +275,7 @@ class Scene:
             node["prototype"] = self.adopt_mesh(mesh)
         node.pop("mesh", None)
         node.pop("primitive", None)
+        node.pop("material_override", None)
         self.touch_geom()
 
     def _gc_protos(self) -> None:
@@ -288,7 +301,9 @@ class Scene:
         else:
             mesh = Mesh()
         mat = node.get("material")
-        if mat and not (proto and proto.get("mesh")):
+        if mat and node.get("material_override"):
+            mesh.face_mat = [mat] * len(mesh.faces)
+        elif mat and not (proto and proto.get("mesh")):
             mesh.face_mat = [mat if m in ("", "default") else m for m in mesh.face_mat]
         return mesh
 
@@ -331,11 +346,21 @@ class Scene:
         self.write_mesh(node, mesh)
         return mesh
 
+    def is_locked(self, node: dict) -> bool:
+        layers = {l["id"] for l in self.data.get("layers", []) if l.get("locked")}
+        seen = set()
+        while node and node["id"] not in seen:
+            seen.add(node["id"])
+            if node.get("locked") or node.get("layer") in layers:
+                return True
+            node = self.node(node.get("parent"))
+        return False
+
     def _active(self) -> dict[str, Any]:
         node = self.node(self.data["selection"].get("object"))
         if node is None or node.get("type") != "object":
             raise ValueError("Select an object first")
-        if node.get("locked"):
+        if self.is_locked(node):
             raise ValueError(f"{node.get('name')} is locked")
         return node
 
@@ -422,6 +447,11 @@ class Scene:
 
     def payload(self) -> dict[str, Any]:
         """One indexed mesh per prototype, plus a flat instance transform list."""
+        cache_key = self.data.get("geom")
+        if self._packed_data is self.data and self._packed_key == cache_key and self._packed is not None:
+            info = self._header(self._packed["nodes"], [])
+            info.update(self._packed)
+            return self._payload_activity(info)
         prim_of, tris_of, _bounds, meshes = self._catalog()
         geos: dict[str, dict[str, Any]] = {}
         instances: list[list] = []
@@ -450,14 +480,10 @@ class Scene:
                     elif kind == "mirror":
                         mirrored = True
                 tris *= copies
-            add_n({
-                "id": n["id"], "type": "object", "name": n.get("name"),
-                "parent": n.get("parent"), "layer": n.get("layer"),
-                "visible": n.get("visible", True), "locked": bool(n.get("locked")),
-                "transform": n.get("transform"), "prototype": pid,
-                "primitive": prim_of.get(pid), "modifiers": mods or [],
-                "material": n.get("material"), "tris": tris,
-            })
+            view = n.copy()
+            view["primitive"] = prim_of.get(pid)
+            view["tris"] = tris
+            add_n(view)
             if not n.get("visible", True):
                 continue
             if mirrored:
@@ -495,6 +521,12 @@ class Scene:
         info = self._header(nodes, [])
         info["prototypes"] = list(geos.values())
         info["instances"] = instances
+        self._packed_key = cache_key
+        self._packed_data = self.data
+        self._packed = {key: info[key] for key in ("nodes", "prototypes", "instances")}
+        return self._payload_activity(info)
+
+    def _payload_activity(self, info: dict) -> dict:
         last = (self.data.get("activity") or [None])[-1]
         info["flash"] = None
         if last and last.get("kind") == "edit" and last.get("actor") == "agent":
@@ -502,12 +534,23 @@ class Scene:
         return info
 
 
+def forget(name: str) -> None:
+    _OPEN.pop(str((scenes_root() / _safe(name)).resolve()), None)
+
+
 def load(name: str) -> Scene:
     folder = scenes_root() / _safe(name)
+    key = str(folder.resolve())
     path = folder / "scene.json"
+    hit = _OPEN.get(key)
+    if hit is not None and path.is_file() and hit._stamp == path.stat().st_mtime_ns:
+        return hit
     if not path.is_file():
         raise ValueError(f"No Forge scene named {name!r}")
-    return Scene(json.loads(path.read_text(encoding="utf-8")), folder)
+    scene = Scene(json.loads(path.read_text(encoding="utf-8")), folder)
+    scene._stamp = path.stat().st_mtime_ns
+    _OPEN[key] = scene
+    return scene
 
 
 def create(name: str) -> Scene:
@@ -546,9 +589,25 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
         fn = _OPS.get(op)
         if fn is None:
             raise ValueError(f"Unknown forge op {op!r}")
+        if op == "select":
+            result = fn(scene, params)
+            # Selection is session state: observable, without geometry/history/disk work.
+            scene.data["rev"] = int(scene.data.get("rev") or 0) + 1
+            result["mode"] = scene.data["mode"]
+            result["select_mode"] = scene.data["select_mode"]
+            result["rev"] = scene.data.get("rev")
+            result["name"] = scene.name
+            return result
         editing = op not in _READ and op not in {"undo", "redo", "revert"}
         before = scene._snapshot() if editing and op not in _LOOK else None
-        result = fn(scene, params)
+        try:
+            result = fn(scene, params)
+        except Exception:
+            # A failed mesh operation may already have baked a prototype. Cached scenes
+            # must roll back just as a fresh disk load did before session caching.
+            if before is not None:
+                scene.data = before
+            raise
         if editing:
             ids = list(result.get("ids") or [])
             scene.commit(
@@ -613,6 +672,12 @@ def _op_edit(scene: Scene, p: dict) -> dict[str, Any]:
     node = scene.node(str(p.get("id") or scene.data["selection"].get("object")))
     if node is None:
         raise ValueError("object not found")
+    if scene.is_locked(node) and any(key in p for key in ("parent", "pos", "rot", "scale", "transform", "params", "material")):
+        raise ValueError("Unlock the object or its layer before editing")
+    if "parent" in p:
+        _validate_parent(scene, node["id"], p["parent"])
+        if p["parent"] != node.get("parent"):
+            node["transform"] = _reparent_transform(scene, node, p["parent"])
     for key in ("name", "parent", "layer", "visible", "locked", "material"):
         if key in p:
             node[key] = p[key] or None if key == "parent" else p[key]
@@ -663,6 +728,17 @@ def _op_duplicate(scene: Scene, p: dict) -> dict[str, Any]:
 def _op_delete(scene: Scene, p: dict) -> dict[str, Any]:
     ids = set(p.get("ids") or [scene.data["selection"].get("object")])
     ids.discard(None)
+    children = {}
+    for n in scene.data["nodes"]:
+        children.setdefault(n.get("parent"), []).append(n["id"])
+    pending = list(ids)
+    while pending:
+        for child in children.get(pending.pop(), []):
+            if child not in ids:
+                ids.add(child)
+                pending.append(child)
+    if any(scene.is_locked(n) for n in scene.data["nodes"] if n["id"] in ids):
+        raise ValueError("Unlock objects or layers before deleting")
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] not in ids and n.get("parent") not in ids]
     if scene.data["selection"].get("object") in ids:
         scene.data["selection"]["object"] = None
@@ -671,30 +747,66 @@ def _op_delete(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Delete {len(ids)}", "ids": list(ids)}
 
 
+def _validate_parent(scene: Scene, nid: str, parent: str | None) -> None:
+    seen = {nid}
+    while parent:
+        if parent in seen:
+            raise ValueError("A group cannot contain itself or its ancestors")
+        seen.add(parent)
+        node = scene.node(parent)
+        if not node or node.get("type") != "group":
+            raise ValueError("Parent must be an existing group")
+        parent = node.get("parent")
+
+
+def _reparent_transform(scene: Scene, node: dict, parent: str | None) -> dict:
+    from .transforms import world, inverse, multiply, decompose
+    return decompose(multiply(inverse(world(scene, parent)), world(scene, node["id"])))
+
+
 def _op_group(scene: Scene, p: dict) -> dict[str, Any]:
-    ids = [str(i) for i in (p.get("ids") or []) if i]
+    ids = list(dict.fromkeys(str(i) for i in p.get("ids", []) if i))
+    nodes = [scene.node(nid) for nid in ids]
+    if any(n is None for n in nodes):
+        raise ValueError("Select existing objects or groups first")
+    if any(scene.is_locked(n) for n in nodes):
+        raise ValueError("Unlock objects before grouping")
+    # Selected descendants remain inside their selected ancestors.
+    selected = set(ids)
+    def nested(n):
+        parent = n.get("parent")
+        seen = set()
+        while parent:
+            if parent in seen:
+                raise ValueError("Scene hierarchy contains a cycle")
+            seen.add(parent)
+            if parent in selected:
+                return True
+            ancestor = scene.node(parent)
+            parent = ancestor.get("parent") if ancestor else None
+        return False
+    nodes = [n for n in nodes if not nested(n)]
     into = p.get("into")
-    if into:
-        for nid in ids:
-            node = scene.node(nid)
-            if node and node["id"] != into:
-                node["parent"] = into
-        scene.touch_geom()
-        return {"summary": "Nest", "ids": ids}
-    gid = _nid("g")
-    scene.data["nodes"].append({
-        "id": gid, "type": "group", "name": str(p.get("name") or "Group"),
-        "parent": p.get("parent"), "layer": "default", "visible": True, "locked": False,
-        "transform": {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]},
-        "combine": bool(p.get("combine", True)),
-    })
-    for nid in ids:
-        node = scene.node(nid)
-        if node and node["id"] != gid:
-            node["parent"] = gid
+    gid = into or _nid("g")
+    target_parent = into or p.get("parent")
+    if not into:
+        _validate_parent(scene, gid, target_parent)
+    for node in nodes:
+        _validate_parent(scene, node["id"], target_parent)
+    transforms = [_reparent_transform(scene, node, target_parent) for node in nodes]
+    if not into:
+        scene.data["nodes"].append({
+            "id": gid, "type": "group", "name": str(p.get("name") or "Group"),
+            "parent": p.get("parent"), "layer": "default", "visible": True, "locked": False,
+            "transform": {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]},
+            "combine": bool(p.get("combine", True)),
+        })
+    for node, transform in zip(nodes, transforms):
+        node["parent"] = gid
+        node["transform"] = transform
     scene.data["selection"]["object"] = gid
     scene.touch_geom()
-    return {"summary": "Group", "ids": [gid], "id": gid}
+    return {"summary": "Nest" if into else "Group", "ids": [gid], "id": gid}
 
 
 def _op_ungroup(scene: Scene, p: dict) -> dict[str, Any]:
@@ -703,9 +815,13 @@ def _op_ungroup(scene: Scene, p: dict) -> dict[str, Any]:
     if not group or group.get("type") != "group":
         raise ValueError("Select a group to ungroup")
     parent = group.get("parent")
-    for node in scene.data["nodes"]:
-        if node.get("parent") == gid:
-            node["parent"] = parent
+    children = [n for n in scene.data["nodes"] if n.get("parent") == gid]
+    if scene.is_locked(group) or any(scene.is_locked(n) for n in children):
+        raise ValueError("Unlock the group and its children before ungrouping")
+    transforms = [_reparent_transform(scene, n, parent) for n in children]
+    for node, transform in zip(children, transforms):
+        node["parent"] = parent
+        node["transform"] = transform
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] != gid]
     if scene.data["selection"].get("object") == gid:
         scene.data["selection"]["object"] = parent
@@ -740,22 +856,31 @@ def _op_layer(scene: Scene, p: dict) -> dict[str, Any]:
     for key in ("name", "visible", "locked", "color"):
         if key in p:
             layer[key] = p[key]
-    if "visible" in p:
-        scene.touch_geom()
+    scene.touch_geom()
     return {"summary": f"Layer {layer.get('name')}", "ids": [lid]}
 
 
 def _op_select(scene: Scene, p: dict) -> dict[str, Any]:
     sel = scene.data["selection"]
-    if p.get("object"):
-        sel["object"] = p["object"]
+    if "mode" in p and p["mode"] not in ("object", "edit"):
+        raise ValueError("Invalid modeling mode")
+    if "select_mode" in p and p["select_mode"] not in ("face", "edge", "vert"):
+        raise ValueError("Invalid selection mode")
+    if "object" in p:
+        target = p.get("object") or None
+        if target and scene.node(target) is None:
+            raise ValueError("object not found")
+        if target != sel.get("object"):
+            for key in ("verts", "edges", "faces"):
+                sel[key] = []
+        sel["object"] = target
     if "mode" in p:
         scene.data["mode"] = p["mode"]
     if "select_mode" in p:
         scene.data["select_mode"] = p["select_mode"]
     for key in ("verts", "edges", "faces"):
         if key in p:
-            sel[key] = p[key]
+            sel[key] = list(p[key] or [])
     query = str(p.get("query") or "")
     node = scene.node(sel.get("object"))
     if query and node and node.get("type") == "object":
@@ -765,7 +890,7 @@ def _op_select(scene: Scene, p: dict) -> dict[str, Any]:
             scene.data["select_mode"] = "face"
         elif query == "all":
             sel["faces"] = list(range(len(mesh.faces)))
-    return {"summary": "Select", "ids": [sel.get("object")], "selection": sel}
+    return {"summary": "Select", "ids": [sel.get("object")], "selection": copy.deepcopy(sel)}
 
 
 def _op_move(scene: Scene, p: dict) -> dict[str, Any]:
@@ -798,6 +923,12 @@ def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
     which = str(p.get("op") or "")
     sel = scene.data["selection"]
     faces = list(p.get("faces") or sel.get("faces") or [])
+    if which == "delete" and p.get("kind") == "edge":
+        edges = {tuple(sorted(edge)) for edge in (p.get("edges") or sel.get("edges") or [])}
+        if not edges:
+            raise ValueError("Click an edge in Edit mode first")
+        base = scene.base_mesh(node)
+        faces = [fi for fi, face in enumerate(base.faces) if any(tuple(sorted((a, face[(i+1) % len(face)]))) in edges for i, a in enumerate(face))]
     if which in {"extrude", "inset", "subdivide", "delete"} and not faces and not (which == "delete" and (p.get("verts") or sel.get("verts"))):
         raise ValueError("Click a face in Edit mode first")
     if which == "bevel" and not (p.get("edges") or sel.get("edges") or faces):
@@ -854,12 +985,25 @@ def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": which or "mesh", "ids": [node["id"]], "tris": mesh.tri_count()}
 
 
+def _mesh_in_parent(scene: Scene, mesh: Mesh, parent: str | None) -> Mesh:
+    if parent:
+        from .transforms import inverse, world
+        m = inverse(world(scene, parent))
+        mesh.verts = [[sum(m[i][j] * vertex[j] for j in range(3)) + m[i][3] for i in range(3)] for vertex in mesh.verts]
+    return mesh
+
+
 def _op_bool(scene: Scene, p: dict) -> dict[str, Any]:
     a = scene.node(str(p.get("a")))
     b = scene.node(str(p.get("b")))
     if not a or not b:
         raise ValueError("boolean needs a and b object ids")
+    if a is b or a.get("type") != "object" or b.get("type") != "object":
+        raise ValueError("Boolean needs two different mesh objects")
+    if scene.is_locked(a) or scene.is_locked(b):
+        raise ValueError("Unlock both objects before combining")
     result = csg_boolean(scene.world_mesh(a), scene.world_mesh(b), str(p.get("op") or "difference"))
+    result = _mesh_in_parent(scene, result, a.get("parent"))
     node = {
         "id": _nid("o"), "type": "object", "name": f"{a.get('name')}_{p.get('op') or 'cut'}",
         "parent": a.get("parent"), "layer": a.get("layer") or "default",
@@ -895,14 +1039,17 @@ def _op_modifier(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_join(scene: Scene, p: dict) -> dict[str, Any]:
-    ids = [str(i) for i in (p.get("ids") or [])]
+    ids = list(dict.fromkeys(str(i) for i in (p.get("ids") or [])))
     nodes = [scene.node(i) for i in ids]
     nodes = [n for n in nodes if n and n.get("type") == "object"]
     if len(nodes) < 2:
         raise ValueError("join needs two or more objects")
+    if any(scene.is_locked(n) for n in nodes):
+        raise ValueError("Unlock objects before joining")
     mesh = Mesh()
     for n in nodes:
         mesh.append(scene.world_mesh(n))
+    mesh = _mesh_in_parent(scene, mesh, nodes[0].get("parent"))
     node = {
         "id": _nid("o"), "type": "object", "name": str(nodes[0].get("name") or "Joined"),
         "parent": nodes[0].get("parent"), "layer": nodes[0].get("layer") or "default",
@@ -947,7 +1094,7 @@ def _op_material_set(scene: Scene, p: dict) -> dict[str, Any]:
     mid = str(p.get("id") or "")
     found = None
     for m in scene.data["materials"]:
-        if m["id"] == mid or m["name"] == p.get("name"):
+        if m["id"] == mid or (not mid and m["name"] == p.get("name")):
             found = m
             break
     if found is None:
@@ -958,6 +1105,7 @@ def _op_material_set(scene: Scene, p: dict) -> dict[str, Any]:
             found[key] = p[key]
     if p.get("textures"):
         found["textures"] = dict(p["textures"])
+    scene.touch_geom()
     return {"summary": f"Material {found['name']}", "ids": [found["id"]], "material": found}
 
 
@@ -969,6 +1117,7 @@ def _op_material_assign(scene: Scene, p: dict) -> dict[str, Any]:
     faces = p.get("faces")
     if not faces:
         node["material"] = mid
+        node["material_override"] = True
         scene.touch_geom()
     else:
         mesh = scene._bake(node)
@@ -987,12 +1136,20 @@ def _op_uv(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"UV {p.get('mode') or 'box'} on {n} faces", "ids": [node["id"]]}
 
 
+def _restore(scene: Scene, target: dict, label: str) -> None:
+    rev, geom = scene.data.get("rev", 0), scene.data.get("geom", 0)
+    scene.data = target
+    scene.data["rev"] = rev
+    scene.data["geom"] = geom + 1
+    scene._note("user", label.lower(), label, [], "look")
+    scene.save()
+
+
 def _op_undo(scene: Scene, _p: dict) -> dict[str, Any]:
     prev = history.undo(scene._hist(), scene._snapshot())
     if prev is None:
         return {"summary": "Nothing to undo", "ids": []}
-    scene.data = prev
-    scene.save()
+    _restore(scene, prev, "Undo")
     return {"summary": "Undo", "ids": []}
 
 
@@ -1000,8 +1157,7 @@ def _op_redo(scene: Scene, _p: dict) -> dict[str, Any]:
     nxt = history.redo(scene._hist(), scene._snapshot())
     if nxt is None:
         return {"summary": "Nothing to redo", "ids": []}
-    scene.data = nxt
-    scene.save()
+    _restore(scene, nxt, "Redo")
     return {"summary": "Redo", "ids": []}
 
 
@@ -1009,8 +1165,7 @@ def _op_revert(scene: Scene, p: dict) -> dict[str, Any]:
     target = history.revert_to(scene._hist(), scene._snapshot(), int(p.get("rev") or 0))
     if target is None:
         return {"summary": "No snapshot at that rev", "ids": []}
-    scene.data = target
-    scene.save()
+    _restore(scene, target, "Revert")
     return {"summary": f"Revert to rev {p.get('rev')}", "ids": []}
 
 
@@ -1025,6 +1180,7 @@ def _op_open_file(_scene: Scene, p: dict) -> dict[str, Any]:
     from .files import open_forge
 
     opened = open_forge(str(p.get("path") or ""))
+    forget(opened["name"])
     return {"summary": f"Opened {opened['name']}", "ids": [], "opened": opened["name"], "path": opened["path"]}
 
 
@@ -1038,6 +1194,7 @@ def _op_import_blend(_scene: Scene, p: dict) -> dict[str, Any]:
     from .blend_import import import_blend
 
     imported = import_blend(str(p.get("path") or ""), str(p.get("name") or ""))
+    forget(imported["name"])
     return {"summary": f"Imported {imported['name']}", "ids": [], **imported}
 
 
@@ -1166,6 +1323,7 @@ def _op_texture(scene: Scene, p: dict) -> dict[str, Any]:
     # store filenames relative to the scene so the panel can ask for bytes
     rel = {slot: Path(path).name for slot, path in saved.items()}
     mat["textures"] = rel
+    scene.touch_geom()
     return {"summary": f"Texture {mat['name']}", "ids": [mat["id"]], "textures": rel, "material": mat}
 
 
