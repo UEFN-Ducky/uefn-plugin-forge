@@ -597,11 +597,70 @@ async function op(name, params) {
   }
 }
 
-function showLoading(name) {
+const LOAD_SCENE = [
+  ["read", "Read the scene"],
+  ["pack", "Pack the meshes"],
+  ["smooth", "Smooth the round parts"],
+  ["place", "Place the pieces"],
+];
+const LOAD_BLEND = [
+  ["export", "Export from Blender"],
+  ["pack", "Pack the meshes"],
+  ["smooth", "Smooth the round parts"],
+  ["place", "Place the pieces"],
+];
+
+function showLoading(name, steps) {
   const el = document.getElementById("loading");
   const label = document.getElementById("loading-name");
+  const list = document.getElementById("loading-steps");
   if (label) label.textContent = "Loading " + (name || "scene");
+  if (list) {
+    list.innerHTML = "";
+    for (const [id, text] of steps || LOAD_SCENE) {
+      const li = document.createElement("li");
+      li.dataset.step = id;
+      li.textContent = text;
+      list.appendChild(li);
+    }
+  }
   if (el) el.hidden = false;
+  loadStep((steps || LOAD_SCENE)[0][0], "");
+}
+
+function loadStep(id, why) {
+  const list = document.getElementById("loading-steps");
+  if (list) {
+    let seen = false;
+    for (const li of list.children) {
+      if (li.dataset.step === id) {
+        li.className = "on";
+        seen = true;
+      } else li.className = seen ? "" : "done";
+    }
+  }
+  const whyEl = document.getElementById("loading-why");
+  if (whyEl) whyEl.textContent = why || "";
+}
+
+function frame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
+}
+
+async function prepareGeometry(payload) {
+  const protos = payload.prototypes || [];
+  const smoothN = protos.reduce((n, proto) => n + (proto.smooth ? 1 : 0), 0);
+  loadStep("smooth", smoothN
+    ? `Building normals for ${smoothN.toLocaleString()} smooth meshes so circles match Blender. Flat pieces skip this. One dense mesh can hold this step by itself.`
+    : "Nothing in this scene is smooth-shaded, so this step is quick.");
+  await frame();
+  for (let i = 0; i < protos.length; i++) {
+    geometryFor(protos[i]);
+    if (i % 12 === 11) {
+      loadStep("smooth", `Mesh ${(i + 1).toLocaleString()} of ${protos.length.toLocaleString()}. Smooth meshes take longer because their normals are built here.`);
+      await frame();
+    }
+  }
 }
 
 function hideLoading() {
@@ -643,13 +702,26 @@ async function poll() {
     if (!state.payload || info.geom !== state.geom) {
       const switching = !state.payload || state.payload.name !== state.name;
       if (switching) {
-        showLoading(state.name);
-        await new Promise((r) => requestAnimationFrame(r));
+        const overlay = document.getElementById("loading");
+        if (!overlay || overlay.hidden) showLoading(state.name);
+        const objects = Number(info.objects) || 0;
+        const meshes = Number(info.prototypes) || 0;
+        loadStep("pack", objects
+          ? `Packing ${objects.toLocaleString()} objects from ${meshes.toLocaleString()} unique meshes. This is the long step: every mesh is copied before the view can draw.`
+          : "Packing the meshes for this scene.");
+        await frame();
       }
       const payload = await rpc("forge_call", { op: "scene_payload", name: state.name, params: {}, actor: "user" });
       if (!payload || payload.ok === false) {
         if (switching) hideLoading();
         return;
+      }
+      if (switching) {
+        await prepareGeometry(payload);
+        const pieces = (payload.instances || []).length;
+        const rows = (payload.nodes || []).length;
+        loadStep("place", `Placing ${pieces.toLocaleString()} pieces and listing ${rows.toLocaleString()} outliner rows. The panel stays here until the last piece is in, which is why a stadium pauses at the end.`);
+        await frame();
       }
       state.rev = payload.rev;
       rebuild(payload);
@@ -1033,7 +1105,9 @@ function bindPanel() {
   if (importBlend) importBlend.onclick = async () => {
     const path = document.getElementById("blend-path").value.trim();
     if (!path) { setStatus("Paste the path to a .blend file", true); return; }
-    showLoading(path.split(/[/\\]/).pop());
+    const fileName = path.split(/[/\\]/).pop();
+    showLoading(fileName, LOAD_BLEND);
+    loadStep("export", "Blender is reading every object and group. A stadium stays here because the export has to finish before any of it can draw.");
     setStatus("Importing Blend…");
     const opened = await op("scene_import_blend", { path });
     if (!opened || opened.ok === false) { hideLoading(); return; }
@@ -1121,6 +1195,7 @@ function wire() {
       b.onclick = async () => {
         box.hidden = true;
         showLoading(file.name);
+        loadStep("read", "Opening the saved file. Objects, groups, and meshes are stored together, so a large file waits here before the meshes are packed.");
         const opened = await op("scene_open", { path: file.path });
         if (!opened || opened.ok === false) { hideLoading(); return; }
         const sceneName = (opened && (opened.opened || opened.name)) || file.name;
@@ -1138,6 +1213,7 @@ function wire() {
     state.name = ev.target.value;
     state.rev = -1;
     showLoading(state.name);
+    loadStep("read", "Switching scenes. The long wait is the next step, which packs every mesh before the view can open.");
   };
   document.getElementById("follow").onchange = (ev) => { state.follow = ev.target.checked; };
   const tabs = document.getElementById("tabs");

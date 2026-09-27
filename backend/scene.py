@@ -1044,11 +1044,16 @@ def _op_import_blend(_scene: Scene, p: dict) -> dict[str, Any]:
 def _op_get(scene: Scene, p: dict) -> dict[str, Any]:
     if p.get("brief"):
         data = scene.data
+        nodes = data.get("nodes") or []
+        protos = data.get("prototypes") or []
         return {
             "summary": "scene", "ids": [], "name": scene.name,
             "rev": data.get("rev"), "geom": data.get("geom") or 0,
             "mode": data.get("mode"), "select_mode": data.get("select_mode"),
             "selection": data.get("selection"),
+            "objects": sum(1 for n in nodes if n.get("type") == "object"),
+            "prototypes": len(protos),
+            "smooth": sum(1 for p in protos if (p.get("mesh") or {}).get("smooth")),
         }
     info = scene.summary()
     info["summary"] = "scene"
