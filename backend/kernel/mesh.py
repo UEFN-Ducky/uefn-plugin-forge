@@ -593,24 +593,24 @@ def build_primitive(kind: str, params: dict | None = None, mat: str = "default")
     if kind == "rounded_box":
         from .ops import bevel_edges
 
-        radius = float(p.get("radius", 8.0))
-        m = box(float(p.get("w", 100)), float(p.get("d", 100)), float(p.get("h", 100)), mat)
+        radius = float(p.get("radius", 64.0))
+        m = box(float(p.get("w", 512)), float(p.get("d", 512)), float(p.get("h", 512)), mat)
         bevel_edges(m, m.edge_keys(), radius, segments=max(1, int(p.get("segments", 1))))
         return m
     table = {
-        "box": lambda: box(p.get("w", 100), p.get("d", 100), p.get("h", 100), mat),
-        "plane": lambda: plane(p.get("w", 100), p.get("d", 100), mat),
-        "grid": lambda: grid(p.get("w", 100), p.get("d", 100), int(p.get("seg_x", 4)), int(p.get("seg_y", 4)), mat),
-        "sphere": lambda: sphere(p.get("radius", 50), int(p.get("seg", 16)), int(p.get("rings", 8)), mat),
-        "cylinder": lambda: cylinder(p.get("radius", 40), p.get("height", 100), int(p.get("seg", 16)), mat),
-        "cone": lambda: cone(p.get("radius", 40), p.get("height", 100), int(p.get("seg", 16)), mat),
-        "torus": lambda: torus(p.get("major", 40), p.get("minor", 12), int(p.get("seg", 16)), int(p.get("rings", 8)), mat),
-        "capsule": lambda: capsule(p.get("radius", 25), p.get("height", 60), int(p.get("seg", 12)), mat),
-        "wedge": lambda: wedge(p.get("w", 100), p.get("d", 100), p.get("h", 100), mat),
-        "stairs": lambda: stairs(p.get("w", 100), p.get("d", 120), p.get("h", 100), int(p.get("steps", 4)), mat),
-        "arch": lambda: arch(p.get("w", 120), p.get("d", 40), p.get("h", 180), p.get("thickness", 20), int(p.get("seg", 8)), mat),
-        "lathe": lambda: lathe(p.get("profile") or [[0, 0], [30, 0], [40, 40], [20, 80], [0, 100]], int(p.get("seg", 16)), mat),
-        "extrude": lambda: extrude_polygon(p.get("points") or [[-40, -20], [40, -20], [40, 20], [-40, 20]], p.get("depth", 20), mat),
+        "box": lambda: box(p.get("w", 512), p.get("d", 512), p.get("h", 512), mat),
+        "plane": lambda: plane(p.get("w", 512), p.get("d", 512), mat),
+        "grid": lambda: grid(p.get("w", 512), p.get("d", 512), int(p.get("seg_x", 4)), int(p.get("seg_y", 4)), mat),
+        "sphere": lambda: sphere(p.get("radius", 256), int(p.get("seg", 16)), int(p.get("rings", 8)), mat),
+        "cylinder": lambda: cylinder(p.get("radius", 256), p.get("height", 512), int(p.get("seg", 16)), mat),
+        "cone": lambda: cone(p.get("radius", 256), p.get("height", 512), int(p.get("seg", 16)), mat),
+        "torus": lambda: torus(p.get("major", 256), p.get("minor", 64), int(p.get("seg", 16)), int(p.get("rings", 8)), mat),
+        "capsule": lambda: capsule(p.get("radius", 128), p.get("height", 256), int(p.get("seg", 12)), mat),
+        "wedge": lambda: wedge(p.get("w", 512), p.get("d", 512), p.get("h", 512), mat),
+        "stairs": lambda: stairs(p.get("w", 512), p.get("d", 512), p.get("h", 512), int(p.get("steps", 4)), mat),
+        "arch": lambda: arch(p.get("w", 512), p.get("d", 128), p.get("h", 512), p.get("thickness", 64), int(p.get("seg", 8)), mat),
+        "lathe": lambda: lathe(p.get("profile") or [[0, 0], [128, 0], [192, 192], [96, 384], [0, 512]], int(p.get("seg", 16)), mat),
+        "extrude": lambda: extrude_polygon(p.get("points") or [[-256, -128], [256, -128], [256, 128], [-256, 128]], p.get("depth", 64), mat),
     }
     fn = table.get(kind)
     if fn is None:

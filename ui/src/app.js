@@ -40,6 +40,7 @@ const state = {
   tab: "outliner",
   follow: false,
   dragging: false,
+  flying: false,
   polling: false,
   batches: [],
   slots: new Map(),
@@ -76,17 +77,28 @@ const scene3 = new THREE.Scene();
 scene3.background = new THREE.Color(0x141418);
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200000);
 camera.up.set(0, 0, 1);
-camera.position.set(180, -220, 140);
+camera.position.set(1200, -1600, 900);
 const orbit = new OrbitControls(camera, renderer.domElement);
-orbit.target.set(0, 0, 40);
+orbit.target.set(0, 0, 256);
+orbit.mouseButtons.LEFT = -1;
+orbit.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+orbit.mouseButtons.RIGHT = -1;
 orbit.update();
 scene3.add(new THREE.AmbientLight(0xffffff, 0.55));
 const sun = new THREE.DirectionalLight(0xffffff, 1.1);
-sun.position.set(80, -120, 200);
+sun.position.set(400, -800, 1200);
 scene3.add(sun);
-const grid = new THREE.GridHelper(800, 16, 0x3a3a44, 0x2a2a32);
-grid.rotation.x = -Math.PI / 2;
-scene3.add(grid);
+function fortniteGrid(cell, tiles, color, opacity) {
+  const g = new THREE.GridHelper(cell * tiles, tiles, color, color);
+  g.rotation.x = -Math.PI / 2;
+  for (const m of [].concat(g.material)) {
+    m.transparent = true;
+    m.opacity = opacity;
+  }
+  return g;
+}
+scene3.add(fortniteGrid(128, 192, 0x2a3140, 0.35));
+scene3.add(fortniteGrid(512, 48, 0x5d7ea3, 0.9));
 const content = new THREE.Group();
 scene3.add(content);
 const gizmo = new TransformControls(camera, renderer.domElement);
@@ -94,7 +106,7 @@ const gizmoHelper = gizmo.getHelper ? gizmo.getHelper() : gizmo;
 scene3.add(gizmoHelper);
 gizmo.addEventListener("dragging-changed", (ev) => {
   state.dragging = ev.value;
-  orbit.enabled = !ev.value;
+  orbit.enabled = !ev.value && !state.flying;
   if (ev.value) {
     const slots = state.slots.get(pivot.userData.id) || [];
     state.dragSlots = slots;
@@ -364,10 +376,29 @@ function buildBatches() {
   paintFaceLines();
 }
 
+function applySnap() {
+  const grid = Number(document.getElementById("snap").value) || 0;
+  const rot = Number(document.getElementById("rot-snap").value) || 0;
+  const scale = Number(document.getElementById("scale-snap").value) || 0;
+  gizmo.setTranslationSnap(grid || null);
+  gizmo.setRotationSnap(rot ? THREE.MathUtils.degToRad(rot) : null);
+  gizmo.setScaleSnap(scale || null);
+}
+
+function setWidget(mode) {
+  state.gizmo = mode;
+  if (mode === "select") gizmo.detach();
+  else {
+    gizmo.setMode(mode);
+    attachGizmo();
+  }
+  syncChrome();
+}
+
 function attachGizmo() {
   const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
   const slots = state.slots.get(sel);
-  if (state.mode !== "object" || !slots || !slots.length) {
+  if (state.gizmo === "select" || state.mode !== "object" || !slots || !slots.length) {
     gizmo.detach();
     return;
   }
@@ -377,9 +408,7 @@ function attachGizmo() {
   pivot.userData.id = sel;
   gizmo.attach(pivot);
   gizmo.setMode(state.gizmo);
-  const snap = Number(document.getElementById("snap").value) || 0;
-  gizmo.setTranslationSnap(snap || null);
-  gizmo.setRotationSnap(snap ? THREE.MathUtils.degToRad(15) : null);
+  applySnap();
 }
 
 function syncSelection() {
@@ -437,9 +466,71 @@ async function commitXform() {
   });
 }
 
+const held = new Set();
+let camSpeed = 4;
+let flyPitch = 0;
+const _fwd = new THREE.Vector3();
+const _right = new THREE.Vector3();
+const _worldUp = new THREE.Vector3(0, 0, 1);
+
+function stepFly(dt) {
+  if (!state.flying) return;
+  camera.getWorldDirection(_fwd);
+  _right.setFromMatrixColumn(camera.matrixWorld, 0);
+  let x = 0, y = 0, z = 0;
+  if (held.has("w")) { x += _fwd.x; y += _fwd.y; z += _fwd.z; }
+  if (held.has("s")) { x -= _fwd.x; y -= _fwd.y; z -= _fwd.z; }
+  if (held.has("d")) { x += _right.x; y += _right.y; z += _right.z; }
+  if (held.has("a")) { x -= _right.x; y -= _right.y; z -= _right.z; }
+  if (held.has("e")) z += 1;
+  if (held.has("q")) z -= 1;
+  const len = Math.hypot(x, y, z);
+  if (len > 1e-6) {
+    const speed = 400 * 2 ** (camSpeed - 1) * dt;
+    camera.position.x += (x / len) * speed;
+    camera.position.y += (y / len) * speed;
+    camera.position.z += (z / len) * speed;
+  }
+  camera.getWorldDirection(_fwd);
+  const radius = Math.max(256, camera.position.distanceTo(orbit.target));
+  orbit.target.copy(camera.position).addScaledVector(_fwd, radius);
+}
+
+function look(dx, dy) {
+  if (!dx && !dy) return;
+  const next = Math.max(-1.45, Math.min(1.45, flyPitch - dy * 0.003));
+  const applied = next - flyPitch;
+  flyPitch = next;
+  camera.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(_worldUp, -dx * 0.003));
+  _right.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  camera.quaternion.premultiply(new THREE.Quaternion().setFromAxisAngle(_right, applied));
+}
+
+function beginFly() {
+  if (state.dragging || state.flying) return;
+  state.flying = true;
+  orbit.enabled = false;
+  orbit.enableZoom = false;
+  camera.getWorldDirection(_fwd);
+  flyPitch = Math.asin(THREE.MathUtils.clamp(_fwd.z, -1, 1));
+  renderer.domElement.requestPointerLock?.();
+}
+
+function endFly() {
+  if (!state.flying) return;
+  state.flying = false;
+  orbit.enableZoom = true;
+  orbit.enabled = !state.dragging;
+  if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+}
+
+let lastFrame = performance.now();
 function animate() {
   requestAnimationFrame(animate);
-  if (flashUntil && performance.now() > flashUntil) {
+  const now = performance.now();
+  stepFly(Math.min(0.05, (now - lastFrame) / 1000));
+  lastFrame = now;
+  if (flashUntil && now > flashUntil) {
     flashUntil = 0;
     state.flashIds = [];
     document.getElementById("ai").hidden = true;
@@ -449,10 +540,30 @@ function animate() {
 }
 animate();
 
+renderer.domElement.addEventListener("contextmenu", (ev) => ev.preventDefault());
+document.addEventListener("mousemove", (ev) => {
+  if (state.flying) look(ev.movementX, ev.movementY);
+});
+document.addEventListener("pointerup", (ev) => {
+  if (ev.button === 2) endFly();
+});
+document.addEventListener("pointerlockchange", () => {
+  if (state.flying && document.pointerLockElement !== renderer.domElement) endFly();
+});
+renderer.domElement.addEventListener("wheel", (ev) => {
+  if (!state.flying) return;
+  ev.preventDefault();
+  ev.stopImmediatePropagation();
+  camSpeed = Math.max(1, Math.min(8, camSpeed + (ev.deltaY < 0 ? 1 : -1)));
+  const chip = document.getElementById("cam-speed");
+  if (chip) chip.textContent = "Speed " + camSpeed;
+}, { capture: true, passive: false });
+
 const raycaster = new THREE.Raycaster();
 const pointer = new THREE.Vector2();
 renderer.domElement.addEventListener("pointerdown", (ev) => {
-  if (ev.button !== 0 || state.dragging || gizmo.axis) return;
+  if (ev.button === 2) { beginFly(); return; }
+  if (ev.button !== 0 || state.dragging || state.flying || gizmo.axis) return;
   const rect = renderer.domElement.getBoundingClientRect();
   pointer.x = ((ev.clientX - rect.left) / rect.width) * 2 - 1;
   pointer.y = -((ev.clientY - rect.top) / rect.height) * 2 + 1;
@@ -546,8 +657,8 @@ function syncChrome() {
     const button = document.getElementById(id);
     if (button) button.classList.toggle("on", state.selectMode === value);
   }
-  const gizmoId = { translate: "g-move", rotate: "g-rot", scale: "g-scale" }[state.gizmo];
-  for (const id of ["g-move", "g-rot", "g-scale"]) {
+  const gizmoId = { select: "g-select", translate: "g-move", rotate: "g-rot", scale: "g-scale" }[state.gizmo];
+  for (const id of ["g-select", "g-move", "g-rot", "g-scale"]) {
     const button = document.getElementById(id);
     if (button) button.classList.toggle("on", id === gizmoId);
   }
@@ -933,14 +1044,18 @@ function wire() {
   for (const [id, mode] of [["sm-face", "face"], ["sm-edge", "edge"], ["sm-vert", "vert"]]) {
     document.getElementById(id).onclick = () => op("select", { select_mode: mode, mode: "edit" });
   }
-  document.getElementById("g-move").onclick = () => { state.gizmo = "translate"; gizmo.setMode("translate"); syncChrome(); };
-  document.getElementById("g-rot").onclick = () => { state.gizmo = "rotate"; gizmo.setMode("rotate"); syncChrome(); };
-  document.getElementById("g-scale").onclick = () => { state.gizmo = "scale"; gizmo.setMode("scale"); syncChrome(); };
+  document.getElementById("g-select").onclick = () => setWidget("select");
+  document.getElementById("g-move").onclick = () => setWidget("translate");
+  document.getElementById("g-rot").onclick = () => setWidget("rotate");
+  document.getElementById("g-scale").onclick = () => setWidget("scale");
+  for (const id of ["snap", "rot-snap", "scale-snap"]) {
+    document.getElementById(id).onchange = () => applySnap();
+  }
   document.getElementById("undo").onclick = () => op("undo", {});
   document.getElementById("redo").onclick = () => op("redo", {});
-  document.getElementById("extrude").onclick = () => op("mesh_op", { op: "extrude", distance: 10 });
-  document.getElementById("inset").onclick = () => op("mesh_op", { op: "inset", amount: 5 });
-  document.getElementById("bevel").onclick = () => op("mesh_op", { op: "bevel", width: 4 });
+  document.getElementById("extrude").onclick = () => op("mesh_op", { op: "extrude", distance: 64 });
+  document.getElementById("inset").onclick = () => op("mesh_op", { op: "inset", amount: 32 });
+  document.getElementById("bevel").onclick = () => op("mesh_op", { op: "bevel", width: 32 });
   document.getElementById("loop").onclick = () => op("mesh_op", { op: "loopcut" });
   document.getElementById("sub").onclick = () => op("mesh_op", { op: "subdivide" });
   document.getElementById("fill").onclick = () => op("mesh_op", { op: "fill" });
@@ -1011,28 +1126,42 @@ function wire() {
     b.onclick = () => { state.tab = id; paintPanels(); };
     tabs.appendChild(b);
   }
+  function focusSelection() {
+    const sel = (state.payload && state.payload.selection && state.payload.selection.object) || "";
+    const slots = state.slots.get(sel);
+    if (!slots || !slots[0]) return;
+    slots[0].mesh.getMatrixAt(slots[0].index, _m);
+    const p = new THREE.Vector3().setFromMatrixPosition(_m);
+    const offset = camera.position.clone().sub(orbit.target);
+    if (offset.length() < 256) offset.set(1200, -1600, 640);
+    orbit.target.copy(p);
+    camera.position.copy(p).add(offset);
+    orbit.update();
+  }
   window.addEventListener("keydown", (ev) => {
-    if (ev.target.matches("input, textarea")) return;
+    if (ev.target.matches("input, textarea, select")) return;
     const k = ev.key.toLowerCase();
+    if (!ev.repeat) held.add(k);
+    if (state.flying) return;
     if (k === "tab") { ev.preventDefault(); op("select", { mode: state.mode === "object" ? "edit" : "object" }); }
-    else if (k === "g") state.gizmo = "translate";
-    else if (k === "r") state.gizmo = "rotate";
-    else if (k === "s" && !ev.ctrlKey) state.gizmo = "scale";
-    else if (k === "e") op("mesh_op", { op: "extrude", distance: 10 });
-    else if (k === "i") op("mesh_op", { op: "inset", amount: 5 });
-    else if (k === "f") op("mesh_op", { op: "fill" });
+    else if (k === "q") setWidget("select");
+    else if (k === "w") setWidget("translate");
+    else if (k === "e") setWidget("rotate");
+    else if (k === "r" && !ev.ctrlKey) setWidget("scale");
+    else if (k === "f") focusSelection();
+    else if (k === "i") op("mesh_op", { op: "inset", amount: 32 });
     else if (k === "x") op("mesh_op", { op: "delete", kind: "face" });
     else if (k === "z" && (ev.ctrlKey || ev.metaKey)) op(ev.shiftKey ? "redo" : "undo", {});
     else if (k === "d" && ev.shiftKey) op("duplicate", {});
-    else if (ev.ctrlKey && k === "b") op("mesh_op", { op: "bevel", width: 4 });
+    else if (ev.ctrlKey && k === "b") op("mesh_op", { op: "bevel", width: 32 });
     else if (ev.ctrlKey && k === "r") op("mesh_op", { op: "loopcut" });
     else if (ev.ctrlKey && k === "j") {
       const ids = objectIds();
       if (ids.length >= 2) op("join", { ids });
     }
-    gizmo.setMode(state.gizmo);
-    syncChrome();
   });
+  window.addEventListener("keyup", (ev) => held.delete(ev.key.toLowerCase()));
+  window.addEventListener("blur", () => held.clear());
 }
 
 wire();

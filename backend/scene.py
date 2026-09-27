@@ -590,7 +590,7 @@ def _op_add(scene: Scene, p: dict) -> dict[str, Any]:
             "visible": True,
             "locked": False,
             "transform": {
-                "pos": [origin[0] + (i % stride) * 120.0, origin[1] + (i // stride) * 120.0, origin[2]],
+                "pos": [origin[0] + (i % stride) * 512.0, origin[1] + (i // stride) * 512.0, origin[2]],
                 "rot": list(p.get("rot") or [0, 0, 0]),
                 "scale": list(p.get("scale") or [1, 1, 1]),
             },
@@ -649,7 +649,7 @@ def _op_duplicate(scene: Scene, p: dict) -> dict[str, Any]:
     copy["id"] = _nid("o" if node.get("type") == "object" else "g")
     copy["name"] = str(node.get("name") or "Object") + " copy"
     pos = list((copy.get("transform") or {}).get("pos") or [0, 0, 0])
-    off = list(p.get("offset") or [20, 0, 0])
+    off = list(p.get("offset") or [512, 0, 0])
     copy["transform"]["pos"] = [pos[i] + off[i] for i in range(3)]
     scene.data["nodes"].append(copy)
     scene.data["selection"]["object"] = copy["id"]

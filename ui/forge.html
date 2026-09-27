@@ -27,7 +27,7 @@
     #view canvas { display:block; width:100%; height:100%; }
     .hud {
       position:absolute; z-index:2; top:8px; left:50%; transform:translateX(-50%);
-      display:flex; gap:2px; align-items:center; padding:3px;
+      display:flex; gap:2px; align-items:center; padding:3px; flex-wrap:wrap; justify-content:center; max-width:calc(100% - 72px);
       background:#2b2b2bee; border-radius:8px; box-shadow:0 2px 10px #0008;
     }
     .add-wrap { position:relative; }
@@ -93,16 +93,19 @@
   </div>
   <div class="main">
     <nav class="rail">
-      <button id="g-move" class="on" type="button" title="Move (G)">
+      <button id="g-select" type="button" title="Select (Q)">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4l6 16 2-6 6-2z"/></svg>
+      </button>
+      <button id="g-move" class="on" type="button" title="Move (W)">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3v18M3 12h18M12 3l-2.5 2.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/></svg>
       </button>
-      <button id="g-rot" type="button" title="Rotate (R)">
+      <button id="g-rot" type="button" title="Rotate (E)">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v5h-5"/></svg>
       </button>
-      <button id="g-scale" type="button" title="Scale (S)">
+      <button id="g-scale" type="button" title="Scale (R)">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 20L20 4M14 4h6v6M4 14v6h6"/></svg>
       </button>
-      <button id="extrude" type="button" title="Extrude (E)">
+      <button id="extrude" type="button" title="Extrude">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 17l5-5 5 5M12 4v8"/></svg>
       </button>
       <button id="inset" type="button" title="Inset (I)">
@@ -144,12 +147,34 @@
         <button id="sm-vert" class="icon" type="button" title="Vertices">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="6" cy="17" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="18" cy="17" r="2"/></svg>
         </button>
-        <select id="snap" title="Grid snap">
-          <option value="0">Snap off</option>
-          <option value="10" selected>10 cm</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
-          <option value="512">512</option>
+        <span id="cam-speed" class="dim" title="Hold right mouse to fly. Scroll changes speed.">Speed 4</span>
+        <select id="snap" title="Grid snap in Fortnite units. One tile is 512.">
+          <option value="0">Grid off</option>
+          <option value="1">1</option>
+          <option value="8">8</option>
+          <option value="16">16</option>
+          <option value="32">32</option>
+          <option value="64">64</option>
+          <option value="128">128</option>
+          <option value="256">256</option>
+          <option value="512" selected>512 tile</option>
+          <option value="1024">1024</option>
+          <option value="2048">2048</option>
+        </select>
+        <select id="rot-snap" title="Rotation snap">
+          <option value="0">Rot off</option>
+          <option value="5">5°</option>
+          <option value="10">10°</option>
+          <option value="15">15°</option>
+          <option value="45">45°</option>
+          <option value="90" selected>90°</option>
+        </select>
+        <select id="scale-snap" title="Scale snap">
+          <option value="0" selected>Scale off</option>
+          <option value="0.125">1/8</option>
+          <option value="0.25">1/4</option>
+          <option value="0.5">1/2</option>
+          <option value="1">1</option>
         </select>
       </div>
     </div>

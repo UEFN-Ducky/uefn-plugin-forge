@@ -46,6 +46,10 @@ def test_kernel_and_scene() -> None:
     assert open_edges(whole) == 0
     from backend.kernel.mesh import build_primitive
     assert open_edges(build_primitive("rounded_box", {"radius": 8})) == 0
+    tile = build_primitive("box")
+    xs = [v[0] for v in tile.verts]
+    zs = [v[2] for v in tile.verts]
+    assert max(xs) - min(xs) == 512 and max(zs) - min(zs) == 512
 
     a = box(100, 100, 100)
     b = box(100, 100, 100)
