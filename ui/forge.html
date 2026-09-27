@@ -63,10 +63,15 @@
     .thumbs figure { margin:0; text-align:center; color:var(--muted); }
     .thumbs img { width:64px; height:64px; object-fit:cover; background:#111; border-radius:4px; }
     #ai { color:#8ab4ff; }
+    #loading { position:fixed; inset:0; z-index:20; display:grid; place-items:center; background:#141418f2; text-align:center; }
+    #loading[hidden] { display:none; }
+    #loading .spin { width:28px; height:28px; margin:0 auto 10px; border:3px solid #333; border-top-color:var(--accent); border-radius:50%; animation:spin .8s linear infinite; }
+    @keyframes spin { to { transform:rotate(360deg); } }
     .menu { padding:3px 8px; }
   </style>
 </head>
 <body>
+<div id="loading" hidden><div><div class="spin"></div><strong id="loading-name">Loading</strong><div class="dim">Building the scene</div></div></div>
 <div class="app">
   <div class="top">
     <select id="scene" title="Scene"></select>

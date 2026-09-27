@@ -116,7 +116,7 @@ def _b64(values: array.array) -> str:
 
 
 def _indexed(mesh: Mesh, pid: str) -> dict[str, Any]:
-    """Packed float32 positions and uint32 indices. The view shades flat from these."""
+    """Packed float32 positions and uint32 indices. Smooth meshes get averaged normals in the view."""
     pos = array.array("f")
     idx = array.array("I")
     faces = array.array("I")
@@ -125,7 +125,10 @@ def _indexed(mesh: Mesh, pid: str) -> dict[str, Any]:
     for a, b, c, fi in mesh.triangles():
         idx.extend((int(a), int(b), int(c)))
         faces.append(int(fi))
-    return {"id": pid, "pb": _b64(pos), "ib": _b64(idx), "fb": _b64(faces), "tris": len(faces)}
+    out = {"id": pid, "pb": _b64(pos), "ib": _b64(idx), "fb": _b64(faces), "tris": len(faces)}
+    if mesh.smooth:
+        out["smooth"] = True
+    return out
 
 
 def _mat(mid: str, name: str, color: list[float] | None = None) -> dict[str, Any]:

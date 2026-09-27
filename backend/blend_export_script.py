@@ -90,42 +90,81 @@ for col in bpy.data.collections:
         "combine": True,
     })
 
+def xform(obj) -> dict:
+    # Local to the Blender parent so empty groups keep the real assembly.
+    rel = obj.matrix_world if obj.parent is None else obj.parent.matrix_world.inverted() @ obj.matrix_world
+    loc, eul, scl = rel.to_translation(), rel.to_euler("XYZ"), rel.to_scale()
+    return {
+        "pos": [round(loc.x * cm, 2), round(loc.y * cm, 2), round(loc.z * cm, 2)],
+        "rot": [round(math.degrees(eul.x), 2), round(math.degrees(eul.y), 2), round(math.degrees(eul.z), 2)],
+        "scale": [round(scl.x, 4), round(scl.y, 4), round(scl.z, 4)],
+    }
+
+
+def col_parent(obj) -> str | None:
+    cols = [c.name for c in obj.users_collection if c.name in groups]
+    return groups.get(cols[0]) if cols else None
+
+
+keep = [obj for obj in bpy.data.objects if obj.type == "EMPTY" or (obj.type == "MESH" and obj.data and obj.data.polygons)]
+ids = {obj.name: (f"e{i}" if obj.type == "EMPTY" else f"o{i}") for i, obj in enumerate(keep)}
+
+
+def parent_id(obj) -> str | None:
+    if obj.parent is not None and obj.parent.name in ids:
+        return ids[obj.parent.name]
+    return col_parent(obj)
+
+
+for obj in keep:
+    if obj.type != "EMPTY":
+        continue
+    cols = [c.name for c in obj.users_collection if c.name in groups]
+    nodes.append({
+        "id": ids[obj.name], "type": "group", "name": obj.name, "parent": parent_id(obj),
+        "layer": top_layer(cols[0]) if cols else "default", "visible": not obj.hide_get(), "locked": False,
+        "transform": xform(obj), "combine": True,
+    })
+
+depsgraph = None
 protos = {}
 prototypes = []
 objects = 0
-for obj in bpy.data.objects:
-    if obj.type != "MESH" or obj.data is None or not obj.data.polygons:
+for obj in keep:
+    if obj.type != "MESH":
         continue
-    key = obj.data.name
+    key = obj.name + ":eval" if obj.modifiers else obj.data.name
     proto = protos.get(key)
     if proto is None:
         me = obj.data
-        verts = [[round(v.co.x * cm, 2), round(v.co.y * cm, 2), round(v.co.z * cm, 2)] for v in me.vertices]
+        if obj.modifiers:
+            if depsgraph is None:
+                depsgraph = bpy.context.evaluated_depsgraph_get()
+            me = obj.evaluated_get(depsgraph).to_mesh()
         faces = [list(poly.vertices) for poly in me.polygons if len(poly.vertices) >= 3]
         if not faces:
+            if obj.modifiers and depsgraph is not None:
+                obj.evaluated_get(depsgraph).to_mesh_clear()
             continue
+        verts = [[round(v.co.x * cm, 2), round(v.co.y * cm, 2), round(v.co.z * cm, 2)] for v in me.vertices]
         pid = f"p{len(prototypes)}"
         proto = pid
         protos[key] = pid
         prototypes.append({
             "id": pid, "kind": "mesh", "params": {}, "key": key,
-            "mesh": {"verts": verts, "faces": faces, "face_mat": [], "uvs": [], "smooth": False},
+            "mesh": {
+                "verts": verts, "faces": faces, "face_mat": [], "uvs": [],
+                "smooth": any(poly.use_smooth for poly in me.polygons),
+            },
         })
+        if obj.modifiers and depsgraph is not None:
+            obj.evaluated_get(depsgraph).to_mesh_clear()
     cols = [c.name for c in obj.users_collection if c.name in groups]
-    parent = groups.get(cols[0], "") if cols else None
-    layer = top_layer(cols[0]) if cols else "default"
     slot = obj.material_slots[0].material if obj.material_slots else None
-    loc = obj.matrix_world.to_translation()
-    eul = obj.matrix_world.to_euler("XYZ")
-    scl = obj.matrix_world.to_scale()
     nodes.append({
-        "id": f"o{objects}", "type": "object", "name": obj.name, "parent": parent or None,
-        "layer": layer, "visible": not obj.hide_get(), "locked": False,
-        "transform": {
-            "pos": [round(loc.x * cm, 2), round(loc.y * cm, 2), round(loc.z * cm, 2)],
-            "rot": [round(math.degrees(eul.x), 2), round(math.degrees(eul.y), 2), round(math.degrees(eul.z), 2)],
-            "scale": [round(scl.x, 4), round(scl.y, 4), round(scl.z, 4)],
-        },
+        "id": ids[obj.name], "type": "object", "name": obj.name, "parent": parent_id(obj),
+        "layer": top_layer(cols[0]) if cols else "default", "visible": not obj.hide_get(), "locked": False,
+        "transform": xform(obj),
         "prototype": proto, "modifiers": [], "material": material_id(slot),
     })
     objects += 1

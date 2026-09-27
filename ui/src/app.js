@@ -188,6 +188,7 @@ function geometryFor(proto) {
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(b64buf(proto.pb)), 3));
     geo.setIndex(new THREE.BufferAttribute(new Uint32Array(b64buf(proto.ib)), 1));
     if (proto.fb) geo.userData.faceIds = new Uint32Array(b64buf(proto.fb));
+    if (proto.smooth) geo.computeVertexNormals();
   } else {
     geo.setAttribute("position", new THREE.Float32BufferAttribute(proto.positions, 3));
     if (proto.normals) geo.setAttribute("normal", new THREE.Float32BufferAttribute(proto.normals, 3));
@@ -198,12 +199,13 @@ function geometryFor(proto) {
   return geo;
 }
 
-function materialFor(matId, materials) {
+function materialFor(matId, materials, smooth) {
+  const key = (matId || "") + (smooth ? "|s" : "");
   const color = colorOf(matId, materials);
-  let mat = matCache.get(matId || "");
+  let mat = matCache.get(key);
   if (!mat) {
-    mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: true });
-    matCache.set(matId || "", mat);
+    mat = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05, flatShading: !smooth });
+    matCache.set(key, mat);
     return mat;
   }
   mat.color.copy(color);
@@ -334,7 +336,7 @@ function buildBatches() {
     const proto = protos.get(rows[0][1]);
     if (!proto) continue;
     const geo = geometryFor(proto);
-    const mat = materialFor(rows[0][12], payload.materials);
+    const mat = materialFor(rows[0][12], payload.materials, !!proto.smooth);
     for (let c = 0; c < rows.length; c += CHUNK) {
       const slice = rows.slice(c, c + CHUNK);
       const batch = new THREE.InstancedMesh(geo, mat, slice.length);
@@ -360,7 +362,7 @@ function buildBatches() {
   if (pulled) {
     const proto = protos.get(pulled[1]);
     if (proto) {
-      const mesh = new THREE.Mesh(geometryFor(proto), materialFor(pulled[12], payload.materials));
+      const mesh = new THREE.Mesh(geometryFor(proto), materialFor(pulled[12], payload.materials, !!proto.smooth));
       composeRow(pulled, local);
       mesh.matrix.multiplyMatrices(world(pulled[2]), local);
       mesh.matrixAutoUpdate = false;
@@ -595,6 +597,18 @@ async function op(name, params) {
   }
 }
 
+function showLoading(name) {
+  const el = document.getElementById("loading");
+  const label = document.getElementById("loading-name");
+  if (label) label.textContent = "Loading " + (name || "scene");
+  if (el) el.hidden = false;
+}
+
+function hideLoading() {
+  const el = document.getElementById("loading");
+  if (el) el.hidden = true;
+}
+
 function setStatus(text, isErr) {
   const el = document.getElementById("status");
   el.textContent = text || "";
@@ -627,10 +641,19 @@ async function poll() {
     const info = await rpc("forge_call", { op: "scene_get", name: state.name, params: { brief: true }, actor: "user" });
     if (!info || info.ok === false || info.rev === state.rev) return;
     if (!state.payload || info.geom !== state.geom) {
+      const switching = !state.payload || state.payload.name !== state.name;
+      if (switching) {
+        showLoading(state.name);
+        await new Promise((r) => requestAnimationFrame(r));
+      }
       const payload = await rpc("forge_call", { op: "scene_payload", name: state.name, params: {}, actor: "user" });
-      if (!payload || payload.ok === false) return;
+      if (!payload || payload.ok === false) {
+        if (switching) hideLoading();
+        return;
+      }
       state.rev = payload.rev;
       rebuild(payload);
+      if (switching) hideLoading();
       const last = (payload.activity || []).slice(-1)[0];
       if (last) setStatus((last.actor === "agent" ? "AI: " : "") + last.summary);
     } else {
@@ -644,6 +667,7 @@ async function poll() {
       syncSelection();
     }
   } catch (err) {
+    hideLoading();
     setStatus(err.message || String(err), true);
   } finally {
     state.polling = false;
@@ -1009,9 +1033,10 @@ function bindPanel() {
   if (importBlend) importBlend.onclick = async () => {
     const path = document.getElementById("blend-path").value.trim();
     if (!path) { setStatus("Paste the path to a .blend file", true); return; }
+    showLoading(path.split(/[/\\]/).pop());
     setStatus("Importing Blend…");
     const opened = await op("scene_import_blend", { path });
-    if (!opened || opened.ok === false) return;
+    if (!opened || opened.ok === false) { hideLoading(); return; }
     const sceneName = opened.opened || opened.name;
     await refreshScenes(sceneName);
     state.name = sceneName;
@@ -1095,7 +1120,9 @@ function wire() {
       b.textContent = file.name;
       b.onclick = async () => {
         box.hidden = true;
+        showLoading(file.name);
         const opened = await op("scene_open", { path: file.path });
+        if (!opened || opened.ok === false) { hideLoading(); return; }
         const sceneName = (opened && (opened.opened || opened.name)) || file.name;
         await refreshScenes(sceneName);
         state.name = sceneName;
@@ -1106,7 +1133,12 @@ function wire() {
     }
     box.hidden = false;
   };
-  document.getElementById("scene").onchange = (ev) => { state.name = ev.target.value; state.rev = -1; };
+  document.getElementById("scene").onchange = (ev) => {
+    if (ev.target.value === state.name) return;
+    state.name = ev.target.value;
+    state.rev = -1;
+    showLoading(state.name);
+  };
   document.getElementById("follow").onchange = (ev) => { state.follow = ev.target.checked; };
   const tabs = document.getElementById("tabs");
   const tabIcons = {
