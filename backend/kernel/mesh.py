@@ -48,6 +48,40 @@ def lerp(a: Sequence[float], b: Sequence[float], t: float) -> Vec3:
     return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
 
 
+def attr_default(name: str):
+    """Per-vertex attribute kinds: wt:<group> weight, sk:<key> shape delta, col:<name> RGBA."""
+    if name.startswith("sk:"):
+        return [0.0, 0.0, 0.0]
+    if name.startswith("col:"):
+        return [0.0, 0.0, 0.0, 1.0]
+    return 0.0
+
+
+def attr_mix(name: str, values: list, src):
+    """Value for a new vertex: default (None), a copy (index), or a blend ([(index, weight), ...])."""
+    if src is None:
+        return attr_default(name)
+    if isinstance(src, int):
+        v = values[src]
+        return v[:] if isinstance(v, list) else v
+    first = values[src[0][0]]
+    if isinstance(first, list):
+        out = [0.0] * len(first)
+        for i, w in src:
+            for k, c in enumerate(values[i]):
+                out[k] += w * c
+        return out
+    return sum(w * values[i] for i, w in src)
+
+
+def flip_side(name: str) -> str:
+    """wt:upperarm_l <-> wt:upperarm_r, so a mirrored half weights to the other side's bones."""
+    for a, b in (("_l", "_r"), ("_r", "_l"), ("_L", "_R"), ("_R", "_L")):
+        if name.startswith("wt:") and name.endswith(a):
+            return name[: -len(a)] + b
+    return name
+
+
 class Mesh:
     def __init__(self) -> None:
         self.verts: list[Vec3] = []
@@ -55,10 +89,25 @@ class Mesh:
         self.face_mat: list[str] = []
         self.uvs: list[list[Vec2]] = []
         self.smooth: bool = False
+        self.attrs: dict[str, list] = {}
 
-    def add_vert(self, p: Sequence[float]) -> int:
+    def add_vert(self, p: Sequence[float], src=None) -> int:
+        """src carries per-vertex attributes: an index to copy, or [(index, weight), ...] to blend."""
         self.verts.append([float(p[0]), float(p[1]), float(p[2])])
+        for name, values in self.attrs.items():
+            values.append(attr_mix(name, values, src))
         return len(self.verts) - 1
+
+    def keep(self, order: Sequence[int]) -> None:
+        """Keep only these vertex indices, in this order, attributes included. Faces are the caller's job."""
+        self.verts = [self.verts[i][:] for i in order]
+        self.attrs = {name: [vals[i][:] if isinstance(vals[i], list) else vals[i] for i in order] for name, vals in self.attrs.items()}
+
+    def ensure_attr(self, name: str) -> list:
+        values = self.attrs.get(name)
+        if values is None or len(values) != len(self.verts):
+            values = self.attrs[name] = [attr_default(name) for _ in self.verts]
+        return values
 
     def add_face(self, idxs: Sequence[int], mat: str = "default", uvs: Sequence[Sequence[float]] | None = None) -> int:
         face = [int(i) for i in idxs]
@@ -72,6 +121,15 @@ class Mesh:
             self.uvs.append([[float(u[0]), float(u[1])] for u in uvs])
         return len(self.faces) - 1
 
+    def tri_uv(self, fi: int, tri: Sequence[int]) -> list[float]:
+        """Flat [u, v, ...] where face fi meets each vertex of tri; zeros when the face has no UVs of its own
+        (stored meshes from a .blend import carry none)."""
+        face = self.faces[fi]
+        uvs = self.uvs[fi] if fi < len(self.uvs) else ()
+        if len(uvs) != len(face):
+            return [0.0] * (2 * len(tri))
+        return [float(c) for v in tri for c in uvs[face.index(v)][:2]]
+
     def copy(self) -> "Mesh":
         m = Mesh()
         m.verts = [v[:] for v in self.verts]
@@ -79,16 +137,20 @@ class Mesh:
         m.face_mat = self.face_mat[:]
         m.uvs = [[u[:] for u in face] for face in self.uvs]
         m.smooth = self.smooth
+        m.attrs = {name: [v[:] if isinstance(v, list) else v for v in vals] for name, vals in self.attrs.items()}
         return m
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "verts": self.verts,
             "faces": self.faces,
             "face_mat": self.face_mat,
             "uvs": self.uvs,
             "smooth": self.smooth,
         }
+        if self.attrs:  # absent when empty, so meshes without attributes keep their stored bytes
+            out["attrs"] = self.attrs
+        return out
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "Mesh":
@@ -110,6 +172,9 @@ class Mesh:
             else:
                 m.uvs.append([[0.0, 0.0] for _ in face])
         m.smooth = bool(data.get("smooth"))
+        for name, vals in (data.get("attrs") or {}).items():
+            if len(vals) == len(m.verts):
+                m.attrs[str(name)] = [[float(c) for c in v] if isinstance(v, list) else float(v) for v in vals]
         return m
 
     def bounds(self) -> tuple[Vec3, Vec3]:
@@ -142,10 +207,16 @@ class Mesh:
         return sum(max(0, len(f) - 2) for f in self.faces)
 
     def triangles(self) -> list[tuple[int, int, int, int]]:
-        """Fan triangulation. Returns (i0, i1, i2, face_index). Convex faces only."""
+        """Returns (i0, i1, i2, face_index). Fans tris and quads; ear-clips concave n-gons.
+
+        ponytail: quads are assumed convex so dense meshes skip the test.
+        """
         out: list[tuple[int, int, int, int]] = []
         for fi, face in enumerate(self.faces):
             if len(face) < 3:
+                continue
+            if len(face) >= 5:
+                out.extend((a, b, c, fi) for a, b, c in face_triangles(self.verts, face))
                 continue
             a = face[0]
             for k in range(1, len(face) - 1):
@@ -176,6 +247,10 @@ class Mesh:
             v[0] = o[0] + (v[0] - o[0]) * s[0]
             v[1] = o[1] + (v[1] - o[1]) * s[1]
             v[2] = o[2] + (v[2] - o[2]) * s[2]
+        for name, vals in self.attrs.items():
+            if name.startswith("sk:"):  # shape deltas are directions: scale, never offset
+                for d in vals:
+                    d[0], d[1], d[2] = d[0] * s[0], d[1] * s[1], d[2] * s[2]
 
     def transform(self, pos: Sequence[float], rot_deg: Sequence[float], scale: Sequence[float]) -> None:
         r = _euler(rot_deg)
@@ -184,9 +259,25 @@ class Mesh:
             v[0] = r[0][0] * x + r[0][1] * y + r[0][2] * z + pos[0]
             v[1] = r[1][0] * x + r[1][1] * y + r[1][2] * z + pos[1]
             v[2] = r[2][0] * x + r[2][1] * y + r[2][2] * z + pos[2]
+        for name, vals in self.attrs.items():
+            if name.startswith("sk:"):
+                for d in vals:
+                    x, y, z = d[0] * scale[0], d[1] * scale[1], d[2] * scale[2]
+                    d[0] = r[0][0] * x + r[0][1] * y + r[0][2] * z
+                    d[1] = r[1][0] * x + r[1][1] * y + r[1][2] * z
+                    d[2] = r[2][0] * x + r[2][1] * y + r[2][2] * z
 
     def append(self, other: "Mesh") -> None:
         base = len(self.verts)
+        for name in set(self.attrs) | set(other.attrs):
+            mine = self.attrs.get(name)
+            if mine is None:
+                mine = self.attrs[name] = [attr_default(name) for _ in range(base)]
+            theirs = other.attrs.get(name)
+            if theirs:
+                mine.extend((v[:] if isinstance(v, list) else v) for v in theirs)
+            else:
+                mine.extend(attr_default(name) for _ in other.verts)
         self.verts.extend(v[:] for v in other.verts)
         for i, face in enumerate(other.faces):
             self.faces.append([base + j for j in face])
@@ -197,7 +288,7 @@ class Mesh:
     def drop_unused(self) -> None:
         used = sorted({i for face in self.faces for i in face})
         remap = {old: new for new, old in enumerate(used)}
-        self.verts = [self.verts[i][:] for i in used]
+        self.keep(used)
         self.faces = [[remap[i] for i in face] for face in self.faces]
 
     def orient_convex(self) -> None:
@@ -226,6 +317,50 @@ def _newell(verts: list[Vec3], face: Sequence[int]) -> Vec3:
         ny += (a[2] - b[2]) * (a[0] + b[0])
         nz += (a[0] - b[0]) * (a[1] + b[1])
     return vnorm([nx, ny, nz])
+
+
+def _turn(verts: list[Vec3], face: Sequence[int]) -> Callable[[int, int, int], float]:
+    """2D cross product of o->p, o->q on the face's plane, positive for a turn the face's way."""
+    n = _newell(verts, face)
+    ax = max(range(3), key=lambda i: abs(n[i]))
+    a, b = [i for i in range(3) if i != ax]
+    pts = {i: (verts[i][a], verts[i][b]) for i in face}
+    count = len(face)
+    area = sum(pts[face[k]][0] * pts[face[(k + 1) % count]][1] - pts[face[(k + 1) % count]][0] * pts[face[k]][1] for k in range(count))
+    s = 1.0 if area >= 0 else -1.0
+
+    def turn(o: int, p: int, q: int) -> float:
+        return s * ((pts[p][0] - pts[o][0]) * (pts[q][1] - pts[o][1]) - (pts[p][1] - pts[o][1]) * (pts[q][0] - pts[o][0]))
+
+    return turn
+
+
+def is_convex(verts: list[Vec3], face: Sequence[int]) -> bool:
+    turn = _turn(verts, face)
+    return all(turn(face[k - 1], face[k], face[(k + 1) % len(face)]) >= -1e-9 for k in range(len(face)))
+
+
+def face_triangles(verts: list[Vec3], face: Sequence[int]) -> list[tuple[int, int, int]]:
+    """Triangles of one planar face in its own winding: a fan when convex, ear clipping when not."""
+    idx = list(face)
+    if is_convex(verts, face):
+        return [(idx[0], idx[k], idx[k + 1]) for k in range(1, len(idx) - 1)]
+    turn = _turn(verts, face)
+    tris: list[tuple[int, int, int]] = []
+    while len(idx) > 3:
+        for k in range(len(idx)):
+            p0, p1, p2 = idx[k - 1], idx[k], idx[(k + 1) % len(idx)]
+            if turn(p0, p1, p2) <= 1e-12:
+                continue
+            if any(turn(p0, p1, q) >= 0 and turn(p1, p2, q) >= 0 and turn(p2, p0, q) >= 0 for q in idx if q not in (p0, p1, p2)):
+                continue
+            tris.append((p0, p1, p2))
+            idx.pop(k)
+            break
+        else:
+            break  # self-intersecting outline: fan the rest rather than loop forever
+    tris.extend((idx[0], idx[k], idx[k + 1]) for k in range(1, len(idx) - 1))
+    return tris
 
 
 def _uv_for_face(verts: list[Vec3], face: Sequence[int]) -> list[Vec2]:
@@ -546,20 +681,17 @@ def lathe(profile: Sequence[Sequence[float]], seg: int = 16, mat: str = "default
     if len(pts) < 2:
         return Mesh()
     m = Mesh()
-    cols: list[list[int]] = []
-    for i in range(seg):
-        ang = math.tau * i / seg
-        c, s = math.cos(ang), math.sin(ang)
-        col = []
-        for r, z in pts:
-            col.append(m.add_vert((r * c, r * s, z)))
-        cols.append(col)
+    rows: list[list[int]] = []
+    for r, z in pts:
+        if r <= 1e-8:
+            rows.append([m.add_vert((0.0, 0.0, z))] * seg)  # one pole, so caps are real triangles
+        else:
+            rows.append([m.add_vert((r * math.cos(math.tau * i / seg), r * math.sin(math.tau * i / seg), z)) for i in range(seg)])
     for i in range(seg):
         j = (i + 1) % seg
         for k in range(len(pts) - 1):
-            if pts[k][0] <= 1e-8 and pts[k + 1][0] <= 1e-8:
-                continue
-            m.add_face([cols[i][k], cols[j][k], cols[j][k + 1], cols[i][k + 1]], mat)
+            face = [rows[k][i], rows[k][j], rows[k + 1][j], rows[k + 1][i]]
+            m.add_face([v for n, v in enumerate(face) if v != face[n - 1]], mat)  # add_face drops a pole-to-pole sliver
     m.smooth = True
     # Convex only when the profile radius is monotone-ish. Orient against centroid is
     # right for vases that contain the centroid; skip when the centroid is outside.

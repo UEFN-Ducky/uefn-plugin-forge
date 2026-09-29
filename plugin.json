@@ -1,9 +1,9 @@
 {
   "id": "forge",
   "kind": "plugin",
-  "version": "1.0.9",
+  "version": "1.2.4",
   "label": "Ducky Forge",
-  "description": "Model props inside UEFN-Ducky: Fortnite 512-unit grid, editor fly camera, QWER select/move/rotate/scale, layers, nested groups, join and booleans, materials and textures that Send turns into SM_ meshes and MI_ materials.",
+  "description": "Model, sculpt, paint, rig, and animate assets inside UEFN-Ducky, by hand or with the agent: Fortnite 512-unit grid, editor fly camera, QWER tools, layers, nested groups, solid booleans, smooth subdivision and sculpt brushes, shape keys, smart UV unwrap, texture painting, blend materials with painted masks, biped and chain skeletons with painted weights and IK, clips you can generate, key, and scrub, and a Send that lands SM_ and SK_ meshes, AS_ clips, morph targets, and MI_ materials and can place them in the level.",
   "min_app_version": "1.0.0",
   "default_enabled": true,
   "secret_keys": [],
@@ -35,7 +35,7 @@
     ],
     "agent.tools": {
       "category": "forge",
-      "intent_pattern": "\\b(forge|model(?:er|ing)?|prop|mesh|bevel|extrude|boolean|material|texture)\\b",
+      "intent_pattern": "\\b(forge|model(?:er|ing)?|prop|mesh|bevel|extrude|boolean|material|texture|sculpt\\w*|unwrap\\w*|uvs?|shape ?keys?|morph\\w*|blend ?shapes?|vertex ?colou?rs?|weight ?paint\\w*|ik|rig(?:ged|ging)?|bones?|skeleton|skin(?:ning)?|animat\\w*|keyframes?|pose|walk ?cycle)\\b",
       "plan_tools": [
         "forge_scene_list",
         "forge_scene_get",
@@ -52,7 +52,7 @@
         {
           "target": "settings.store.root",
           "title": "Open Forge",
-          "body": "Forge is a modeler in the panel. Open it from the header or the right dock. You and the agent edit the same scene, then Send to UEFN.",
+          "body": "Forge is a modeler, sculptor, painter, rigger, and animator in the panel. Open it from the header or the right dock. You and the agent edit the same scene, then Send to UEFN.",
           "advance": "next",
           "mode": "rect"
         }

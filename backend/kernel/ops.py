@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from typing import Sequence
 
-from .mesh import Mesh, Vec3, lerp, vadd, vcross, vdot, vlen, vmul, vnorm, vsub
+from .mesh import Mesh, Vec3, attr_mix, flip_side, lerp, vadd, vcross, vdot, vlen, vmul, vnorm, vsub
 
 
 def _faces_or_all(mesh: Mesh, face_ids: Sequence[int] | None) -> list[int]:
@@ -54,7 +54,7 @@ def extrude_faces(mesh: Mesh, face_ids: Sequence[int] | None, distance: float) -
             vert_n[vi] = vadd(vert_n.get(vi, [0.0, 0.0, 0.0]), n)
     dup: dict[int, int] = {}
     for vi, nsum in vert_n.items():
-        dup[vi] = mesh.add_vert(vadd(mesh.verts[vi], vmul(vnorm(nsum), float(distance))))
+        dup[vi] = mesh.add_vert(vadd(mesh.verts[vi], vmul(vnorm(nsum), float(distance))), vi)
     new_faces: list[int] = []
     for fi in selected:
         face = old_faces[fi]
@@ -85,7 +85,7 @@ def inset_faces(mesh: Mesh, face_ids: Sequence[int] | None, amount: float) -> li
         for vi in face:
             d = vsub(mesh.verts[vi], c)
             ln = vlen(d)
-            inner.append(mesh.add_vert(c if ln <= amount else vadd(c, vmul(d, (ln - amount) / ln))))
+            inner.append(mesh.add_vert(c if ln <= amount else vadd(c, vmul(d, (ln - amount) / ln)), vi))
         mesh.faces[fi] = inner
         from .mesh import _uv_for_face
 
@@ -144,7 +144,8 @@ def _chamfer_once(mesh: Mesh, edge_set: set[tuple[int, int]], width: float) -> i
         key = (origin, toward)
         hit = weld.get(key)
         if hit is None:
-            hit = mesh.add_vert(_offset_along(mesh, origin, toward, width))
+            point, t = _offset_along(mesh, origin, toward, width)
+            hit = mesh.add_vert(point, [(origin, 1.0 - t), (toward, t)])
             weld[key] = hit
         return hit
 
@@ -211,14 +212,15 @@ def _corner_face(mesh: Mesh, origin: int, vids: list[int], mat: str) -> int:
     return 1 if mesh.add_face(ordered, mat) >= 0 else 0
 
 
-def _offset_along(mesh: Mesh, origin: int, toward: int, width: float) -> Vec3:
+def _offset_along(mesh: Mesh, origin: int, toward: int, width: float) -> tuple[Vec3, float]:
     a = mesh.verts[origin]
     b = mesh.verts[toward]
     d = vsub(b, a)
     ln = vlen(d)
     if ln < 1e-8:
-        return a[:]
-    return lerp(a, b, min(0.45, width / ln))
+        return a[:], 0.0
+    t = min(0.45, width / ln)
+    return lerp(a, b, t), t
 
 
 def subdivide(mesh: Mesh, face_ids: Sequence[int] | None = None) -> int:
@@ -228,7 +230,7 @@ def subdivide(mesh: Mesh, face_ids: Sequence[int] | None = None) -> int:
     def midpoint(a: int, b: int) -> int:
         key = (a, b) if a < b else (b, a)
         if key not in mid:
-            mid[key] = mesh.add_vert(lerp(mesh.verts[a], mesh.verts[b], 0.5))
+            mid[key] = mesh.add_vert(lerp(mesh.verts[a], mesh.verts[b], 0.5), [(a, 0.5), (b, 0.5)])
         return mid[key]
 
     old = [(fi, mesh.faces[fi][:], mesh.face_mat[fi]) for fi in range(len(mesh.faces))]
@@ -240,7 +242,7 @@ def subdivide(mesh: Mesh, face_ids: Sequence[int] | None = None) -> int:
             mesh.add_face(face, mat)
             continue
         mids = [midpoint(face[i], face[(i + 1) % len(face)]) for i in range(len(face))]
-        center = mesh.add_vert(_avg([mesh.verts[i] for i in face]))
+        center = mesh.add_vert(_avg([mesh.verts[i] for i in face]), [(i, 1.0 / len(face)) for i in face])
         for i, vi in enumerate(face):
             mesh.add_face([vi, mids[i], center, mids[i - 1]], mat)
     return len(mid)
@@ -267,7 +269,8 @@ def loop_cut(mesh: Mesh, edge: Sequence[int] | None = None, t: float = 0.5) -> i
     t = min(0.95, max(0.05, float(t)))
     split: dict[tuple[int, int], int] = {}
     for a, b in chosen:
-        split[(a, b)] = mesh.add_vert(lerp(mesh.verts[a], mesh.verts[b], t if a < b else 1.0 - t))
+        f = t if a < b else 1.0 - t
+        split[(a, b)] = mesh.add_vert(lerp(mesh.verts[a], mesh.verts[b], f), [(a, 1.0 - f), (b, f)])
     faces = mesh.faces[:]
     mats = mesh.face_mat[:]
     mesh.faces = []
@@ -305,6 +308,7 @@ def merge_by_distance(mesh: Mesh, dist: float = 0.05) -> int:
     buckets: dict[tuple[int, int, int], int] = {}
     remap = list(range(len(mesh.verts)))
     kept: list[Vec3] = []
+    source: list[int] = []  # the first vertex of each cluster keeps its attributes
     merged = 0
     for i, v in enumerate(mesh.verts):
         key = (int(v[0] // cell), int(v[1] // cell), int(v[2] // cell))
@@ -324,10 +328,11 @@ def merge_by_distance(mesh: Mesh, dist: float = 0.05) -> int:
             buckets[key] = len(kept)
             remap[i] = len(kept)
             kept.append(v[:])
+            source.append(i)
         else:
             remap[i] = found
             merged += 1
-    mesh.verts = kept
+    mesh.keep(source)
     from .mesh import _uv_for_face
 
     faces, mats, uvs = [], [], []
@@ -358,18 +363,20 @@ def merge_center(mesh: Mesh, vert_ids: Sequence[int]) -> int:
     c = _avg([mesh.verts[i] for i in ids])
     keep = ids[0]
     mesh.verts[keep] = c
+    for name, vals in mesh.attrs.items():
+        vals[keep] = attr_mix(name, vals, [(i, 1.0 / len(ids)) for i in ids])
     drop = set(ids[1:])
     remap: dict[int, int] = {}
-    new_verts: list[Vec3] = []
-    for i, v in enumerate(mesh.verts):
+    order: list[int] = []
+    for i in range(len(mesh.verts)):
         if i in drop:
             continue
-        remap[i] = len(new_verts)
-        new_verts.append(v[:])
+        remap[i] = len(order)
+        order.append(i)
     keep_new = remap[keep]
     for i in drop:
         remap[i] = keep_new
-    mesh.verts = new_verts
+    mesh.keep(order)
     _remap_faces(mesh, remap)
     return len(drop)
 
@@ -379,18 +386,20 @@ def _remap_faces(mesh: Mesh, remap: dict[int, int]) -> None:
 
     faces, mats, uvs = [], [], []
     for fi, face in enumerate(mesh.faces):
-        nf = []
-        for vi in face:
+        src = mesh.uvs[fi] if fi < len(mesh.uvs) and len(mesh.uvs[fi]) == len(face) else None
+        nf, nuv = [], []
+        for k, vi in enumerate(face):
             ri = remap.get(vi, vi)
             if not nf or nf[-1] != ri:
                 nf.append(ri)
+                nuv.append(src[k] if src else None)
         if len(nf) >= 2 and nf[0] == nf[-1]:
-            nf = nf[:-1]
+            nf, nuv = nf[:-1], nuv[:-1]
         if len(set(nf)) < 3:
             continue
         faces.append(nf)
         mats.append(mesh.face_mat[fi])
-        uvs.append(_uv_for_face(mesh.verts, nf))
+        uvs.append(nuv if src else _uv_for_face(mesh.verts, nf))  # keep authored UVs through a merge
     mesh.faces, mesh.face_mat, mesh.uvs = faces, mats, uvs
 
 
@@ -538,17 +547,22 @@ def set_smooth(mesh: Mesh, smooth: bool) -> None:
 
 def separate_by_material(mesh: Mesh) -> list[Mesh]:
     groups: dict[str, Mesh] = {}
+    sources: dict[str, list[int]] = {}
     for fi, face in enumerate(mesh.faces):
         mat = mesh.face_mat[fi]
         dst = groups.setdefault(mat, Mesh())
+        src = sources.setdefault(mat, [])
         remap: dict[int, int] = {}
         nf = []
         for vi in face:
             if vi not in remap:
                 remap[vi] = dst.add_vert(mesh.verts[vi])
+                src.append(vi)
             nf.append(remap[vi])
         dst.add_face(nf, mat, mesh.uvs[fi] if fi < len(mesh.uvs) else None)
         dst.smooth = mesh.smooth
+    for mat, dst in groups.items():
+        dst.attrs = {name: [vals[i][:] if isinstance(vals[i], list) else vals[i] for i in sources[mat]] for name, vals in mesh.attrs.items()}
     return list(groups.values())
 
 
@@ -573,6 +587,12 @@ def mirror_mesh(mesh: Mesh, axis: str = "x", weld: float = 0.05) -> Mesh:
         face.reverse()
     for uvs in dup.uvs:
         uvs.reverse()
+    for name, vals in dup.attrs.items():
+        if name.startswith("sk:"):
+            for d in vals:
+                d[ai] = -d[ai]
+    # The mirrored half is the other side of the body: its weights belong to the _r bones and back.
+    dup.attrs = {flip_side(name): vals for name, vals in dup.attrs.items()}
     out.append(dup)
     merge_by_distance(out, weld)
     return out
@@ -601,26 +621,27 @@ def apply_modifiers(mesh: Mesh, modifiers: Sequence[dict]) -> Mesh:
     return out
 
 
-def triangulate_ngons(mesh: Mesh, only_nonplanar: bool = True, tol: float = 0.5) -> int:
-    from .mesh import _newell, _uv_for_face
+def triangulate_ngons(mesh: Mesh, only_nonplanar: bool = True, tol: float = 0.5, concave: bool = False) -> int:
+    """Split n-gons into triangles. only_nonplanar keeps flat faces; concave=True still splits flat concave ones."""
+    from .mesh import _newell, _uv_for_face, face_triangles, is_convex
 
     made = 0
     faces, mats, uvs = [], [], []
     for fi, face in enumerate(mesh.faces):
-        if len(face) <= 3 or (only_nonplanar and _planar(mesh, face, tol, _newell)):
+        keep = len(face) <= 3 or (only_nonplanar and _planar(mesh, face, tol, _newell))
+        if keep and not (concave and len(face) > 3 and not is_convex(mesh.verts, face)):
             faces.append(face)
             mats.append(mesh.face_mat[fi])
             uvs.append(mesh.uvs[fi] if fi < len(mesh.uvs) else [])
             continue
         src = mesh.uvs[fi] if fi < len(mesh.uvs) else []
-        for k in range(1, len(face) - 1):
-            tri = [face[0], face[k], face[k + 1]]
-            faces.append(tri)
+        for tri in face_triangles(mesh.verts, face):
+            faces.append(list(tri))
             mats.append(mesh.face_mat[fi])
             if len(src) == len(face):
-                uvs.append([src[0], src[k], src[k + 1]])
+                uvs.append([src[face.index(v)] for v in tri])
             else:
-                uvs.append(_uv_for_face(mesh.verts, tri))
+                uvs.append(_uv_for_face(mesh.verts, list(tri)))
             made += 1
     mesh.faces, mesh.face_mat, mesh.uvs = faces, mats, uvs
     return made

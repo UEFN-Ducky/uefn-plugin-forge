@@ -32,7 +32,7 @@ class SceneRegressions(unittest.TestCase):
         payload = scene.payload()
         prototype = scene.node(self.a)["prototype"]
         stamp = (scene.folder / "scene.json").stat().st_mtime_ns
-        history = scene._hist().read_bytes()
+        history = scene._hist().with_name("history-index.json").read_bytes()
         rev = scene.data["rev"]
         with patch.object(Scene, "_snapshot", side_effect=AssertionError("selection copied scene")), patch.object(Scene, "save", side_effect=AssertionError("selection wrote scene")):
             self.call("select", object=self.a, faces=[1])
@@ -41,7 +41,7 @@ class SceneRegressions(unittest.TestCase):
             self.call("select", object="")
         self.assertGreater(scene.data["rev"], rev)
         self.assertIsNone(scene.data["selection"]["object"])
-        self.assertEqual(scene._hist().read_bytes(), history)
+        self.assertEqual(scene._hist().with_name("history-index.json").read_bytes(), history)
         self.assertEqual((scene.folder / "scene.json").stat().st_mtime_ns, stamp)
         self.assertEqual(scene.node(self.a)["prototype"], prototype)
         self.assertIs(scene.payload()["instances"], payload["instances"])
@@ -60,6 +60,196 @@ class SceneRegressions(unittest.TestCase):
         self.call("redo")
         row = next(r for r in scene.payload()["instances"] if r[0] == self.a)
         self.assertEqual(row[3], 300)
+
+    def test_transform_is_small_durable_and_reuses_geometry(self):
+        scene = load("Test")
+        baseline = (scene.folder / "scene.json").read_bytes()
+        payload = scene.payload()
+        with patch.object(Scene, "_snapshot", side_effect=AssertionError("move copied scene")), patch.object(Scene, "save", side_effect=AssertionError("move rewrote scene")), patch.object(Scene, "_catalog", side_effect=AssertionError("move repacked meshes")):
+            self.call("edit", id=self.a, pos=[123, 456, 789])
+            moved = scene.payload()
+            self.assertIs(moved["prototypes"], payload["prototypes"])
+            self.call("undo")
+            self.assertEqual(scene.node(self.a)["transform"]["pos"], [0, 0, 0])
+            self.call("redo")
+        self.assertEqual((scene.folder / "scene.json").read_bytes(), baseline)
+        self.assertLess((scene.folder / "transforms.json").stat().st_size, 10000)
+        forget("Test")
+        scene = load("Test")
+        self.assertEqual(scene.node(self.a)["transform"]["pos"], [123, 456, 789])
+        self.call("undo")
+        self.assertEqual(scene.node(self.a)["transform"]["pos"], [0, 0, 0])
+
+    def test_mixed_transform_mesh_history_and_save(self):
+        self.call("edit", id=self.a, pos=[17, 0, 0])
+        self.call("edit", id=self.a, name="Renamed")
+        self.call("edit", id=self.a, pos=[31, 0, 0])
+        self.call("undo")
+        self.assertEqual(load("Test").node(self.a)["transform"]["pos"][0], 17)
+        self.call("undo")
+        self.assertNotEqual(load("Test").node(self.a)["name"], "Renamed")
+        self.call("undo")
+        self.assertEqual(load("Test").node(self.a)["transform"]["pos"][0], 0)
+        for _ in range(3): self.call("redo")
+        self.assertEqual(load("Test").node(self.a)["name"], "Renamed")
+        self.assertEqual(load("Test").node(self.a)["transform"]["pos"][0], 31)
+        from .files import save_forge, open_forge
+        saved = save_forge("Test")
+        self.call("edit", id=self.a, pos=[99, 0, 0])
+        open_forge(saved["path"])
+        self.assertEqual(load("Test").node(self.a)["transform"]["pos"][0], 31)
+
+    def test_legacy_history_is_not_read_on_move(self):
+        scene = load("Test")
+        scene._hist().with_name("history-index.json").unlink()
+        old = scene._snapshot()
+        scene._hist().write_text(json.dumps({"undo": [old], "redo": []}))
+        with patch("backend.history._legacy", side_effect=AssertionError("move read legacy undo")):
+            self.call("edit", id=self.a, pos=[42, 0, 0])
+            self.call("undo")
+            self.call("redo")
+            self.call("undo")
+        self.call("undo")
+        self.assertEqual(load("Test").node(self.a)["transform"]["pos"][0], 0)
+
+    def test_revert_across_transform_and_snapshot_history(self):
+        scene = load("Test")
+        initial_rev = scene.data["rev"]
+        self.call("edit", id=self.a, pos=[21, 0, 0])
+        self.call("edit", id=self.a, name="Different")
+        self.call("edit", id=self.a, pos=[47, 0, 0])
+        self.call("revert", rev=initial_rev)
+        self.assertEqual(scene.node(self.a)["transform"]["pos"][0], 0)
+        self.assertNotEqual(scene.node(self.a)["name"], "Different")
+
+    def test_legacy_redo_survives_upgrade(self):
+        scene = load("Test")
+        scene._hist().with_name("history-index.json").unlink()
+        future = scene._snapshot()
+        next(n for n in future["nodes"] if n["id"] == self.a)["transform"]["pos"] = [73, 0, 0]
+        scene._hist().write_text(json.dumps({"undo": [], "redo": [future]}))
+        self.call("redo")
+        self.assertEqual(scene.node(self.a)["transform"]["pos"][0], 73)
+
+    def test_modeling_reuses_unmodified_geometry_and_compact_history(self):
+        from . import scene as module
+        self.call("select", object=self.a, faces=[0])
+        self.call("mesh_op", op="extrude", faces=[0], distance=16)
+        scene = load("Test")
+        raw = scene.proto(scene.node(self.a))["mesh"]
+        before = scene._snapshot()
+        self.assertIs(next(p for p in before["prototypes"] if p["id"] == scene.node(self.a)["prototype"])["mesh"], raw)
+        payload = scene.payload()
+        known = {p["id"]: p["revision"] for p in payload["prototypes"]}
+        with patch.object(module, "_indexed", wraps=module._indexed) as packed:
+            self.call("edit", id=self.b, name="Renamed")
+            delta = self.call("scene_payload", known=known)
+            self.assertEqual(packed.call_count, 0)
+            self.assertTrue(all(p.get("cached") for p in delta["prototypes"]))
+        disk = json.loads((scene.folder / "scene.json").read_text())
+        self.assertIn("_forge_mesh_blob", next(p for p in disk["prototypes"] if p.get("mesh"))["mesh"])
+        self.call("select", object=self.a)
+        self.call("mesh_op", op="subdivide", faces=[0])
+        self.assertEqual(next(p for p in before["prototypes"] if p.get("mesh"))["mesh"], raw)
+        self.assertIsNot(scene.proto(scene.node(self.a))["mesh"], raw)
+        expected = scene.base_mesh(scene.node(self.a)).tri_count()
+        forget("Test")
+        self.assertEqual(load("Test").base_mesh(load("Test").node(self.a)).tri_count(), expected)
+        self.call("undo")
+        self.assertEqual(load("Test").proto(load("Test").node(self.a))["mesh"], raw)
+
+    def test_blob_storage_exports_self_contained_forge(self):
+        from .files import save_forge, open_forge
+        import zipfile
+        self.call("select", object=self.a)
+        self.call("mesh_op", op="extrude", faces=[0], distance=8)
+        saved = save_forge("Test")
+        with zipfile.ZipFile(saved["path"]) as archive:
+            data = json.loads(archive.read("scene.json"))
+            mesh = next(p["mesh"] for p in data["prototypes"] if p.get("mesh"))
+            self.assertIn("verts", mesh)
+            self.assertNotIn("_forge_mesh_blob", mesh)
+        open_forge(saved["path"])
+        self.assertGreater(load("Test").base_mesh(load("Test").node(self.a)).tri_count(), 12)
+
+    def test_jobs_return_while_busy_and_preserve_order(self):
+        import threading
+        from .jobs import submit, poll
+        gate = threading.Event()
+        order = []
+        def first():
+            gate.wait(2)
+            order.append(1)
+            return {"ok": True}
+        result = submit(first, {})
+        try:
+            self.assertFalse(result["done"])
+            self.assertFalse(poll(result["job"])["done"])
+            second = submit(lambda: order.append(2), {})
+            self.assertFalse(second["done"])
+        finally:
+            gate.set()
+        for job in (result["job"], second["job"]):
+            for _ in range(200):
+                reply = poll(job)
+                if reply.get("done"): break
+                time.sleep(0.01)
+            self.assertTrue(reply["done"])
+        self.assertEqual(order, [1, 2])
+
+    def test_scene_delta_reconstructs_edits_additions_and_deletions(self):
+        scene = load("Test")
+        before = scene.payload()
+        self.call("edit", id=self.a, name="Delta name")
+        extra = self.call("add", kind="box")["id"]
+        self.call("delete", ids=[self.b])
+        delta = self.call("scene_payload", since_geom=before["geom"], known={p["id"]: p["revision"] for p in before["prototypes"]})
+        self.assertNotIn("nodes", delta)
+        self.assertNotIn("instances", delta)
+        self.assertEqual(delta["node_patch"]["remove"], [self.b])
+        def apply(items, change, key):
+            items = {key(item): item for item in items}
+            for nid in change["remove"]: items.pop(nid)
+            for item in change["upsert"]: items[key(item)] = item
+            return [items[nid] for nid in change.get("order", items)]
+        nodes = apply(before["nodes"], delta["node_patch"], lambda n:n["id"])
+        groups = {}
+        for row in before["instances"]: groups.setdefault(row[0], []).append(row)
+        rows = [row for group in apply(list(groups.values()),delta["instance_patch"],lambda rows:rows[0][0]) for row in group]
+        self.assertEqual(nodes, scene.payload()["nodes"])
+        self.assertEqual(rows, scene.payload()["instances"])
+        self.assertTrue(all(p.get("cached") for p in delta["prototypes"]))
+        self.assertIn("nodes", self.call("scene_payload", since_geom=-999))
+
+    def test_delta_continues_after_fast_transform(self):
+        scene = load("Test")
+        scene.payload()
+        moved = self.call("edit", id=self.a, pos=[81, 0, 0])
+        self.call("edit", id=self.a, name="After movement")
+        delta = self.call("scene_payload", since_geom=moved["geom"])
+        self.assertIn("node_patch", delta)
+        self.assertEqual(delta["node_patch"]["upsert"][0]["transform"]["pos"], [81, 0, 0])
+
+    def test_changed_package_requires_version_bump(self):
+        from scripts import build_zip as packaging
+        root = Path(self.temp.name) / "plugin"
+        root.mkdir()
+        (root / "plugin.json").write_text(json.dumps({"id": "test", "version": "1.0.10"}))
+        (root / "ui.js").write_text("first build")
+        with patch.object(packaging, "ROOT", root), patch.object(packaging, "OUT_DIR", root / "deploy"):
+            packaging.build_zip()
+            packaging.build_zip()
+            (root / "ui.js").write_text("changed build")
+            with self.assertRaises(SystemExit): packaging.build_zip()
+            (root / "plugin.json").write_text(json.dumps({"id": "test", "version": "1.0.11"}))
+            packaging.build_zip()
+
+    def test_invalid_transform_leaves_state_and_history_unchanged(self):
+        scene = load("Test")
+        before = scene._snapshot()
+        with self.assertRaises(ValueError):
+            self.call("edit", id=self.a, pos=[float("nan"), 0, 0])
+        self.assertEqual(scene.data, before)
 
     def test_failed_edit_rolls_back_cached_scene(self):
         scene = load("Test")

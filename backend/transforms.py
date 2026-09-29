@@ -28,6 +28,15 @@ def world(scene, nid):
     return out
 
 
+def to_local(scene, nid, points):
+    """World centimetres to an object's mesh space, plus the factor that turns world lengths local."""
+    m = world(scene, nid)
+    inv = inverse(m)
+    local = [[sum(inv[i][j] * float(pt[j]) for j in range(3)) + inv[i][3] for i in range(3)] for pt in points or []]
+    size = sum(math.sqrt(sum(m[i][j] ** 2 for i in range(3))) for j in range(3)) / 3 or 1.0
+    return local, 1.0 / size
+
+
 def inverse(m):
     a = [row[:] + [float(i == j) for j in range(4)] for i, row in enumerate(m)]
     for col in range(4):

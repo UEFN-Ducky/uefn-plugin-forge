@@ -29,15 +29,31 @@ def forge_texture(name: str = "", file: str = "", **_kwargs: Any) -> dict:
     return {"ok": True, "mime": "image/png", "base64": base64.b64encode(path.read_bytes()).decode("ascii")}
 
 
+def forge_submit(method: str = "forge_call", params: dict | None = None, **_kwargs) -> dict:
+    from .jobs import submit
+    methods = {"forge_call": forge_call, "forge_texture": forge_texture}
+    fn = methods.get(method)
+    if fn is None:
+        return {"ok": False, "error": "Unknown Forge job method"}
+    return submit(fn, dict(params or {}))
+
+
+def forge_job(job: str = "", **_kwargs) -> dict:
+    from .jobs import poll
+    return poll(str(job))
+
+
 def register_panel_rpcs(api: Any) -> None:
-    def forge_send_bound(name: str = "", mode: str = "each", folder: str = "", collision: str = "simple", **_kwargs: Any) -> dict:
+    def forge_send_bound(name: str = "", mode: str = "each", folder: str = "", collision: str = "simple", place: bool = False, **_kwargs: Any) -> dict:
         try:
-            result = send_to_uefn(str(name), api.listener, mode=mode, folder=folder, collision=collision)
+            result = send_to_uefn(str(name), api.listener, mode=mode, folder=folder, collision=collision, place=bool(place))
             result["ok"] = True
             return result
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
+    api.register_panel_rpc("forge_submit", forge_submit)
+    api.register_panel_rpc("forge_job", forge_job)
     api.register_panel_rpc("forge_call", forge_call)
     api.register_panel_rpc("forge_send", forge_send_bound)
     api.register_panel_rpc("forge_texture", forge_texture)

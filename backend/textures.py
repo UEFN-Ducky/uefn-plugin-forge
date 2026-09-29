@@ -170,19 +170,20 @@ def generate_image(prompt: str) -> Image.Image:
 import urllib.parse  # noqa: E402
 
 
-def save_set(folder: Path, name: str, color: Image.Image, *, tileable: bool, derive: bool, metallic: float) -> dict[str, str]:
+def save_set(folder: Path, name: str, color: Image.Image, *, tileable: bool, derive: bool, metallic: float, tag: str = "") -> dict[str, str]:
+    """tag makes every save a new file, so undo can still point at the pixels it had."""
     folder.mkdir(parents=True, exist_ok=True)
     color = to_pot(color, max(color.size))
     if tileable:
         color = make_seamless(color)
-    paths = {"base_color": str(folder / f"{name}_BaseColor.png")}
+    paths = {"base_color": str(folder / f"{name}_BaseColor{tag}.png")}
     color.save(paths["base_color"])
     if derive:
         normal = normal_from_height(color)
         rough = roughness_from_color(color)
         orm = pack_orm(rough, metallic)
-        paths["normal"] = str(folder / f"{name}_Normal.png")
-        paths["orm"] = str(folder / f"{name}_ORM.png")
+        paths["normal"] = str(folder / f"{name}_Normal{tag}.png")
+        paths["orm"] = str(folder / f"{name}_ORM{tag}.png")
         normal.save(paths["normal"])
         orm.save(paths["orm"])
     return paths

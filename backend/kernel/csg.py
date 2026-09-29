@@ -1,146 +1,229 @@
-"""Convex-convex booleans by clipping faces to half-spaces.
+"""Solid booleans with a BSP tree, after Evan Wallace's csg.js (MIT).
 
-ponytail: O(faces^2) and only correct when both meshes are convex (boxes, spheres,
-cylinders, cones, capsules, wedges). Non-convex inputs raise. Upgrade path is
-manifold3d if a prop needs a real boolean.
+Works on any closed mesh, concave included; UVs are carried through the cuts.
+An open mesh still returns a result, but it will have holes.
+ponytail: pure Python, fine for props up to a few thousand faces. Cut pieces stay
+split along the other mesh's planes (T-junctions). Upgrade path is manifold3d when
+dense meshes need clean topology.
 """
 
 from __future__ import annotations
 
-from .mesh import Mesh, Vec3, vdot, vsub
+from .mesh import Mesh, vdot
 
 _EPS = 1e-4
+_COPLANAR, _FRONT, _BACK, _SPANNING = 0, 1, 2, 3
 
 
-def _convex(mesh: Mesh, eps: float = 0.05) -> bool:
-    if len(mesh.faces) < 4:
-        return False
-    for fi, face in enumerate(mesh.faces):
-        n = mesh.face_normal(fi)
-        p0 = mesh.verts[face[0]]
-        for v in mesh.verts:
-            # outward normal: every vertex is on the inside (negative) side
-            if vdot(n, vsub(v, p0)) > eps:
-                return False
-    return True
+def _plane(pts: list) -> tuple[list, float] | None:
+    nx = ny = nz = 0.0
+    for i, a in enumerate(pts):
+        b = pts[(i + 1) % len(pts)]
+        nx += (a[1] - b[1]) * (a[2] + b[2])
+        ny += (a[2] - b[2]) * (a[0] + b[0])
+        nz += (a[0] - b[0]) * (a[1] + b[1])
+    ln = (nx * nx + ny * ny + nz * nz) ** 0.5
+    if ln < 1e-9:
+        return None
+    n = [nx / ln, ny / ln, nz / ln]
+    return n, vdot(n, pts[0])
 
 
-def _side(v: Vec3, n: Vec3, p0: Vec3) -> float:
-    return vdot(n, vsub(v, p0))
+class _Poly:
+    __slots__ = ("pts", "uvs", "mat", "n", "w", "data")
+
+    def __init__(self, pts, uvs, mat, n, w, data=None):
+        self.pts, self.uvs, self.mat, self.n, self.w = pts, uvs, mat, n, w
+        self.data = data  # per-point attribute rows, same length as pts, or None
+
+    def flipped(self) -> "_Poly":
+        return _Poly(self.pts[::-1], self.uvs[::-1], self.mat, [-c for c in self.n], -self.w,
+                     self.data[::-1] if self.data else None)
 
 
-def _hit(a: Vec3, b: Vec3, sa: float, sb: float) -> Vec3:
-    den = sa - sb
-    t = 0.0 if abs(den) < 1e-12 else sa / den
-    t = min(1.0, max(0.0, t))
-    return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]
+def _lerp_row(a: list, b: list, t: float) -> list:
+    return [[x + (y - x) * t for x, y in zip(p, q)] if isinstance(p, list) else p + (q - p) * t for p, q in zip(a, b)]
 
 
-def _split(poly: list[Vec3], n: Vec3, p0: Vec3) -> tuple[list[Vec3], list[Vec3]]:
-    """Split by an outward plane. Inside is the negative side."""
-    if len(poly) < 3:
-        return [], []
-    sides = [_side(v, n, p0) for v in poly]
-    if all(s <= _EPS for s in sides):
-        # Fully inside, or lying on the plane. On-plane is the solid boundary, not outside.
-        return [p[:] for p in poly], []
-    if all(s >= -_EPS for s in sides):
-        return [], [p[:] for p in poly]
-    inside: list[Vec3] = []
-    outside: list[Vec3] = []
-    for i, cur in enumerate(poly):
-        nxt = poly[(i + 1) % len(poly)]
-        sc, sn = _side(cur, n, p0), _side(nxt, n, p0)
-        cur_in, cur_out = sc <= _EPS, sc >= -_EPS
-        if cur_in:
-            inside.append(cur[:])
-        if cur_out:
-            outside.append(cur[:])
-        if (sc > _EPS and sn < -_EPS) or (sc < -_EPS and sn > _EPS):
-            p = _hit(cur, nxt, sc, sn)
-            inside.append(p)
-            outside.append(p[:])
-    if len(inside) < 3:
-        inside = []
-    if len(outside) < 3:
-        outside = []
-    return inside, outside
+def _split(n, w, poly: _Poly, cof: list, cob: list, front: list, back: list) -> None:
+    types = []
+    kind = _COPLANAR
+    for p in poly.pts:
+        t = n[0] * p[0] + n[1] * p[1] + n[2] * p[2] - w
+        k = _BACK if t < -_EPS else _FRONT if t > _EPS else _COPLANAR
+        kind |= k
+        types.append(k)
+    if kind == _COPLANAR:
+        (cof if vdot(n, poly.n) > 0 else cob).append(poly)
+    elif kind == _FRONT:
+        front.append(poly)
+    elif kind == _BACK:
+        back.append(poly)
+    else:
+        f, b, fu, bu = [], [], [], []
+        fd, bd = ([], []) if poly.data else (None, None)
+        count = len(poly.pts)
+        for i in range(count):
+            j = (i + 1) % count
+            ti, tj = types[i], types[j]
+            vi, vj, ui, uj = poly.pts[i], poly.pts[j], poly.uvs[i], poly.uvs[j]
+            if ti != _BACK:
+                f.append(vi)
+                fu.append(ui)
+                if fd is not None:
+                    fd.append(poly.data[i])
+            if ti != _FRONT:
+                b.append(vi)
+                bu.append(ui)
+                if bd is not None:
+                    bd.append(poly.data[i])
+            if (ti | tj) == _SPANNING:
+                d = [vj[0] - vi[0], vj[1] - vi[1], vj[2] - vi[2]]
+                t = (w - vdot(n, vi)) / vdot(n, d)
+                v = [vi[0] + d[0] * t, vi[1] + d[1] * t, vi[2] + d[2] * t]
+                u = [ui[0] + (uj[0] - ui[0]) * t, ui[1] + (uj[1] - ui[1]) * t]
+                f.append(v)
+                fu.append(u)
+                b.append(v[:])
+                bu.append(u[:])
+                if fd is not None:
+                    row = _lerp_row(poly.data[i], poly.data[j], t)
+                    fd.append(row)
+                    bd.append(row)
+        if len(f) >= 3:
+            front.append(_Poly(f, fu, poly.mat, poly.n, poly.w, fd))
+        if len(b) >= 3:
+            back.append(_Poly(b, bu, poly.mat, poly.n, poly.w, bd))
 
 
-def _planes(mesh: Mesh) -> list[tuple[Vec3, Vec3]]:
-    return [(mesh.face_normal(fi), mesh.verts[mesh.faces[fi][0]][:]) for fi in range(len(mesh.faces))]
+class _Node:
+    __slots__ = ("n", "w", "front", "back", "polys")
+
+    def __init__(self, polys: list | None = None):
+        self.n, self.w, self.front, self.back, self.polys = None, 0.0, None, None, []
+        if polys:
+            self.build(polys)
+
+    def nodes(self) -> list["_Node"]:
+        out, stack = [], [self]
+        while stack:
+            node = stack.pop()
+            out.append(node)
+            stack.extend(c for c in (node.front, node.back) if c is not None)
+        return out
+
+    def build(self, polys: list) -> None:
+        stack = [(self, polys)]
+        while stack:
+            node, items = stack.pop()
+            if not items:
+                continue
+            if node.n is None:
+                node.n, node.w = items[0].n, items[0].w
+            front, back = [], []
+            for poly in items:
+                _split(node.n, node.w, poly, node.polys, node.polys, front, back)
+            if front:
+                node.front = node.front or _Node()
+                stack.append((node.front, front))
+            if back:
+                node.back = node.back or _Node()
+                stack.append((node.back, back))
+
+    def invert(self) -> None:
+        for node in self.nodes():
+            node.polys = [p.flipped() for p in node.polys]
+            if node.n is not None:
+                node.n, node.w = [-c for c in node.n], -node.w
+            node.front, node.back = node.back, node.front
+
+    def clip_polys(self, polys: list) -> list:
+        """Drop the parts of polys inside this solid."""
+        out, stack = [], [(self, polys)]
+        while stack:
+            node, items = stack.pop()
+            if node.n is None:
+                out.extend(items)
+                continue
+            front, back = [], []
+            for poly in items:
+                _split(node.n, node.w, poly, front, back, front, back)
+            if node.front is not None:
+                stack.append((node.front, front))
+            else:
+                out.extend(front)
+            if node.back is not None:
+                stack.append((node.back, back))
+        return out
+
+    def clip_to(self, other: "_Node") -> None:
+        for node in self.nodes():
+            node.polys = other.clip_polys(node.polys)
+
+    def all_polys(self) -> list:
+        return [p for node in self.nodes() for p in node.polys]
 
 
-def _fragments(mesh: Mesh, planes: list[tuple[Vec3, Vec3]], want: str) -> list[tuple[list[Vec3], str]]:
-    """want 'inside' keeps the part in the convex volume; 'outside' keeps the rest."""
-    out: list[tuple[list[Vec3], str]] = []
-    for fi, face in enumerate(mesh.faces):
-        mat = mesh.face_mat[fi] if mesh.face_mat else "default"
-        current = [[mesh.verts[i][:] for i in face]]
-        outside: list[list[Vec3]] = []
-        for n, p0 in planes:
-            nxt: list[list[Vec3]] = []
-            for poly in current:
-                inn, outp = _split(poly, n, p0)
-                if inn:
-                    nxt.append(inn)
-                if outp:
-                    outside.append(outp)
-            current = nxt
-            if not current and want == "inside":
-                break
-        if want == "inside":
-            for poly in current:
-                if len(poly) >= 3:
-                    out.append((poly, mat))
-        else:
-            for poly in outside:
-                if len(poly) >= 3:
-                    out.append((poly, mat))
-    return out
+def _polys(mesh: Mesh, names: list[str]) -> list[_Poly]:
+    from .mesh import attr_default
+    from .ops import triangulate_ngons
 
-
-def _to_mesh(frags: list[tuple[list[Vec3], str]], flip: bool) -> Mesh:
-    from .ops import merge_by_distance
-
-    mesh = Mesh()
-    for poly, mat in frags:
-        pts = list(reversed(poly)) if flip else poly
-        if len(pts) < 3:
+    flat = mesh.copy()
+    triangulate_ngons(flat, only_nonplanar=True, tol=0.01, concave=True)  # BSP needs planar, convex faces
+    cols = [flat.attrs.get(name) for name in names]
+    out = []
+    for fi, face in enumerate(flat.faces):
+        pts = [flat.verts[i][:] for i in face]
+        plane = _plane(pts)
+        if plane is None:
             continue
-        mesh.add_face([mesh.add_vert(p) for p in pts], mat)
-    merge_by_distance(mesh, 0.05)
-    return mesh
+        uvs = flat.uvs[fi] if fi < len(flat.uvs) and len(flat.uvs[fi]) == len(face) else [[0.0, 0.0] for _ in face]
+        data = [[col[i] if col else attr_default(name) for col, name in zip(cols, names)] for i in face] if names else None
+        out.append(_Poly(pts, [u[:] for u in uvs], flat.face_mat[fi] if fi < len(flat.face_mat) else "default", *plane, data))
+    return out
 
 
 def boolean(a: Mesh, b: Mesh, op: str = "difference") -> Mesh:
     op = (op or "difference").lower()
     if op not in {"union", "difference", "intersect"}:
         raise ValueError("boolean op must be union, difference, or intersect")
-    if not _convex(a) or not _convex(b):
-        raise ValueError("boolean needs two convex meshes (box, sphere, cylinder, cone, capsule, wedge)")
-    pa, pb = _planes(a), _planes(b)
-    if op == "intersect":
-        parts = _fragments(a, pb, "inside") + _fragments(b, pa, "inside")
-        flip_second = False
-        mesh = _to_mesh(parts, False)
-    elif op == "union":
-        mesh = _to_mesh(_fragments(a, pb, "outside") + _fragments(b, pa, "outside"), False)
+    names = sorted(set(a.attrs) | set(b.attrs))
+    na, nb = _Node(_polys(a, names)), _Node(_polys(b, names))
+    if op == "union":
+        na.clip_to(nb)
+        nb.clip_to(na)
+        nb.invert()
+        nb.clip_to(na)
+        nb.invert()
+        na.build(nb.all_polys())
+    elif op == "difference":
+        na.invert()
+        na.clip_to(nb)
+        nb.clip_to(na)
+        nb.invert()
+        nb.clip_to(na)
+        nb.invert()
+        na.build(nb.all_polys())
+        na.invert()
     else:
-        # The cap is B's surface strictly inside A. Faces of B that merely lie on
-        # A's boundary are coplanar duplicates, not the cut.
-        cap_frags = [frag for frag in _fragments(b, pa, "inside") if _strictly_inside(frag[0], pa)]
-        mesh = _to_mesh(_fragments(a, pb, "outside"), False)
-        mesh.append(_to_mesh(cap_frags, True))
-        from .ops import merge_by_distance
+        na.invert()
+        nb.clip_to(na)
+        nb.invert()
+        na.clip_to(nb)
+        nb.clip_to(na)
+        na.build(nb.all_polys())
+        na.invert()
+    from .ops import merge_by_distance
 
-        merge_by_distance(mesh, 0.05)
+    mesh = Mesh()
+    cols: list[list] = [[] for _ in names]
+    for poly in na.all_polys():
+        mesh.add_face([mesh.add_vert(p) for p in poly.pts], poly.mat, poly.uvs)
+        for row in poly.data or []:
+            for col, value in zip(cols, row):
+                col.append(value[:] if isinstance(value, list) else value)
+    mesh.attrs = dict(zip(names, cols))
+    if not mesh.faces:
+        raise ValueError(f"The {op} left nothing. Check that the shapes overlap.")
+    merge_by_distance(mesh, 0.05)
     return mesh
-
-
-def _strictly_inside(poly: list[Vec3], planes: list[tuple[Vec3, Vec3]], eps: float = 0.05) -> bool:
-    if not poly:
-        return False
-    n = float(len(poly))
-    c = [sum(p[0] for p in poly) / n, sum(p[1] for p in poly) / n, sum(p[2] for p in poly) / n]
-    return all(_side(c, normal, p0) < -eps for normal, p0 in planes)

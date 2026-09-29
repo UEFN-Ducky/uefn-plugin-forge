@@ -18,7 +18,14 @@
       <button id="open-file" class="menu" type="button" title="Open a saved .forge file">Open</button>
       <div id="files" hidden></div>
     </div>
-    <button id="mode" class="menu" type="button" title="Object or Edit mode">Object</button>
+    <select id="mode" title="Mode" aria-label="Mode">
+      <option value="object">Object</option>
+      <option value="edit">Edit</option>
+      <option value="sculpt">Sculpt</option>
+      <option value="weight">Weights</option>
+      <option value="vpaint">Blend paint</option>
+      <option value="tpaint">Texture paint</option>
+    </select>
     <div class="add-wrap">
       <button id="add-btn" class="menu" type="button" title="Add a primitive">Add</button>
       <div id="prims" hidden></div>
@@ -118,6 +125,19 @@
           <option value="0.5">1/2</option>
           <option value="1">1</option>
         </select>
+      </div>
+      <div id="brush-bar" class="hud brush-bar" role="toolbar" aria-label="Brush" hidden>
+        <select id="brush-kind" title="Brush" aria-label="Brush"></select>
+        <select id="brush-target" title="What the brush changes" aria-label="Brush target"></select>
+        <label class="dim">Radius <input id="brush-radius" type="number" min="1" step="1" value="20" aria-label="Brush radius in centimetres" /></label>
+        <label class="dim">Strength <input id="brush-strength" type="range" min="0.01" max="1" step="0.01" value="0.5" aria-label="Brush strength" /></label>
+        <input id="brush-color" type="color" value="#c0392b" title="Paint colour" aria-label="Paint colour" hidden />
+        <label class="dim"><input id="brush-mirror" type="checkbox" /> Mirror X</label>
+        <label class="dim"><input id="brush-invert" type="checkbox" /> Invert</label>
+        <button id="brush-add" type="button" title="Add a shape key to sculpt into" hidden>+ Key</button>
+        <button id="brush-sub" type="button" title="Round the mesh and give the brushes four times the vertices" hidden>Subdivide</button>
+        <button id="brush-dec" type="button" title="Keep half the vertices, to get back under budget" hidden>Decimate</button>
+        <button id="brush-done" type="button" title="Back to Object mode">Done</button>
       </div>
       <div class="view-help">RMB + WASD fly · Q / E down / up · Scroll speed · F frame selection</div>
     </div>

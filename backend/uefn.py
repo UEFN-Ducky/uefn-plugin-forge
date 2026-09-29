@@ -1,13 +1,15 @@
-"""Export a Forge scene and land it in UEFN as SM_ meshes plus MI_ materials."""
+"""Export a Forge scene and land it in UEFN as SM_/SK_ meshes, AS_ clips, and MI_ materials."""
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Callable
 
 from .gltf import write_glb
 from .kernel.mesh import Mesh
 from .kernel.ops import set_origin
+from .rig import skinned_part
 from .scene import Scene, load
 
 Listener = Callable[..., Any]
@@ -23,9 +25,7 @@ def _call(listener: Listener, command: str, params: dict | None = None, timeout:
     return result
 
 
-def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
-    """One record per exported mesh; collision parts use the simple-collision fallback."""
-    mode = (mode or "each").lower()
+def _visible_objects(scene: Scene) -> list[dict]:
     by_id = {n["id"]: n for n in scene.data["nodes"]}
     hidden_layers = {layer["id"] for layer in scene.data.get("layers", []) if layer.get("visible") is False}
     def visible_in_hierarchy(node):
@@ -36,9 +36,18 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
                 return False
             node = by_id.get(node.get("parent"))
         return node is None
-    objects = [n for n in scene.data["nodes"] if n.get("type") == "object" and visible_in_hierarchy(n)]
+    return [n for n in scene.data["nodes"] if n.get("type") == "object" and visible_in_hierarchy(n)]
+
+
+def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
+    """One record per exported static mesh; collision parts use the simple-collision fallback.
+
+    Objects bound to a rig are left out: collect_skinned ships them as one SK_ mesh.
+    """
+    mode = (mode or "each").lower()
+    objects = _visible_objects(scene)
     collision = [n for n in objects if n.get("layer") == "collision"]
-    visible = [n for n in objects if n.get("layer") != "collision"]
+    visible = [n for n in objects if n.get("layer") != "collision" and not n.get("skin")]
 
     def bake(nodes: list[dict]) -> Mesh:
         mesh = Mesh()
@@ -89,9 +98,37 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
     return [e for e in exports if e["mesh"].verts]
 
 
+def collect_skinned(scene: Scene) -> list[dict[str, Any]]:
+    """One skeletal mesh per rig: every visible object bound to it, pivot at the base centre."""
+    objects = [n for n in _visible_objects(scene) if n.get("layer") != "collision" and n.get("skin")]
+    rigs = [r for r in scene.data.get("rigs") or [] if any(n["skin"].get("rig") == r["id"] for n in objects)]
+    out = []
+    for rig in rigs:
+        part = skinned_part(scene, rig, [n for n in objects if n["skin"].get("rig") == rig["id"]])
+        shift = set_origin(part["mesh"], "base")
+        for bone in part["bones"]:
+            bone["head"] = [bone["head"][i] - shift[i] for i in range(3)]
+            bone["tail"] = [bone["tail"][i] - shift[i] for i in range(3)]
+        name = scene.name if len(rigs) == 1 else f"{scene.name}_{rig['name']}"
+        out.append({"name": name, **part})
+    return out
+
+
 def _safe_name(name: str) -> str:
     cleaned = "".join(ch if ch.isalnum() or ch in "_" else "_" for ch in name.strip())
     return cleaned[:48] or "Forge"
+
+
+def export_skinned(scene: Scene, folder: Path) -> list[dict[str, Any]]:
+    mats = scene.materials()
+    out = []
+    for item in collect_skinned(scene):
+        name = "SK_" + _safe_name(item["name"])
+        path = write_glb(item["mesh"], folder / f"{name}.glb", mats, skin=item)
+        order = list(dict.fromkeys(item["mesh"].face_mat))
+        out.append({"name": name, "glb": str(path), "materials": order,
+                    "bones": len(item["bones"]), "clips": [c["name"] for c in item["clips"]]})
+    return out
 
 
 def export_glbs(scene: Scene, mode: str, folder: Path) -> list[dict[str, Any]]:
@@ -125,6 +162,121 @@ def _imported(result: dict, needle: str) -> str | None:
     return str(paths[0]).split(".")[0] if paths else None
 
 
+def _texture(listener: Listener, scene: Scene, dest: str, tex_cache: dict, fname: str, usage: str) -> str:
+    """Import one texture file once per send; returns its asset path or ''."""
+    if not fname:
+        return ""
+    src = scene.folder / "textures" / fname
+    if not src.is_file():
+        return ""
+    if fname not in tex_cache:
+        tex_imp = _call(listener, "import_asset", {"source_file": str(src), "destination_path": f"{dest}/Textures", "replace_existing": True})
+        tex_path = _imported(tex_imp, "Textures") or _imported(tex_imp, src.stem)
+        if not tex_path:
+            return ""
+        _call(listener, "forge_set_texture_usage", {"texture_path": tex_path, "usage": usage})
+        tex_cache[fname] = tex_path
+    return tex_cache[fname]
+
+
+def _instances(listener: Listener, scene: Scene, item: dict, dest: str, masters: dict, tex_cache: dict) -> list[str]:
+    """One MI_ per material slot: on M_Forge_Master, or on M_Forge_Blend when the material has layers."""
+    mats = scene.materials()
+    mi_paths = []
+
+    def scalar(mi, name, value):
+        _call(listener, "set_material_instance_scalar", {"material_instance_path": mi, "param_name": name, "value": float(value)})
+
+    def vector(mi, name, value):
+        _call(listener, "set_material_instance_vector", {"material_instance_path": mi, "param_name": name, "color": list(value)[:4]})
+
+    def texture(mi, name, flag, fname, usage):
+        path = _texture(listener, scene, dest, tex_cache, fname, usage)
+        if path:
+            _call(listener, "set_material_instance_texture", {"material_instance_path": mi, "param_name": name, "texture_path": path})
+            scalar(mi, flag, 1.0)
+
+    for mid in item["materials"]:
+        mat = mats.get(mid) or {}
+        layers = [mats.get(lid) for lid in (mat.get("layers") or [])[:3]]
+        if any(layers) and "blend" not in masters:
+            built = _call(listener, "forge_build_blend_master", {"folder": f"{dest}/Materials", "asset_name": "M_Forge_Blend"})
+            masters["blend"] = str(built.get("material_path") or "").split(".")[0]
+        parent = masters["blend"] if any(layers) and masters.get("blend") else masters["base"]
+        mi_name = f"MI_{item['name']}_{_safe_name(str(mat.get('name') or mid))}"
+        made = _call(listener, "create_material_instance", {
+            "asset_name": mi_name,
+            "parent_material_path": parent,
+            "folder": f"{dest}/Materials",
+        })
+        mi = str(made.get("material_instance_path") or "").split(".")[0]
+        vector(mi, "BaseColor", list(mat.get("base_color") or [0.75, 0.75, 0.78, 1]))
+        vector(mi, "Emissive", list(mat.get("emissive") or [0, 0, 0])[:3] + [1])
+        scalar(mi, "Metallic", mat.get("metallic") or 0)
+        scalar(mi, "Roughness", mat.get("roughness") if mat.get("roughness") is not None else 0.5)
+        scalar(mi, "EmissiveStrength", mat.get("emissive_strength") or 0)
+        textures = mat.get("textures") or {}
+        texture(mi, "BaseColorTex", "UseBaseColorTex", textures.get("base_color"), "color")
+        texture(mi, "NormalTex", "UseNormalTex", textures.get("normal"), "normal")
+        texture(mi, "ORMTex", "UseORM", textures.get("orm"), "masks")
+        if parent == masters.get("blend"):
+            for i, layer in enumerate(layers, start=1):
+                if not layer:
+                    continue
+                vector(mi, f"Layer{i}Color", list(layer.get("base_color") or [0.75, 0.75, 0.78, 1]))
+                scalar(mi, f"Layer{i}Roughness", layer.get("roughness") if layer.get("roughness") is not None else 0.5)
+                scalar(mi, f"Layer{i}Metallic", layer.get("metallic") or 0)
+                texture(mi, f"Layer{i}Tex", f"UseLayer{i}Tex", (layer.get("textures") or {}).get("base_color"), "color")
+        mi_paths.append(mi)
+    return mi_paths
+
+
+def _in_front_of_camera(listener: Listener) -> list[float]:
+    cam = _call(listener, "get_viewport_camera", {})
+    loc, rot = cam.get("location") or {}, cam.get("rotation") or {}
+    yaw = math.radians(float(rot.get("yaw") or 0))
+    return [float(loc.get("x") or 0) + math.cos(yaw) * 800, float(loc.get("y") or 0) + math.sin(yaw) * 800, float(loc.get("z") or 0)]
+
+
+def _place(listener: Listener, landed: list[dict], location: list | None) -> tuple[list, list]:
+    """Put each asset in the level: SM_ as a mesh actor, SK_ on an Animated Mesh device playing its first clip."""
+    placed, notes = [], []
+    base = [float(v) for v in location] if location else _in_front_of_camera(listener)
+    device = None
+    if any(a.get("animations") for a in landed):
+        try:
+            rows = _call(listener, "animated_mesh_capabilities", {}).get("device_assets") or []
+            device = f"{rows[0]['path']}.{rows[0]['name']}_C" if rows else None
+        except Exception as exc:
+            notes.append(f"Animated Mesh device lookup failed ({exc}); enable the Animation plugin to auto-wire clips.")
+    for i, asset in enumerate(landed):
+        at = [base[0] + i * 400.0, base[1], base[2]]
+        label = Path(asset["mesh"]).name
+        clips = asset.get("animations") or []
+        try:
+            if clips and device:
+                spawned = _call(listener, "spawn_actor", {"asset_path": device, "location": at, "label": label, "folder": "Forge"})
+                label = (spawned.get("actor") or {}).get("label") or label
+                wired = _call(listener, "configure_animated_mesh", {
+                    "actor_path": label, "skeletal_mesh_path": asset["mesh"], "anim_path": clips[0], "loop": True,
+                })
+                if not wired.get("ok"):
+                    notes.append(f"{label}: device placed; set its fields by hand ({wired.get('results')})")
+            else:
+                spawned = _call(listener, "spawn_actor", {"asset_path": asset["mesh"], "location": at, "label": label, "folder": "Forge"})
+                label = (spawned.get("actor") or {}).get("label") or label
+                if clips:
+                    notes.append(f"{label}: placed as a skeletal mesh; an Animated Mesh device is what plays {Path(clips[0]).name} in game.")
+            try:
+                _call(listener, "snap_actor_to_ground", {"actor_path": label})
+            except Exception:
+                pass  # No ground under the camera is fine; the actor stays where it spawned.
+            placed.append({"label": label, "location": at, "clip": clips[0] if clips else None})
+        except Exception as exc:
+            notes.append(f"Could not place {label}: {exc}")
+    return placed, notes
+
+
 def send_to_uefn(
     scene_name: str,
     listener: Listener,
@@ -132,6 +284,8 @@ def send_to_uefn(
     mode: str = "each",
     folder: str = "",
     collision: str = "simple",
+    place: bool = False,
+    location: list | None = None,
 ) -> dict[str, Any]:
     scene = load(scene_name)
     info = _call(listener, "get_project_info", {})
@@ -146,9 +300,28 @@ def send_to_uefn(
 
     work = scene.folder / "export"
     items = export_glbs(scene, mode, work)
-    mats = scene.materials()
+    skinned = export_skinned(scene, work)
     landed = []
     tex_cache: dict[str, str] = {}
+    masters = {"base": master_path}
+
+    for item in skinned:
+        got = _call(listener, "forge_import_skeletal", {
+            "source_file": item["glb"], "destination_path": f"{dest}/{item['name']}",
+        }, timeout=300)
+        mesh_path = str(got.get("skeletal_mesh") or "")
+        if not mesh_path:
+            raise RuntimeError(f"Import did not return a skeletal mesh for {item['name']}: {got}")
+        mi_paths = _instances(listener, scene, item, dest, masters, tex_cache)
+        _call(listener, "forge_set_mesh_materials", {"mesh_path": mesh_path, "materials": mi_paths})
+        landed.append({
+            "mesh": mesh_path,
+            "skeleton": got.get("skeleton"),
+            "physics_asset": got.get("physics_asset"),
+            "animations": got.get("animations") or [],
+            "materials": mi_paths,
+            "valid": _call(listener, "validate_uefn_asset", {"asset_path": mesh_path}),
+        })
 
     for item in items:
         imported = _call(listener, "import_asset", {
@@ -159,51 +332,7 @@ def send_to_uefn(
         mesh_path = _imported(imported, "StaticMeshes") or _imported(imported, item["name"])
         if not mesh_path:
             raise RuntimeError(f"Import did not return a mesh for {item['name']}: {imported}")
-        mi_paths = []
-        for index, mid in enumerate(item["materials"]):
-            mat = mats.get(mid) or {}
-            mi_name = f"MI_{item['name']}_{_safe_name(str(mat.get('name') or mid))}"
-            made = _call(listener, "create_material_instance", {
-                "asset_name": mi_name,
-                "parent_material_path": master_path,
-                "folder": f"{dest}/Materials",
-            })
-            mi = str(made.get("material_instance_path") or "").split(".")[0]
-            color = list(mat.get("base_color") or [0.75, 0.75, 0.78, 1])
-            _call(listener, "set_material_instance_vector", {"material_instance_path": mi, "param_name": "BaseColor", "color": color[:4]})
-            emis = list(mat.get("emissive") or [0, 0, 0])
-            _call(listener, "set_material_instance_vector", {"material_instance_path": mi, "param_name": "Emissive", "color": emis[:3] + [1]})
-            _call(listener, "set_material_instance_scalar", {"material_instance_path": mi, "param_name": "Metallic", "value": float(mat.get("metallic") or 0)})
-            _call(listener, "set_material_instance_scalar", {"material_instance_path": mi, "param_name": "Roughness", "value": float(mat.get("roughness") if mat.get("roughness") is not None else 0.5)})
-            _call(listener, "set_material_instance_scalar", {"material_instance_path": mi, "param_name": "EmissiveStrength", "value": float(mat.get("emissive_strength") or 0)})
-            for slot, usage, flag in (
-                ("base_color", "color", "UseBaseColorTex"),
-                ("normal", "normal", "UseNormalTex"),
-                ("orm", "masks", "UseORM"),
-            ):
-                fname = (mat.get("textures") or {}).get(slot)
-                if not fname:
-                    continue
-                src = scene.folder / "textures" / fname
-                if not src.is_file():
-                    continue
-                if fname not in tex_cache:
-                    tex_imp = _call(listener, "import_asset", {
-                        "source_file": str(src),
-                        "destination_path": f"{dest}/Textures",
-                        "replace_existing": True,
-                    })
-                    tex_path = _imported(tex_imp, "Textures") or _imported(tex_imp, src.stem)
-                    if tex_path:
-                        _call(listener, "forge_set_texture_usage", {"texture_path": tex_path, "usage": usage})
-                        tex_cache[fname] = tex_path
-                if fname in tex_cache:
-                    param = {"base_color": "BaseColorTex", "normal": "NormalTex", "orm": "ORMTex"}[slot]
-                    _call(listener, "set_material_instance_texture", {
-                        "material_instance_path": mi, "param_name": param, "texture_path": tex_cache[fname],
-                    })
-                    _call(listener, "set_material_instance_scalar", {"material_instance_path": mi, "param_name": flag, "value": 1.0})
-            mi_paths.append(mi)
+        mi_paths = _instances(listener, scene, item, dest, masters, tex_cache)
         _call(listener, "forge_set_mesh_materials", {"mesh_path": mesh_path, "materials": mi_paths})
         if collision != "none":
             # ponytail: collision-layer meshes are counted, not imported as UCX_.
@@ -219,4 +348,7 @@ def send_to_uefn(
             "info": info_mesh,
             "collision_parts": len(item["collision"]),
         })
-    return {"folder": dest, "master": master_path, "assets": landed, "count": len(landed)}
+    out = {"folder": dest, "master": master_path, "assets": landed, "count": len(landed)}
+    if place:
+        out["placed"], out["notes"] = _place(listener, landed, location)
+    return out

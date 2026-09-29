@@ -5,6 +5,7 @@ from __future__ import annotations
 import array
 import base64
 import json
+import math
 import copy
 import os
 import secrets
@@ -13,10 +14,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import history
+from . import history, storage
 from .kernel.csg import boolean as csg_boolean
 from .kernel.mesh import Mesh, build_primitive
 from .check import check_mesh, fix_mesh
+from .rig import find_clip, find_rig, issues as rig_issues, merge_rigs, op_anim, op_preview, op_rig, posed_meshes
 from .kernel.ops import (
     apply_modifiers,
     bevel_edges,
@@ -42,7 +44,9 @@ from .kernel.ops import (
 from .uv import project
 
 _LOCK = threading.Lock()
-_READ = {"stats", "scene_get", "scene_list", "scene_payload", "scene_save", "scene_open", "scene_files", "scene_import_blend"}
+_READ = {"stats", "scene_get", "scene_list", "scene_payload", "scene_geom_part", "scene_save", "scene_open", "scene_files", "scene_import_blend", "rig_preview", "mesh_data"}
+# One dock message. Bigger buffers stay on the scene and load in pieces; every triangle is still sent.
+_GEOM_PART = 1024 * 1024
 _LOOK = {"check", "render"}
 _OPEN: dict[str, "Scene"] = {}
 
@@ -81,6 +85,7 @@ def _blank(name: str) -> dict[str, Any]:
         "materials": [_mat(mat, "Default")],
         "prototypes": [],
         "nodes": [],
+        "rigs": [],
         "geom": 1,
         "activity": [],
     }
@@ -117,19 +122,31 @@ def _b64(values: array.array) -> str:
     return base64.b64encode(values.tobytes()).decode("ascii")
 
 
-def _indexed(mesh: Mesh, pid: str) -> dict[str, Any]:
-    """Packed float32 positions and uint32 indices. Smooth meshes get averaged normals in the view."""
+def _indexed(mesh: Mesh, pid: str, uv: bool = False) -> dict[str, Any]:
+    """Packed float32 positions and uint32 indices. Smooth meshes get averaged normals in the view.
+
+    uv adds per-corner UVs (6 floats per triangle) so the dock can show textures;
+    a col:blend attribute adds per-vertex blend masks (3 floats each).
+    """
     pos = array.array("f")
     idx = array.array("I")
     faces = array.array("I")
+    corners = array.array("f")
     for v in mesh.verts:
         pos.extend((float(v[0]), float(v[1]), float(v[2])))
     for a, b, c, fi in mesh.triangles():
         idx.extend((int(a), int(b), int(c)))
         faces.append(int(fi))
+        if uv:
+            corners.extend(mesh.tri_uv(fi, (a, b, c)))
     out = {"id": pid, "pb": _b64(pos), "ib": _b64(idx), "fb": _b64(faces), "tris": len(faces)}
     if mesh.smooth:
         out["smooth"] = True
+    if uv:
+        out["ub"] = _b64(corners)
+    blend = mesh.attrs.get("col:blend")
+    if blend and len(blend) == len(mesh.verts):
+        out["cb"] = _b64(array.array("f", (c for rgba in blend for c in rgba[:3])))
     return out
 
 
@@ -158,6 +175,11 @@ class Scene:
         self._node_source = None
         self._node_count = -1
         self._node_index = {}
+        self._transforms = {}
+        self._catalog_cache = {}
+        self._geometry_cache = {}
+        self._payload_versions = {}
+        self._geom_hold = {}
 
     @property
     def name(self) -> str:
@@ -166,15 +188,51 @@ class Scene:
     def save(self) -> None:
         self.folder.mkdir(parents=True, exist_ok=True)
         tmp = self.folder / "scene.json.tmp"
-        tmp.write_text(json.dumps(self.data), encoding="utf-8")
+        tmp.write_text(json.dumps(storage.pack(self.data, self.folder)), encoding="utf-8")
         tmp.replace(self.folder / "scene.json")
         self._stamp = (self.folder / "scene.json").stat().st_mtime_ns
+        self._transforms = {}
+        (self.folder / "transforms.json").unlink(missing_ok=True)
+        storage.retain(self.data, self.folder)
+
+    def save_transform(self, nid):
+        """Atomically persist small overrides against the unchanged scene baseline."""
+        self._transforms[nid] = copy.deepcopy(self.node(nid)["transform"])
+        record = {"base_stamp": self._stamp, "transforms": self._transforms,
+                  "header": {k: self.data.get(k) for k in
+                             ("rev", "geom", "activity", "selection", "mode", "select_mode")}}
+        path = self.folder / "transforms.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record), encoding="utf-8")
+        tmp.replace(path)
+
+    def patch_payload_transform(self, nid):
+        if self._packed is None or self._packed_data is not self.data:
+            return
+        node = self.node(nid)
+        places = iter(_placements(node))
+        rows = []
+        for row in self._packed["instances"]:
+            if row[0] == nid:
+                t = next(places)
+                row = row[:3] + t["pos"] + t["rot"] + t["scale"] + row[12:]
+            rows.append(row)
+        self._packed = dict(self._packed, instances=rows, nodes=[
+            dict(n, transform=copy.deepcopy(node["transform"])) if n["id"] == nid else n
+            for n in self._packed["nodes"]])
+        self._packed_key = self.data.get("geom")
+        self._payload_versions[self._packed_key] = dict(self._packed)
+        while len(self._payload_versions) > 3:
+            self._payload_versions.pop(next(iter(self._payload_versions)))
 
     def _hist(self) -> Path:
         return self.folder / "history.json"
 
     def _snapshot(self) -> dict[str, Any]:
-        return json.loads(json.dumps(self.data))
+        # Authored geometry is immutable: mesh operations obtain their own Mesh copy.
+        memo = {id(item["mesh"]): item["mesh"] for collection in ("prototypes", "nodes")
+                for item in self.data.get(collection, []) if item.get("mesh")}
+        return copy.deepcopy(self.data, memo)
 
     def _note(self, actor: str, op: str, summary: str, ids: list, kind: str) -> None:
         self.data["rev"] = int(self.data.get("rev") or 0) + 1
@@ -341,9 +399,11 @@ class Scene:
         return mesh
 
     def _bake(self, node: dict) -> Mesh:
+        """The object's own editable mesh, modifiers applied. Callers write it back when done."""
         mesh = self.local_mesh(node)
-        node["modifiers"] = []
-        self.write_mesh(node, mesh)
+        if node.get("modifiers"):
+            node["modifiers"] = []
+            self.write_mesh(node, mesh)
         return mesh
 
     def is_locked(self, node: dict) -> bool:
@@ -377,14 +437,66 @@ class Scene:
         meshes: dict[str, Mesh] = {}
         for proto in self.data.get("prototypes") or []:
             pid = proto["id"]
-            mesh = self._mesh_of(proto)
+            raw = proto.get("mesh")
+            signature = (id(raw), proto.get("kind"), json.dumps(proto.get("params") or {}, sort_keys=True))
+            entry = self._catalog_cache.get(pid)
+            if entry is None or entry[0] != signature:
+                if raw:
+                    # Read-only view for packing/stats. Modeling still uses base_mesh copies.
+                    mesh = Mesh()
+                    mesh.verts = raw.get("verts", [])
+                    mesh.faces = raw.get("faces", [])
+                    mesh.face_mat = raw.get("face_mat", [])
+                    mesh.uvs = raw.get("uvs", [])
+                    mesh.smooth = bool(raw.get("smooth"))
+                    mesh.attrs = raw.get("attrs") or {}
+                else:
+                    mesh = self._mesh_of(proto)
+                entry = (signature, mesh, mesh.bounds(), mesh.tri_count(), raw)
+                self._catalog_cache[pid] = entry
+            _, mesh, bounds, triangles, _raw = entry
             meshes[pid] = mesh
-            lo, hi = mesh.bounds()
-            tris_of[pid] = mesh.tri_count()
-            bounds_of[pid] = (lo, hi)
+            tris_of[pid] = triangles
+            bounds_of[pid] = bounds
             if not proto.get("mesh"):
                 prim_of[pid] = {"kind": proto.get("kind"), "params": proto.get("params") or {}}
+        for key in list(self._catalog_cache):
+            if key not in meshes:
+                del self._catalog_cache[key]
         return prim_of, tris_of, bounds_of, meshes
+
+    def packed_geometry(self, key, mesh, uv=False):
+        cached = self._geometry_cache.get(key)
+        if cached is None or cached[0] is not mesh or ("ub" in cached[1]) != uv:
+            packed = _indexed(mesh, key, uv)
+            packed["revision"] = secrets.token_hex(8)
+            self._geometry_cache[key] = (mesh, packed)
+            return packed
+        return cached[1]
+
+    def _dock_proto(self, packed: dict) -> dict:
+        """Copy a packed mesh for the dock. Leave the cache intact.
+
+        ponytail: buffers over one panel message are held here and fetched in
+        ``_GEOM_PART`` slices. Ceiling is transfer time, not missing triangles.
+        """
+        out = dict(packed)
+        parts: dict[str, int] = {}
+        for key in ("pb", "ib", "fb", "ub", "cb"):
+            val = out.get(key)
+            if isinstance(val, str) and len(val) > _GEOM_PART:
+                self._geom_hold[(str(packed.get("id") or ""), key)] = val
+                parts[key] = len(val)
+                del out[key]
+        if parts:
+            out["parts"] = parts
+            out["part_size"] = _GEOM_PART
+        return out
+
+    def uv_materials(self) -> set[str]:
+        """Materials the dock must draw with UVs: a texture or blend layers."""
+        return {m["id"] for m in self.data.get("materials") or []
+                if (m.get("textures") or {}).get("base_color") or any(m.get("layers") or [])}
 
     def summary(self) -> dict[str, Any]:
         prim_of, tris_of, bounds_of, _meshes = self._catalog()
@@ -401,6 +513,7 @@ class Scene:
             "selection": self.data.get("selection"),
             "layers": self.data.get("layers"),
             "materials": self.data.get("materials"),
+            "rigs": self.data.get("rigs") or [],
             "nodes": nodes,
             "objects": objects,
             "activity": self.data.get("activity") or [],
@@ -433,7 +546,7 @@ class Scene:
             add_o({
                 "id": n["id"], "name": n.get("name"), "tris": tris,
                 "bounds": [lo, hi], "layer": n.get("layer"), "parent": n.get("parent"),
-                "prototype": pid,
+                "prototype": pid, "skin": n.get("skin"),
             })
             add_n({
                 "id": n["id"], "type": "object", "name": n.get("name"),
@@ -441,7 +554,7 @@ class Scene:
                 "visible": n.get("visible", True), "locked": bool(n.get("locked")),
                 "transform": n.get("transform"), "prototype": pid,
                 "primitive": prim_of.get(pid), "modifiers": mods or [],
-                "material": n.get("material"), "tris": tris,
+                "material": n.get("material"), "tris": tris, "skin": n.get("skin"),
             })
         return nodes, objects
 
@@ -458,6 +571,11 @@ class Scene:
         nodes: list[dict] = []
         add_i = instances.append
         add_n = nodes.append
+        # Only meshes some object draws with a textured or blend material carry UVs: they double the
+        # payload and make the dock expand every corner, so a big scene with one textured prop stays light.
+        uv_mats = self.uv_materials()
+        uv_pids = {n.get("prototype") or n["id"] for n in self.data["nodes"]
+                   if n.get("type") == "object" and n.get("material") in uv_mats} if uv_mats else set()
         for n in self.data["nodes"]:
             if n.get("type") != "object":
                 add_n({
@@ -486,20 +604,28 @@ class Scene:
             add_n(view)
             if not n.get("visible", True):
                 continue
+            uv = pid in uv_pids
             if mirrored:
                 key = self.display_key(n)
                 if key not in geos:
-                    geos[key] = _indexed(self.shaped_mesh(n), key)
+                    source = self._catalog_cache.get(pid)
+                    cached = self._geometry_cache.get(key)
+                    if cached is not None and cached[0] is source and ("ub" in cached[1]) == uv:
+                        geos[key] = cached[1]
+                    else:
+                        geos[key] = _indexed(self.shaped_mesh(n), key, uv)
+                        geos[key]["revision"] = secrets.token_hex(8)
+                        self._geometry_cache[key] = (source, geos[key])
                 places = _placements(n)
             elif mods:
                 key = pid
                 if key not in geos:
-                    geos[key] = _indexed(meshes[key] if key in meshes else self.base_mesh(n), key)
+                    geos[key] = self.packed_geometry(key, meshes[key] if key in meshes else self.base_mesh(n), uv)
                 places = _placements(n)
             else:
                 key = pid
                 if key not in geos:
-                    geos[key] = _indexed(meshes[key] if key in meshes else self.base_mesh(n), key)
+                    geos[key] = self.packed_geometry(key, meshes[key] if key in meshes else self.base_mesh(n), uv)
                 tr = n["transform"]
                 pos, rot, scale = tr["pos"], tr["rot"], tr["scale"]
                 add_i([
@@ -518,8 +644,12 @@ class Scene:
                     pos[0], pos[1], pos[2], rot[0], rot[1], rot[2],
                     scale[0], scale[1], scale[2], mat,
                 ])
+        for key in list(self._geometry_cache):
+            if key not in geos:
+                del self._geometry_cache[key]
+        self._geom_hold = {}
         info = self._header(nodes, [])
-        info["prototypes"] = list(geos.values())
+        info["prototypes"] = [self._dock_proto(g) for g in geos.values()]
         info["instances"] = instances
         self._packed_key = cache_key
         self._packed_data = self.data
@@ -527,6 +657,9 @@ class Scene:
         return self._payload_activity(info)
 
     def _payload_activity(self, info: dict) -> dict:
+        self._payload_versions[info.get("geom", 0)] = dict(info)
+        while len(self._payload_versions) > 3:
+            self._payload_versions.pop(next(iter(self._payload_versions)))
         last = (self.data.get("activity") or [None])[-1]
         info["flash"] = None
         if last and last.get("kind") == "edit" and last.get("actor") == "agent":
@@ -547,8 +680,18 @@ def load(name: str) -> Scene:
         return hit
     if not path.is_file():
         raise ValueError(f"No Forge scene named {name!r}")
-    scene = Scene(json.loads(path.read_text(encoding="utf-8")), folder)
+    scene = Scene(storage.unpack(json.loads(path.read_text(encoding="utf-8")), folder), folder)
     scene._stamp = path.stat().st_mtime_ns
+    changes = folder / "transforms.json"
+    if changes.is_file():
+        record = json.loads(changes.read_text(encoding="utf-8"))
+        if record.get("base_stamp") == scene._stamp:
+            scene._transforms = record.get("transforms", {})
+            for nid, transform in scene._transforms.items():
+                node = scene.node(nid)
+                if node is not None:
+                    node["transform"] = transform
+            scene.data.update(record.get("header", {}))
     _OPEN[key] = scene
     return scene
 
@@ -598,6 +741,8 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
             result["rev"] = scene.data.get("rev")
             result["name"] = scene.name
             return result
+        if op == "edit" and set(params) <= {"id", "pos", "rot", "scale", "transform"}:
+            return _edit_transform(scene, params, actor)
         editing = op not in _READ and op not in {"undo", "redo", "revert"}
         before = scene._snapshot() if editing and op not in _LOOK else None
         try:
@@ -615,6 +760,7 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
                 kind="look" if op in _LOOK else "edit", snapshot=before,
             )
         result["rev"] = scene.data.get("rev")
+        result["geom"] = scene.data.get("geom") or 0
         result["name"] = scene.name
         return result
 
@@ -634,7 +780,7 @@ def _sel_ids(scene: Scene, params: dict) -> list:
 def _op_add(scene: Scene, p: dict) -> dict[str, Any]:
     kind = str(p.get("kind") or "box")
     params = dict(p.get("params") or {})
-    mat = str(p.get("material") or scene.data["materials"][0]["id"])
+    mat = _material_ref(scene, str(p["material"])) if p.get("material") else scene.data["materials"][0]["id"]
     proto = scene.share_primitive(kind, params)
     count = max(1, int(p.get("count") or 1))
     base_name = str(p.get("name") or kind.replace("_", " ").title())
@@ -666,6 +812,40 @@ def _op_add(scene: Scene, p: dict) -> dict[str, Any]:
     scene.data["selection"]["object"] = first
     scene.touch_geom()
     return {"summary": f"Add {base_name}" + (f" x{count}" if count > 1 else ""), "ids": ids, "id": first}
+
+
+def _transform_result(scene, nid, summary):
+    return {"summary": summary, "ids": [nid], "name": scene.name,
+            "rev": scene.data["rev"], "geom": scene.data["geom"],
+            "transforms": {nid: copy.deepcopy(scene.node(nid)["transform"])}}
+
+
+def _edit_transform(scene, p, actor):
+    node = scene.node(str(p.get("id") or scene.data["selection"].get("object")))
+    if node is None:
+        raise ValueError("object not found")
+    if scene.is_locked(node):
+        raise ValueError("Unlock the object or its layer before editing")
+    before = copy.deepcopy(node["transform"])
+    transform = copy.deepcopy(before)
+    supplied = dict(p.get("transform") or {})
+    supplied.update({k: p[k] for k in ("pos", "rot", "scale") if k in p})
+    for key in ("pos", "rot", "scale"):
+        if key not in supplied:
+            continue
+        values = [float(v) for v in supplied[key]]
+        if len(values) != 3 or not all(math.isfinite(v) for v in values):
+            raise ValueError("Transform requires three finite numbers per axis")
+        transform[key] = values
+    if transform == before:
+        return _transform_result(scene, node["id"], "Transform unchanged")
+    history.push_transform(scene._hist(), node["id"], before, scene.data["rev"])
+    node["transform"] = transform
+    scene.touch_geom()
+    scene._note(actor, "edit", f"Move {node.get('name')}", [node["id"]], "edit")
+    scene.save_transform(node["id"])
+    scene.patch_payload_transform(node["id"])
+    return _transform_result(scene, node["id"], f"Transform {node.get('name')}")
 
 
 def _op_edit(scene: Scene, p: dict) -> dict[str, Any]:
@@ -862,7 +1042,7 @@ def _op_layer(scene: Scene, p: dict) -> dict[str, Any]:
 
 def _op_select(scene: Scene, p: dict) -> dict[str, Any]:
     sel = scene.data["selection"]
-    if "mode" in p and p["mode"] not in ("object", "edit"):
+    if "mode" in p and p["mode"] not in ("object", "edit", "sculpt", "weight", "vpaint", "tpaint"):
         raise ValueError("Invalid modeling mode")
     if "select_mode" in p and p["select_mode"] not in ("face", "edge", "vert"):
         raise ValueError("Invalid selection mode")
@@ -921,6 +1101,22 @@ def _face_edges(mesh: Mesh, faces: list) -> list[list[int]]:
 def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
     node = scene._active()
     which = str(p.get("op") or "")
+    # Whole-object reshapes: no face selection needed.
+    if which == "subdivide" and p.get("smooth"):
+        from .kernel.sculpt import catmull_clark
+
+        levels = max(1, min(4, int(p.get("levels", 1))))
+        mesh = catmull_clark(scene._bake(node), levels)
+        scene.write_mesh(node, mesh)
+        return {"summary": f"Smooth subdivide x{levels}", "ids": [node["id"]], "tris": mesh.tri_count()}
+    if which == "decimate":
+        from .kernel.sculpt import decimate
+
+        mesh = scene._bake(node)
+        before = mesh.tri_count()
+        decimate(mesh, float(p.get("ratio", 0.5)))
+        scene.write_mesh(node, mesh)
+        return {"summary": f"Decimate {before} to {mesh.tri_count()} triangles", "ids": [node["id"]], "tris": mesh.tri_count()}
     sel = scene.data["selection"]
     faces = list(p.get("faces") or sel.get("faces") or [])
     if which == "delete" and p.get("kind") == "edge":
@@ -977,8 +1173,9 @@ def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
         set_smooth(mesh, bool(p.get("smooth", True)))
     elif which == "origin":
         shift = set_origin(mesh, str(p.get("mode") or "base"))
-        t = node["transform"]
+        t = dict(node["transform"])
         t["pos"] = [t["pos"][i] + shift[i] for i in range(3)]
+        node["transform"] = t
     else:
         raise ValueError(f"Unknown mesh op {which!r}")
     scene.write_mesh(node, mesh)
@@ -990,19 +1187,26 @@ def _mesh_in_parent(scene: Scene, mesh: Mesh, parent: str | None) -> Mesh:
         from .transforms import inverse, world
         m = inverse(world(scene, parent))
         mesh.verts = [[sum(m[i][j] * vertex[j] for j in range(3)) + m[i][3] for i in range(3)] for vertex in mesh.verts]
+        for name, deltas in mesh.attrs.items():
+            if name.startswith("sk:"):  # directions: linear part only
+                mesh.attrs[name] = [[sum(m[i][j] * d[j] for j in range(3)) for i in range(3)] for d in deltas]
     return mesh
 
 
 def _op_bool(scene: Scene, p: dict) -> dict[str, Any]:
+    """a op b. b may be a list: cut many holes, or union many parts, in one step."""
     a = scene.node(str(p.get("a")))
-    b = scene.node(str(p.get("b")))
-    if not a or not b:
+    targets = p.get("b") if isinstance(p.get("b"), list) else [p.get("b")]
+    cutters = [scene.node(str(b)) for b in targets]
+    if not a or not cutters or any(b is None for b in cutters):
         raise ValueError("boolean needs a and b object ids")
-    if a is b or a.get("type") != "object" or b.get("type") != "object":
+    if any(b is a or b.get("type") != "object" for b in cutters) or a.get("type") != "object":
         raise ValueError("Boolean needs two different mesh objects")
-    if scene.is_locked(a) or scene.is_locked(b):
+    if scene.is_locked(a) or any(scene.is_locked(b) for b in cutters):
         raise ValueError("Unlock both objects before combining")
-    result = csg_boolean(scene.world_mesh(a), scene.world_mesh(b), str(p.get("op") or "difference"))
+    result = scene.world_mesh(a)
+    for b in cutters:
+        result = csg_boolean(result, scene.world_mesh(b), str(p.get("op") or "difference"))
     result = _mesh_in_parent(scene, result, a.get("parent"))
     node = {
         "id": _nid("o"), "type": "object", "name": f"{a.get('name')}_{p.get('op') or 'cut'}",
@@ -1012,13 +1216,13 @@ def _op_bool(scene: Scene, p: dict) -> dict[str, Any]:
         "prototype": scene.adopt_mesh(result), "modifiers": [],
         "material": a.get("material"),
     }
-    drop = {a["id"], b["id"]}
+    drop = {a["id"]} | {b["id"] for b in cutters}
     scene.data["nodes"] = [n for n in scene.data["nodes"] if n["id"] not in drop]
     scene.data["nodes"].append(node)
     scene.data["selection"]["object"] = node["id"]
     scene._gc_protos()
     scene.touch_geom()
-    return {"summary": f"Boolean {p.get('op') or 'difference'}", "ids": [node["id"]]}
+    return {"summary": f"Boolean {p.get('op') or 'difference'}", "ids": [node["id"]], "id": node["id"]}
 
 
 def _op_modifier(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1049,6 +1253,8 @@ def _op_join(scene: Scene, p: dict) -> dict[str, Any]:
     mesh = Mesh()
     for n in nodes:
         mesh.append(scene.world_mesh(n))
+    if p.get("weld"):
+        merge_by_distance(mesh, float(p.get("distance", 0.05)))
     mesh = _mesh_in_parent(scene, mesh, nodes[0].get("parent"))
     node = {
         "id": _nid("o"), "type": "object", "name": str(nodes[0].get("name") or "Joined"),
@@ -1064,7 +1270,7 @@ def _op_join(scene: Scene, p: dict) -> dict[str, Any]:
     scene.data["selection"]["object"] = node["id"]
     scene._gc_protos()
     scene.touch_geom()
-    return {"summary": f"Join {len(nodes)}", "ids": [node["id"]]}
+    return {"summary": f"Join {len(nodes)}", "ids": [node["id"]], "id": node["id"]}
 
 
 def _op_separate(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1091,29 +1297,45 @@ def _op_separate(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_material_set(scene: Scene, p: dict) -> dict[str, Any]:
-    mid = str(p.get("id") or "")
-    found = None
-    for m in scene.data["materials"]:
-        if m["id"] == mid or (not mid and m["name"] == p.get("name")):
-            found = m
-            break
+    # The tools pass the AI's reference (an id or a name) as both id and name: update that
+    # material, never add a same-named twin, and never rename it to its own id.
+    ref = str(p.get("id") or "")
+    mats = scene.data["materials"]
+    found = next((m for m in mats if m["id"] == ref), None) or next((m for m in mats if m["name"] == (ref or p.get("name"))), None)
     if found is None:
         found = _mat(_nid("m"), str(p.get("name") or "Material"), p.get("base_color"))
-        scene.data["materials"].append(found)
+        mats.append(found)
     for key in ("name", "base_color", "metallic", "roughness", "emissive", "emissive_strength", "opacity"):
-        if key in p:
+        if key in p and not (key == "name" and p[key] == ref):
             found[key] = p[key]
     if p.get("textures"):
         found["textures"] = dict(p["textures"])
+    if "layers" in p:
+        # Up to three materials revealed over this one by blend paint R, G, B.
+        layers = []
+        for ref in list(p.get("layers") or [])[:3]:
+            layer = next((m for m in scene.data["materials"] if m["id"] == ref or m["name"] == ref), None) if ref else None
+            if ref and layer is None:
+                raise ValueError(f"No material {ref!r} to use as a layer")
+            if layer is found:
+                raise ValueError("A material cannot be its own layer")
+            layers.append(layer["id"] if layer else "")
+        found["layers"] = layers
     scene.touch_geom()
     return {"summary": f"Material {found['name']}", "ids": [found["id"]], "material": found}
 
 
+def _material_ref(scene: Scene, ref: str) -> str:
+    """The id of the material the caller means, by id or by name."""
+    for m in scene.data["materials"]:
+        if ref in (m["id"], m["name"]):
+            return m["id"]
+    raise ValueError(f"No material {ref!r} in this scene; forge_material_set makes one")
+
+
 def _op_material_assign(scene: Scene, p: dict) -> dict[str, Any]:
-    node = scene._active()
-    mid = str(p.get("material") or "")
-    if not any(m["id"] == mid for m in scene.data["materials"]):
-        raise ValueError("material not in this scene")
+    node = _object(scene, p)
+    mid = _material_ref(scene, str(p.get("material") or ""))
     faces = p.get("faces")
     if not faces:
         node["material"] = mid
@@ -1129,14 +1351,33 @@ def _op_material_assign(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_uv(scene: Scene, p: dict) -> dict[str, Any]:
-    node = scene._active()
+    from .uv import smart_unwrap, texel_density
+
+    node = _object(scene, p) if p.get("id") else scene._active()
     mesh = scene._bake(node)
-    n = project(mesh, str(p.get("mode") or "box"), p.get("faces"), float(p.get("density", 0.01)))
+    mode = str(p.get("mode") or "box")
+    if mode == "smart":
+        charts = smart_unwrap(mesh, p.get("faces") or None, float(p.get("angle", 66)), float(p.get("margin", 0.01)))
+        scene.write_mesh(node, mesh)
+        return {"summary": f"Unwrap {node.get('name')}: {charts} charts", "ids": [node["id"]], "charts": charts,
+                "px_per_cm_1024": round(texel_density(mesh), 2)}
+    n = project(mesh, mode, p.get("faces"), float(p.get("density", 0.01)))
     scene.write_mesh(node, mesh)
-    return {"summary": f"UV {p.get('mode') or 'box'} on {n} faces", "ids": [node["id"]]}
+    return {"summary": f"UV {mode} on {n} faces", "ids": [node["id"]]}
 
 
 def _restore(scene: Scene, target: dict, label: str) -> None:
+    if "_transform_patch" in target:
+        patch = target["_transform_patch"]
+        node = scene.node(patch["id"])
+        if node is None:
+            raise ValueError("Undo target no longer exists")
+        node["transform"] = patch["transform"]
+        scene.touch_geom()
+        scene._note("user", label.lower(), label, [node["id"]], "look")
+        scene.save_transform(node["id"])
+        scene.patch_payload_transform(node["id"])
+        return _transform_result(scene, node["id"], label)
     rev, geom = scene.data.get("rev", 0), scene.data.get("geom", 0)
     scene.data = target
     scene.data["rev"] = rev
@@ -1146,23 +1387,25 @@ def _restore(scene: Scene, target: dict, label: str) -> None:
 
 
 def _op_undo(scene: Scene, _p: dict) -> dict[str, Any]:
-    prev = history.undo(scene._hist(), scene._snapshot())
+    prev = history.undo(scene._hist(), scene.data)
     if prev is None:
         return {"summary": "Nothing to undo", "ids": []}
-    _restore(scene, prev, "Undo")
+    result = _restore(scene, prev, "Undo")
+    if result: return result
     return {"summary": "Undo", "ids": []}
 
 
 def _op_redo(scene: Scene, _p: dict) -> dict[str, Any]:
-    nxt = history.redo(scene._hist(), scene._snapshot())
+    nxt = history.redo(scene._hist(), scene.data)
     if nxt is None:
         return {"summary": "Nothing to redo", "ids": []}
-    _restore(scene, nxt, "Redo")
+    result = _restore(scene, nxt, "Redo")
+    if result: return result
     return {"summary": "Redo", "ids": []}
 
 
 def _op_revert(scene: Scene, p: dict) -> dict[str, Any]:
-    target = history.revert_to(scene._hist(), scene._snapshot(), int(p.get("rev") or 0))
+    target = history.revert_to(scene._hist(), scene.data, int(p.get("rev") or 0))
     if target is None:
         return {"summary": "No snapshot at that rev", "ids": []}
     _restore(scene, target, "Revert")
@@ -1218,8 +1461,44 @@ def _op_get(scene: Scene, p: dict) -> dict[str, Any]:
     return info
 
 
+def _op_geom_part(scene: Scene, p: dict) -> dict[str, Any]:
+    pid = str(p.get("id") or "")
+    field = str(p.get("field") or "")
+    blob = scene._geom_hold.get((pid, field))
+    if not isinstance(blob, str):
+        raise ValueError("mesh piece is not loaded")
+    index = int(p.get("index") or 0)
+    start = index * _GEOM_PART
+    if start < 0 or start >= len(blob):
+        raise ValueError("mesh piece is out of range")
+    return {"data": blob[start:start + _GEOM_PART], "summary": "piece", "ids": []}
+
+
 def _op_payload(scene: Scene, _p: dict) -> dict[str, Any]:
+    previous = scene._payload_versions.get(_p.get("since_geom"))
     info = scene.payload()
+    if previous is not None:
+        def patch(old, new, key):
+            before = {key(item): item for item in old}
+            after = {key(item): item for item in new}
+            result = {"remove": [i for i in before if i not in after],
+                      "upsert": [item for i, item in after.items() if i not in before or before[i] != item]}
+            if list(before) != list(after):
+                result["order"] = list(after)
+            return result
+        def groups(rows):
+            out = {}
+            for row in rows:
+                out.setdefault(row[0], []).append(row)
+            return list(out.values())
+        info["node_patch"] = patch(previous["nodes"], info.pop("nodes"), lambda n: n["id"])
+        info["instance_patch"] = patch(groups(previous["instances"]), groups(info.pop("instances")), lambda rows: rows[0][0])
+        info["base_geom"] = _p["since_geom"]
+    known = _p.get("known") or {}
+    if known:
+        info["prototypes"] = [{"id": p["id"], "revision": p.get("revision"), "cached": True}
+                              if p.get("revision") and known.get(p["id"]) == p["revision"] else p
+                              for p in info["prototypes"]]
     info["summary"] = "payload"
     info["ids"] = []
     return info
@@ -1231,11 +1510,16 @@ def _op_stats(scene: Scene, _p: dict) -> dict[str, Any]:
 
 
 def _captures() -> Path:
+    """Staging dir for a render. The host moves the PNG into the chat folder."""
     env = os.environ.get("FORGE_CAPTURES_DIR")
     if env:
-        return Path(env)
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return Path(base) / "UEFN-Ducky" / "tool_captures"
+        path = Path(env)
+    else:
+        import tempfile
+
+        path = Path(tempfile.gettempdir()) / "ducky_forge_captures"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _op_check(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1248,6 +1532,8 @@ def _op_check(scene: Scene, p: dict) -> dict[str, Any]:
         lo, _hi = mesh.bounds()
         pivot_base = abs(lo[2]) < 0.5 and abs((lo[0] + _hi[0]) / 2) < 1 and abs((lo[1] + _hi[1]) / 2) < 1
         issues.extend(check_mesh(mesh, n["id"], has_collision=has_col or bool(p.get("collision")), pivot_is_base=pivot_base))
+    for rig in scene.data.get("rigs") or []:
+        issues.extend(rig_issues(scene, rig))
     return {"summary": f"{len(issues)} issues", "ids": [], "issues": issues, "count": len(issues)}
 
 
@@ -1275,28 +1561,35 @@ def _op_fix(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
+    """One image per object and view, or with a clip, the whole asset posed at each frame."""
     from .render import render_png
 
     views = list(p.get("views") or ["three"])
     paths = []
     folder = _captures()
-    for n in scene.data["nodes"]:
-        if n.get("type") != "object" or not n.get("visible", True):
-            continue
-        if p.get("id") and n["id"] != p["id"]:
-            continue
+    mats = scene.materials()
+    nodes = [n for n in scene.data["nodes"] if n.get("type") == "object" and n.get("visible", True)
+             and (not p.get("id") or n["id"] == p["id"])]
+    if p.get("clip"):
+        rig = find_rig(scene, str(p.get("rig") or ""))
+        clip = find_clip(rig, str(p["clip"]))
+        frames = [float(f) for f in (p.get("frames") or [0, clip["frames"] / 4, clip["frames"] / 2, clip["frames"] * 3 / 4])]
+        for f in frames:
+            dest = folder / f"forge_{scene.name}_{_safe(clip['name'])}_f{round(f)}.png"
+            paths.extend(render_png(posed_meshes(scene, nodes, rig, clip, f), dest, views, mats, scene.folder / "textures"))
+        return {"summary": f"Render {clip['name']} at {len(frames)} frames", "ids": [], "paths": paths, "kind": "look"}
+    for n in nodes:
         dest = folder / f"forge_{scene.name}_{n['id']}.png"
-        paths.extend(render_png(scene.world_mesh(n), dest, views))
+        paths.extend(render_png(scene.world_mesh(n), dest, views, mats, scene.folder / "textures"))
     return {"summary": f"Render {len(paths)}", "ids": [], "paths": paths, "kind": "look"}
 
 
 def _op_texture(scene: Scene, p: dict) -> dict[str, Any]:
-    import base64
     from io import BytesIO
 
     from PIL import Image
 
-    from .textures import generate_image, save_set
+    from .textures import generate_image
 
     mid = str(p.get("material") or "")
     mat = next((m for m in scene.data["materials"] if m["id"] == mid or (p.get("name") and m["name"] == p.get("name"))), None)
@@ -1312,24 +1605,416 @@ def _op_texture(scene: Scene, p: dict) -> dict[str, Any]:
         color = Image.open(p["path"]).convert("RGB")
     else:
         color = generate_image(str(p.get("prompt") or ""))
-    saved = save_set(
-        scene.folder / "textures",
-        mat["name"].replace(" ", "_"),
-        color,
-        tileable=bool(p.get("tileable", True)),
-        derive=bool(p.get("derive_maps", True)),
-        metallic=float(mat.get("metallic") or 0),
-    )
-    # store filenames relative to the scene so the panel can ask for bytes
-    rel = {slot: Path(path).name for slot, path in saved.items()}
-    mat["textures"] = rel
-    scene.touch_geom()
+    rel = _save_texture(scene, mat, color, tileable=bool(p.get("tileable", True)), derive=bool(p.get("derive_maps", True)))
     return {"summary": f"Texture {mat['name']}", "ids": [mat["id"]], "textures": rel, "material": mat}
 
 
+def _save_texture(scene: Scene, mat: dict, color, *, tileable: bool, derive: bool) -> dict:
+    """Write a new texture file set for mat, keep its other slots, and drop files nothing points at."""
+    from .textures import save_set
+
+    before = dict(mat.get("textures") or {})
+    saved = save_set(
+        scene.folder / "textures",
+        _safe(mat["name"]),
+        color,
+        tileable=tileable,
+        derive=derive,
+        metallic=float(mat.get("metallic") or 0),
+        tag="_" + secrets.token_hex(3),
+    )
+    # store filenames relative to the scene so the panel can ask for bytes
+    rel = {slot: Path(path).name for slot, path in saved.items()}
+    mat["textures"] = {**before, **rel}
+    scene.touch_geom()
+    _gc_textures(scene, keep=set(before.values()))
+    return mat["textures"]
+
+
+def _texture_refs(data: dict) -> set[str]:
+    return {name for m in data.get("materials") or [] for name in (m.get("textures") or {}).values()}
+
+
+def _gc_textures(scene: Scene, keep: set[str]) -> None:
+    """Delete texture files no state points at. keep holds this edit's old files, which undo still needs."""
+    folder = scene.folder / "textures"
+    if not folder.is_dir():
+        return
+    refs = set(keep) | _texture_refs(scene.data)
+    try:
+        for snap in (scene.folder / "history-snapshots").glob("*.json"):
+            refs |= _texture_refs(json.loads(snap.read_text(encoding="utf-8")))
+        legacy = scene.folder / "history.json"
+        if legacy.is_file():
+            old = json.loads(legacy.read_text(encoding="utf-8"))
+            for state in (old.get("undo") or []) + (old.get("redo") or []):
+                refs |= _texture_refs(state)
+    except (OSError, ValueError):
+        return  # unreadable history: keeping stray files beats losing an undo target
+    for item in folder.iterdir():
+        if item.is_file() and item.name not in refs:
+            try:
+                item.unlink()
+            except OSError:
+                pass
+
+
+def _object(scene: Scene, p: dict, *, edit: bool = True) -> dict:
+    node = scene.node(str(p.get("id") or scene.data["selection"].get("object") or ""))
+    if node is None or node.get("type") != "object":
+        raise ValueError("Select an object or pass its id")
+    if edit and scene.is_locked(node):
+        raise ValueError(f"{node.get('name')} is locked")
+    return node
+
+
+def _to_local(scene: Scene, node: dict, points) -> tuple[list, float]:
+    from .transforms import to_local
+
+    return to_local(scene, node["id"], points)
+
+
+def _op_sculpt(scene: Scene, p: dict) -> dict[str, Any]:
+    from .kernel.sculpt import displace_noise, smooth_all, stroke, vertex_normals
+
+    node = _object(scene, p)
+    mesh = scene._bake(node)
+    brush = str(p.get("brush") or "draw")
+    shape = str(p.get("shape") or "")
+    if shape and f"sk:{shape}" not in mesh.attrs:
+        raise ValueError(f"No shape key {shape!r} on {node.get('name')}; forge_shape(action='add') first")
+    _, k = _to_local(scene, node, [])
+    whole = brush in ("noise", "smooth_all", "inflate_all")
+    if whole and shape:  # run on the keyed shape; the key keeps what moved
+        base = mesh.verts
+        mesh.verts = [[b[a] + d[a] for a in range(3)] for b, d in zip(base, mesh.attrs[f"sk:{shape}"])]
+    if brush == "noise":
+        n = displace_noise(mesh, float(p.get("strength", 5)) * k, float(p.get("scale", 40)) * k, int(p.get("seed", 0)), int(p.get("octaves", 3)))
+    elif brush == "smooth_all":
+        n = smooth_all(mesh, int(p.get("iterations", 2)), float(p.get("strength", 0.5)))
+    elif brush == "inflate_all":
+        amount = float(p.get("strength", 2)) * k
+        normals = vertex_normals(mesh)
+        mesh.verts = [[v[a] + normals[i][a] * amount for a in range(3)] for i, v in enumerate(mesh.verts)]
+        n = len(mesh.verts)
+    else:
+        points, k = _to_local(scene, node, p.get("points") or [])
+        if not points:
+            raise ValueError("points: one or more [x, y, z] in world centimetres, near the surface")
+        cm_brush = brush in ("draw", "clay", "inflate", "crease")
+        n = stroke(mesh, points, brush, float(p.get("radius", 20)) * k,
+                   float(p.get("strength", 3 if cm_brush else 0.5)) * (k if cm_brush else 1.0),
+                   target=f"sk:{shape}" if shape else "pos", mirror=str(p.get("mirror") or ""),
+                   spacing=float(p.get("spacing", 0.3)), invert=bool(p.get("invert")))
+    if whole and shape:
+        mesh.attrs[f"sk:{shape}"] = [[v[a] - b[a] for a in range(3)] for v, b in zip(mesh.verts, base)]
+        mesh.verts = base
+    scene.write_mesh(node, mesh)
+    return {"summary": f"Sculpt {brush} on {node.get('name')}: {n} vertices", "ids": [node["id"]], "id": node["id"], "verts": n}
+
+
+def _op_values(scene: Scene, p: dict) -> dict[str, Any]:
+    """The dock's finished stroke: exact values for the vertices it touched."""
+    from .kernel.sculpt import set_values
+
+    node = _object(scene, p)
+    target = str(p.get("target") or "pos")
+    width = 3 if target == "pos" or target.startswith("sk:") else 4 if target.startswith("col:") else 1
+    if target != "pos" and not target.startswith(("sk:", "wt:", "col:")):
+        raise ValueError("target is pos, sk:<key>, wt:<bone>, or col:<name>")
+    idx = array.array("I", base64.b64decode(str(p.get("idx") or "")))
+    values = array.array("f", base64.b64decode(str(p.get("values") or "")))
+    mesh = scene._bake(node)
+    if "count" in p and int(p["count"]) != len(mesh.verts):
+        raise ValueError(f"{node.get('name')} changed while you painted; the stroke was not applied")
+    n = set_values(mesh, target, idx, values, width)
+    scene.write_mesh(node, mesh)
+    return {"summary": f"Stroke on {node.get('name')}: {n} vertices", "ids": [node["id"]], "id": node["id"]}
+
+
+def _op_shape(scene: Scene, p: dict) -> dict[str, Any]:
+    from .rig import _bone_name
+
+    node = _object(scene, p)
+    action = str(p.get("action") or "add")
+    mesh = scene._bake(node)
+    key = _bone_name(p.get("key") or p.get("new_name") or "Key")
+    name = f"sk:{key}"
+    if action == "add":
+        if name in mesh.attrs:
+            raise ValueError(f"Shape key {key!r} already exists")
+        mesh.ensure_attr(name)
+    elif action == "from_object":
+        src = scene.node(str(p.get("source") or ""))
+        if src is None or src.get("type") != "object":
+            raise ValueError("source must be another object with the same vertices, such as an edited duplicate")
+        other = scene.local_mesh(src)
+        if len(other.verts) != len(mesh.verts):
+            raise ValueError(f"{src.get('name')} has {len(other.verts)} vertices, {node.get('name')} has {len(mesh.verts)}; shape it from a duplicate without adding or removing vertices")
+        mesh.attrs[name] = [[b[a] - v[a] for a in range(3)] for v, b in zip(mesh.verts, other.verts)]
+    elif action == "delete":
+        if mesh.attrs.pop(name, None) is None:
+            raise ValueError(f"No shape key {key!r}")
+    elif action == "rename":
+        new = _bone_name(p.get("new_name"))
+        if name not in mesh.attrs:
+            raise ValueError(f"No shape key {key!r}")
+        mesh.attrs[f"sk:{new}"] = mesh.attrs.pop(name)
+        key = new
+    else:
+        raise ValueError("shape action is add, from_object, delete, or rename")
+    scene.write_mesh(node, mesh)
+    keys = sorted(n[3:] for n in mesh.attrs if n.startswith("sk:"))
+    return {"summary": f"Shape {action} {key}", "ids": [node["id"]], "id": node["id"], "keys": keys}
+
+
+def _op_mesh_data(scene: Scene, p: dict) -> dict[str, Any]:
+    """Everything a brush mode in the dock needs: local positions, triangles, corner UVs, attributes."""
+    node = _object(scene, p, edit=False)
+    mesh = scene.local_mesh(node)
+    tris = mesh.triangles()
+
+    def b64(kind: str, values) -> str:
+        return base64.b64encode(array.array(kind, values).tobytes()).decode("ascii")
+
+    corner_uv = []
+    for a, b, c, fi in tris:
+        corner_uv.extend(mesh.tri_uv(fi, (a, b, c)))
+    wanted = [str(n) for n in p.get("attrs") or []]
+    attrs = {}
+    for name in wanted:
+        vals = mesh.attrs.get(name)
+        if vals is not None:
+            attrs[name] = b64("f", (c for v in vals for c in (v if isinstance(v, list) else [v])))
+    return {
+        "summary": "mesh data", "ids": [], "id": node["id"], "count": len(mesh.verts), "smooth": mesh.smooth,
+        "modifiers": bool(node.get("modifiers")),
+        "pb": b64("f", (c for v in mesh.verts for c in v)),
+        "ib": b64("I", (i for t in tris for i in t[:3])),
+        "fb": b64("I", (t[3] for t in tris)),
+        "ub": b64("f", corner_uv),
+        "fm": mesh.face_mat,
+        "names": sorted(mesh.attrs),
+        "attrs": attrs,
+    }
+
+
+def _op_uv_transform(scene: Scene, p: dict) -> dict[str, Any]:
+    from .uv import transform_uvs
+
+    node = _object(scene, p)
+    mesh = scene._bake(node)
+    n = transform_uvs(mesh, p.get("faces") or None, p.get("offset") or [0, 0], float(p.get("rotate", 0)), p.get("scale") or [1, 1])
+    scene.write_mesh(node, mesh)
+    return {"summary": f"UV transform on {n} faces", "ids": [node["id"]]}
+
+
+def _op_paint(scene: Scene, p: dict) -> dict[str, Any]:
+    from io import BytesIO
+
+    from PIL import Image
+
+    from . import paint
+
+    node = _object(scene, p)
+    mode = str(p.get("mode") or "blend")
+    if mode == "blend":
+        mesh = scene._bake(node)
+        channel = {"r": 0, "g": 1, "b": 2}.get(str(p.get("channel") or "r").lower())
+        if channel is None:
+            raise ValueError("channel is r, g, or b (the blend material's layer 1, 2, or 3)")
+        params = dict(p)
+        if p.get("center"):
+            params["center"] = _to_local(scene, node, [p["center"]])[0][0]
+        if p.get("radius"):
+            params["radius"] = float(p["radius"]) * _to_local(scene, node, [])[1]
+        values = paint.mask_values(mesh, str(p.get("mask") or "all"), params)
+        paint.apply_mask(mesh, channel, values, str(p.get("combine") or "set"), float(p.get("strength", 1.0)))
+        scene.write_mesh(node, mesh)
+        return {"summary": f"Blend {p.get('mask') or 'all'} into {'rgb'[channel]} on {node.get('name')}", "ids": [node["id"]]}
+    if mode != "texture":
+        raise ValueError("mode is blend or texture")
+    mats = scene.materials()
+    mid = str(p.get("material") or node.get("material") or "")
+    mat = mats.get(mid) or next((m for m in scene.data["materials"] if m["name"] == mid), None)
+    if mat is None:
+        raise ValueError(f"No material {mid!r}")
+    size = int(p.get("size") or 1024)
+    current = (mat.get("textures") or {}).get("base_color")
+    path = scene.folder / "textures" / current if current else None
+    if p.get("fill") == "all" or path is None or not path.is_file():
+        start = p.get("color") if p.get("fill") == "all" else mat.get("base_color")
+        img = paint.new_canvas(size, start or [0.75, 0.75, 0.78])
+    else:
+        img = Image.open(BytesIO(path.read_bytes())).convert("RGBA")
+    mesh = scene.local_mesh(node)
+    done = []
+    if p.get("faces"):
+        done.append(f"{paint.fill_faces(img, mesh, p['faces'], p.get('color') or [1, 1, 1])} faces")
+    if p.get("points"):
+        pts, k = _to_local(scene, node, p["points"])
+        done.append(f"{paint.dabs(img, mesh, pts, float(p.get('radius', 10)) * k, p.get('color') or [1, 1, 1], float(p.get('strength', 1)))} px")
+    if p.get("grain"):
+        paint.grain(img, float(p["grain"]), float(p.get("grain_scale", 8)), int(p.get("seed", 0)))
+        done.append("grain")
+    _save_texture(scene, mat, img.convert("RGB"), tileable=False, derive=bool(p.get("derive_maps")))
+    return {"summary": f"Paint {mat['name']}: {', '.join(done) or 'new texture'}", "ids": [mat["id"]], "material": mat}
+
+
+_BATCH = {
+    "forge_add": "add", "forge_edit": "edit", "forge_duplicate": "duplicate", "forge_delete": "delete",
+    "forge_group": "group", "forge_ungroup": "ungroup", "forge_layer": "layer", "forge_join": "join",
+    "forge_separate": "separate", "forge_boolean": "boolean", "forge_modifier": "modifier",
+    "forge_select": "select", "forge_move_elements": "move", "forge_mesh_op": "mesh_op",
+    "forge_material_set": "material_set", "forge_material_assign": "material_assign",
+    "forge_uv_project": "uv", "forge_rig": "rig", "forge_anim": "anim", "forge_fix": "fix",
+    "forge_sculpt": "sculpt", "forge_paint": "paint", "forge_shape": "shape", "forge_uv_transform": "uv_transform",
+}
+
+
+def _ref(value: Any, results: list[dict]) -> Any:
+    """"$2" is step 2's id; "$2.ids" (or any field) is that field of step 2's result."""
+    if isinstance(value, dict):
+        return {k: _ref(v, results) for k, v in value.items()}
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            got = _ref(item, results)
+            if isinstance(got, list) and isinstance(item, str):
+                out.extend(got)  # ["$0.ids", "$3"] flattens into one id list
+            else:
+                out.append(got)
+        return out
+    if not (isinstance(value, str) and value[:1] == "$" and value[1:2].isdigit()):
+        return value
+    head, _, field = value[1:].partition(".")
+    k = int(head)
+    if k >= len(results):
+        raise ValueError(f"{value} points at a step that has not run yet")
+    got = results[k]
+    if field:
+        if field not in got:
+            raise ValueError(f"{value}: step {k} returned no {field!r}")
+        return got[field]
+    if got.get("id"):
+        return got["id"]
+    if got.get("ids"):
+        return got["ids"][0]
+    raise ValueError(f"{value}: step {k} returned no id")
+
+
+def _op_batch(scene: Scene, p: dict) -> dict[str, Any]:
+    """Many edits, one undo step. Any failure rolls the whole batch back (dispatch restores the snapshot)."""
+    steps = p.get("steps")
+    if not isinstance(steps, list) or not steps:
+        raise ValueError("steps must be a non-empty list of {tool, ...args}")
+    if len(steps) > 500:
+        raise ValueError("Keep one batch under 500 steps")
+    results: list[dict] = []
+    ids: list = []
+    for k, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"step {k} must be an object like {{\"tool\": \"forge_add\", \"kind\": \"box\"}}")
+        args = dict(step)
+        tool = str(args.pop("tool", "") or "")
+        op = _BATCH.get(tool) or (tool if tool in _BATCH.values() else "")
+        if not op:
+            raise ValueError(f"step {k}: {tool!r} cannot run in a batch. Allowed: {', '.join(sorted(_BATCH))}")
+        try:
+            args = _ref(args, results)
+            if "object_name" in args:
+                args["name"] = args.pop("object_name")
+            if op == "material_set" and "material" in args:
+                args.setdefault("id", args["material"])
+                args.setdefault("name", args.pop("material"))
+            if op == "group":
+                args.setdefault("combine", True)
+            result = _OPS[op](scene, args)
+        except Exception as exc:
+            raise ValueError(f"step {k} ({tool}) failed: {exc}. The whole batch was undone.") from None
+        results.append(result)
+        ids.extend(result.get("ids") or [])
+    brief = [{key: r[key] for key in ("summary", "id", "clip", "bones") if r.get(key)} for r in results]
+    return {"summary": f"Batch of {len(steps)}", "ids": list(dict.fromkeys(i for i in ids if i)), "steps": brief}
+
+
+def _op_merge(scene: Scene, p: dict) -> dict[str, Any]:
+    """Copy another scene's objects, groups, meshes, materials, textures, and rigs into this one."""
+    import shutil
+
+    source = str(p.get("source") or "")
+    if not source or _safe(source) == _safe(scene.name):
+        raise ValueError("source must be another scene")
+    src = load(source)
+    data = copy.deepcopy(src.data)
+    offset = [float(v) for v in (p.get("offset") or [0, 0, 0])][:3]
+    if len(offset) != 3 or not all(math.isfinite(v) for v in offset):
+        raise ValueError("offset needs three numbers")
+    mat_map: dict[str, str] = {}
+    tex_dir = scene.folder / "textures"
+    for mat in data.get("materials") or []:
+        mat_map[mat["id"]] = mat["id"] = _nid("m")
+        for slot, fname in list((mat.get("textures") or {}).items()):
+            src_file = src.folder / "textures" / Path(fname).name
+            if not src_file.is_file():
+                continue
+            tex_dir.mkdir(parents=True, exist_ok=True)
+            dest, n = tex_dir / src_file.name, 2
+            while dest.exists():
+                dest, n = tex_dir / f"{src_file.stem}_{n}{src_file.suffix}", n + 1
+            shutil.copyfile(src_file, dest)
+            mat["textures"][slot] = dest.name
+    proto_map: dict[str, str] = {}
+    for proto in data.get("prototypes") or []:
+        proto_map[proto["id"]] = proto["id"] = _nid("p")
+        if proto.get("mesh"):
+            proto["mesh"] = dict(proto["mesh"], face_mat=[mat_map.get(m, m) for m in proto["mesh"].get("face_mat") or []])
+    layers = scene.data.setdefault("layers", [])
+    layer_map = {l["id"]: l["id"] for l in data.get("layers") or [] if any(o["id"] == l["id"] for o in layers)}
+    for layer in data.get("layers") or []:
+        if layer["id"] not in layer_map:
+            layer_map[layer["id"]] = layer["id"] = _nid("l")
+            layers.append(layer)
+    node_map: dict[str, dict] = {}
+    for node in data["nodes"]:
+        node_map[node["id"]] = node
+        node["id"] = _nid("o" if node.get("type") == "object" else "g")
+    roots = []
+    for node in data["nodes"]:
+        parent = node_map.get(node.get("parent"))
+        node["parent"] = parent["id"] if parent else None
+        if node.get("prototype"):
+            node["prototype"] = proto_map.get(node["prototype"], node["prototype"])
+        if node.get("material"):
+            node["material"] = mat_map.get(node["material"], node["material"])
+        node["layer"] = layer_map.get(node.get("layer"), node.get("layer") or "default")
+        if parent is None:
+            t = node.setdefault("transform", {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]})
+            t["pos"] = [t["pos"][i] + offset[i] for i in range(3)]
+            roots.append(node["id"])
+    scene.data["materials"].extend(data.get("materials") or [])
+    scene.data.setdefault("prototypes", []).extend(data.get("prototypes") or [])
+    scene.data["nodes"].extend(data["nodes"])
+    scene.data.setdefault("rigs", []).extend(merge_rigs(data.get("rigs"), node_map, offset))
+    scene.touch_geom()
+    return {"summary": f"Merge {src.name}: {len(data['nodes'])} entries", "ids": roots}
+
+
 _OPS = {
+    "rig": op_rig,
+    "anim": op_anim,
+    "rig_preview": op_preview,
+    "batch": _op_batch,
+    "merge_scene": _op_merge,
+    "sculpt": _op_sculpt,
+    "values": _op_values,
+    "shape": _op_shape,
+    "mesh_data": _op_mesh_data,
+    "uv_transform": _op_uv_transform,
+    "paint": _op_paint,
     "scene_get": _op_get,
     "scene_payload": _op_payload,
+    "scene_geom_part": _op_geom_part,
     "stats": _op_stats,
     "add": _op_add,
     "edit": _op_edit,

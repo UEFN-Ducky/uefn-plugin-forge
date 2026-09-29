@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import zipfile
 import pathlib
 from pathlib import Path
@@ -40,6 +41,7 @@ SKIP_NAMES = {
     "deploy",
     ".gitignore",
     "README.md",
+    "AGENTS.md",
     "__pycache__",
     "node_modules",
     "package.json",
@@ -62,21 +64,32 @@ def build_zip(*, out: Path | None = None) -> Path:
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     dest = out or (OUT_DIR / f"{pid}-{version}.ducky-plugin.zip")
+    # A different test payload must never reuse an already packaged version.
+    ledger_path = OUT_DIR / ".test-build-versions.json"
+    ledger = json.loads(ledger_path.read_text()) if ledger_path.is_file() else {}
+    entries = []
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        parts = path.relative_to(ROOT).parts
+        rel = "/".join(parts)
+        # Repo internals never ship: dot folders (.github CI, .pytest_cache test names) at any depth.
+        if any(part in SKIP_NAMES or part.startswith(".") for part in parts) or path.suffix.lower() in SKIP_SUFFIX:
+            continue
+        if any(rel.startswith(prefix) for prefix in SKIP_REL_PREFIXES):
+            continue
+        entries.append((rel, path.read_bytes()))
+    fingerprint = hashlib.sha256()
+    for rel, contents in entries:
+        fingerprint.update(rel.encode() + b"\0" + hashlib.sha256(contents).digest())
+    digest = fingerprint.hexdigest()
+    if str(version) in ledger and ledger[str(version)] != digest:
+        raise SystemExit(f"Forge {version} was already packaged with different contents. Bump plugin.json before the next test build.")
     with zipfile.ZipFile(dest, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for path in sorted(ROOT.rglob("*")):
-            if not path.is_file():
-                continue
-            rel_parts = path.relative_to(ROOT).parts
-            if not rel_parts or any(part in SKIP_NAMES for part in rel_parts):
-                continue
-            if path.name in SKIP_NAMES:
-                continue
-            rel = "/".join(rel_parts).replace("\\", "/")
-            if any(rel.startswith(p) for p in SKIP_REL_PREFIXES):
-                continue
-            if path.suffix.lower() in SKIP_SUFFIX or path.name.startswith("."):
-                continue
-            zf.write(path, arcname="/".join(rel_parts))
+        for rel, contents in entries:
+            zf.writestr(rel, contents)
+    ledger[str(version)] = digest
+    ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
     print(f"wrote {dest} ({dest.stat().st_size} bytes)")
     return dest
 
