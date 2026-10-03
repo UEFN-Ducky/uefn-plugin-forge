@@ -91,6 +91,7 @@ def build_zip(*, out: Path | None = None) -> Path:
     ledger[str(version)] = digest
     ledger_path.write_text(json.dumps(ledger, indent=2) + "\n")
     print(f"wrote {dest} ({dest.stat().st_size} bytes)")
+    _prune_superseded_zips(dest)
     return dest
 
 
