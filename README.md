@@ -14,3 +14,19 @@ py -3 scripts/build_zip.py
 ```
 
 `scripts/release.py --publish` uploads to the Store; only run it when a release is approved.
+
+## Next release: ship compiled
+
+This plugin still ships its Python source on the Store. Its next release has to ship compiled and signed, the way Ducky Account and Roguelike do:
+
+1. Give `scripts/release.py` and `scripts/build_zip.py` the compiled build from `uefn-plugin-account` (`build_compiled_zip`, upload by ticket, `--plain` only as an escape hatch).
+2. Bump `version` and set `min_app_version` to `1.2.356` or newer.
+3. Publish, then check the download with the start-up license check (signature, id and version, compiled, team access), not only the signature.
+4. The Store must hold the version back from apps older than `min_app_version`. Until it does, older apps install a build they can't run.
+
+For this plugin:
+
+- `backend/blend_import.py` hands `backend/blend_export_script.py` to Blender by path. A compiled build doesn't ship that file, so move it out of `backend/` (for example to `assets/`) first.
+- `listener/` runs in UEFN's own Python and stays readable source; only the Ducky-side backend compiles.
+
+Remove this section once a compiled version is live.
