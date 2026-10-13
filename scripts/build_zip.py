@@ -78,6 +78,12 @@ def build_zip(*, out: Path | None = None) -> Path:
             continue
         if any(rel.startswith(prefix) for prefix in SKIP_REL_PREFIXES):
             continue
+        if path.name.startswith("test_") and rel.startswith("backend/"):
+            continue
+        if rel == "backend/blend_export_script.py":
+            # External Blender consumes this resource; Store compilation removes backend .py files.
+            entries.append(("assets/blend_export_script.txt", path.read_bytes()))
+            continue
         entries.append((rel, path.read_bytes()))
     fingerprint = hashlib.sha256()
     for rel, contents in entries:

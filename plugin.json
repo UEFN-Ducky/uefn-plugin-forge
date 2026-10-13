@@ -1,13 +1,44 @@
 {
   "id": "forge",
   "kind": "plugin",
-  "version": "1.2.4",
+  "version": "1.2.6",
   "label": "Ducky Forge",
   "description": "Model, sculpt, paint, rig, and animate assets inside UEFN-Ducky, by hand or with the agent: Fortnite 512-unit grid, editor fly camera, QWER tools, layers, nested groups, solid booleans, smooth subdivision and sculpt brushes, shape keys, smart UV unwrap, texture painting, blend materials with painted masks, biped and chain skeletons with painted weights and IK, clips you can generate, key, and scrub, and a Send that lands SM_ and SK_ meshes, AS_ clips, morph targets, and MI_ materials and can place them in the level.",
   "min_app_version": "1.0.0",
   "default_enabled": true,
   "secret_keys": [],
   "contributes": {
+    "automations": {
+      "nodes": [{
+        "id": "forge.import_mesh", "label": "Import mesh into Forge", "group": "Forge",
+        "config_fields": [
+          {"id": "path", "label": "Local mesh file", "type": "string"},
+          {"id": "name", "label": "New scene name (optional)", "type": "string"},
+          {"id": "destination", "label": "Existing scene (optional)", "type": "string"},
+          {"id": "scale", "label": "Scale multiplier", "type": "number", "default": 1},
+          {"id": "preview", "label": "Inspect only", "type": "boolean", "default": false}
+        ],
+        "inputs": [{"id": "path", "label": "Mesh path", "type": "string"}],
+        "outputs": [{"id": "opened", "label": "Scene name", "type": "string"}, {"id": "objects", "label": "Objects", "type": "number"}]
+      }],
+      "templates": [{
+        "id": "forge-import-mesh", "label": "Import reference building", "category": "Forge",
+        "description": "Set a local Blend, FBX, GLB or glTF path on the import node. Requires Blender.",
+        "graph": {
+          "nodes": [
+            {"id": "s", "type": "start.chat", "x": 0, "y": 0, "config": {}},
+            {"id": "a", "type": "pipeline.agent", "x": 200, "y": 0, "config": {}},
+            {"id": "n", "type": "forge.import_mesh", "x": 400, "y": 0, "config": {"path": ""}},
+            {"id": "f", "type": "pipeline.finish", "x": 600, "y": 0, "config": {}}
+          ],
+          "edges": [
+            {"source": "s", "target": "a", "kind": "main"},
+            {"source": "a", "target": "n", "kind": "main"},
+            {"source": "n", "target": "f", "kind": "main"}
+          ]
+        }
+      }]
+    },
     "ui.panels": [
       {
         "id": "forge",

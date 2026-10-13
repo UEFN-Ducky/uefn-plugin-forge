@@ -16,7 +16,7 @@ def _given(**kwargs: Any) -> dict:
 def _run(api: Any, name: str, op: str, params: dict | None = None) -> dict:
     params = dict(params or {})
     before = None
-    if op not in {"scene_list", "scene_new", "scene_get", "stats", "scene_payload", "check", "render", "rig_preview"}:
+    if op not in {"scene_list", "scene_new", "scene_get", "stats", "scene_payload", "check", "render", "rig_preview", "scene_import_preview"}:
         try:
             before = dispatch(name, "scene_get", {"brief": True}).get("rev")
         except Exception:
@@ -81,6 +81,32 @@ def _attach_captures(result: dict) -> dict:
 
 def register_tools(api: Any) -> None:
     host = {"listener": False}
+
+    @api.tool(**host)
+    def forge_import_mesh(path: str, name: str = "", destination: str = "", scale: float = 1.0, preview: bool = False) -> dict:
+        """Inspect or import .blend/binary .fbx/.glb/.gltf. Requires local Blender.
+        destination merges into an existing scene with one undo; preview writes no scene.
+        Preserves static meshes, UVs, material slots and direct base-color textures.
+        Existing scenes are retained; rigs/animation/procedural shaders are not imported.
+        """
+        from .blend_import import import_blend
+        if preview:
+            return _run(api, "", "scene_import_preview", {"path": path, "scale": scale})
+        if destination:
+            return _run(api, destination, "import_mesh", {"path": path, "scale": scale})
+        from .scene import _LOCK
+        with _LOCK:
+            result = import_blend(path, name, scale=scale)
+        api.changeset.record(command="forge_import_mesh", kind="forge_scene",
+                             ident=result["name"], summary="Imported " + result["name"],
+                             before=None, revertable="manual",
+                             reason="Import creates a separate scene; existing scenes are unchanged.")
+        return result
+
+    @api.register_pipeline_node("forge.import_mesh")
+    def node_import_mesh(ctx: dict) -> dict:
+        params = {**(ctx.get("config") or {}), **(ctx.get("inputs") or {})}
+        return forge_import_mesh(str(params.get("path") or ""), str(params.get("name") or ""), str(params.get("destination") or ""), float(params.get("scale", 1)), bool(params.get("preview", False)))
 
     @api.tool(**host)
     def forge_scene_list() -> dict:

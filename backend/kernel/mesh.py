@@ -50,6 +50,8 @@ def lerp(a: Sequence[float], b: Sequence[float], t: float) -> Vec3:
 
 def attr_default(name: str):
     """Per-vertex attribute kinds: wt:<group> weight, sk:<key> shape delta, col:<name> RGBA."""
+    if name.startswith("nrm:"):
+        return [0.0, 0.0, 1.0]
     if name.startswith("sk:"):
         return [0.0, 0.0, 0.0]
     if name.startswith("col:"):
@@ -242,6 +244,7 @@ class Mesh:
             v[2] += delta[2]
 
     def scale(self, s: Sequence[float], origin: Sequence[float] | None = None) -> None:
+        self.attrs.pop("nrm:source", None)
         o = origin or [0.0, 0.0, 0.0]
         for v in self.verts:
             v[0] = o[0] + (v[0] - o[0]) * s[0]
@@ -254,6 +257,18 @@ class Mesh:
 
     def transform(self, pos: Sequence[float], rot_deg: Sequence[float], scale: Sequence[float]) -> None:
         r = _euler(rot_deg)
+        normals = self.attrs.get("nrm:source")
+        if normals and all(abs(s) > 1e-12 for s in scale):
+            for normal in normals:
+                adjusted = [normal[i] / scale[i] for i in range(3)]
+                normal[:] = vnorm([sum(r[i][j] * adjusted[j] for j in range(3)) for i in range(3)])
+        elif normals:
+            self.attrs.pop("nrm:source", None)
+        if scale[0] * scale[1] * scale[2] < 0:
+            for face in self.faces:
+                face.reverse()
+            for uv in self.uvs:
+                uv.reverse()
         for v in self.verts:
             x, y, z = v[0] * scale[0], v[1] * scale[1], v[2] * scale[2]
             v[0] = r[0][0] * x + r[0][1] * y + r[0][2] * z + pos[0]

@@ -23,7 +23,11 @@ def forge_texture(name: str = "", file: str = "", **_kwargs: Any) -> dict:
     fname = Path(str(file or "")).name
     if not fname or fname in {".", ".."}:
         return {"ok": False, "error": "file required"}
-    path = scenes_root() / str(name or "") / "textures" / fname
+    from .scene import _safe
+    root = (scenes_root() / _safe(str(name or "")) / "textures").resolve()
+    path = (root / fname).resolve()
+    if not path.is_relative_to(root):
+        return {"ok": False, "error": "texture path outside scene"}
     if not path.is_file():
         return {"ok": False, "error": "texture not found"}
     return {"ok": True, "mime": "image/png", "base64": base64.b64encode(path.read_bytes()).decode("ascii")}
@@ -53,6 +57,8 @@ def register_panel_rpcs(api: Any) -> None:
             return {"ok": False, "error": str(exc)}
 
     api.register_panel_rpc("forge_submit", forge_submit)
+    from .jobs import cancel
+    api.register_panel_rpc("forge_cancel", cancel)
     api.register_panel_rpc("forge_job", forge_job)
     api.register_panel_rpc("forge_call", forge_call)
     api.register_panel_rpc("forge_send", forge_send_bound)

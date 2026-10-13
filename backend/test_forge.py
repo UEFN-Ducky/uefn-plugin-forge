@@ -596,7 +596,9 @@ if __name__ == "__main__":
     test_send()
     import unittest
     from .test_regressions import SceneRegressions
-    result = unittest.TextTestRunner(verbosity=1).run(unittest.defaultTestLoader.loadTestsFromTestCase(SceneRegressions))
+    from .test_import import ImportTests
+    suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case) for case in (SceneRegressions, ImportTests))
+    result = unittest.TextTestRunner(verbosity=1).run(suite)
     if not result.wasSuccessful():
         raise SystemExit(1)
     print("forge self-check ok")

@@ -143,7 +143,8 @@ def write_glb(mesh: Mesh, path: Path, materials: dict[str, dict] | None = None, 
             for k, vi in enumerate((a, b, c)):
                 positions.append(_to_gltf(mesh.verts[vi]))
                 corners.append(vi)
-                n = mesh.face_normal(fi)
+                authored = mesh.attrs.get("nrm:source")
+                n = authored[vi] if authored and len(authored) == len(mesh.verts) else mesh.face_normal(fi)
                 normals.append(_to_gltf([n[0] * 100, n[1] * 100, n[2] * 100]))
                 uvs.append((tri_uv[2 * k], tri_uv[2 * k + 1]))
                 indices.append(len(positions) - 1)
@@ -171,7 +172,7 @@ def write_glb(mesh: Mesh, path: Path, materials: dict[str, dict] | None = None, 
             accs.append({"bufferView": ij, "componentType": 5123 if wide else 5121, "count": len(corners), "type": "VEC4"})
             accs.append({"bufferView": iw, "componentType": 5126, "count": len(corners), "type": "VEC4"})
             attributes.update(JOINTS_0=base + 4, WEIGHTS_0=base + 5)
-        blend = mesh.attrs.get("col:blend")
+        blend = mesh.attrs.get("col:blend") or mesh.attrs.get("col:color")
         if blend:  # blend-layer masks: UEFN reads them as vertex colour
             ic = add_blob(b"".join(struct.pack("<4f", *blend[vi]) for vi in corners), 34962)
             accs.append({"bufferView": ic, "componentType": 5126, "count": len(corners), "type": "VEC4"})

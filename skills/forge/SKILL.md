@@ -10,6 +10,30 @@ metadata:
 
 Forge is a modeler, sculptor, painter, rigger, and animator in the UEFN-Ducky panel. You and the user edit the **same scene**; every `forge_*` change shows in the dock within a quarter second. The user can do everything you can from the dock: sculpt, paint textures, blend masks, and weights, pose with IK, and key shape keys. Each of their strokes is one undo step, like each of your calls. Do the work with the tools. Do not tell the user to open Blender.
 
+## Import reference buildings
+
+Use `forge_import_mesh(path, name="", destination="", scale=1, preview=false)` for
+local .blend, binary .fbx, .glb or .gltf files. Requires a local Blender executable
+(PATH, standard Windows install, or FORGE_BLENDER); no Blender install is bundled.
+`preview=true` reports centimetre dimensions, triangle/object/material counts and
+warnings without writing a scene. `destination` merges into an existing scene in
+one undo step; otherwise a unique new scene is created, never overwritten.
+The File panel and `forge.import_mesh` workflow node use the same importer.
+The panel adds Browse, Inspect, destination, scale, progress and Cancel controls.
+Cancellation stops conversion before commit; a completed commit remains undoable.
+
+Static meshes, hierarchy, centimetre/Z-up conversion, corner normals, vertex colors,
+UVs and per-face material slots are preserved. Base-color images connected directly
+or multiplied by vertex color are supported. Collision helper meshes and alternate
+LODs are retained but hidden. Measurements exclude hidden meshes. ASCII FBX,
+sheared transforms, remote/traversing/missing glTF sidecars and unsupported required
+glTF extensions fail explicitly. File plus referenced resource size is limited to
+512 MB; conversion times out at 15 minutes. Rigs, animation, procedural shaders and
+other texture channels are not transferred. Inspect the warnings before treating
+an imported material as equivalent to the original Unreal shader.
+A pasted UEFN actor/T3D block is a reference, not mesh geometry: export its mesh to
+a supported format first. Do not claim the whole tower was imported from one module.
+
 ## Units and axes
 
 - Centimetres, Z-up. Player about 190 cm. Floor and wall tiles 512 cm; a wall is 384 cm tall. Door about 250 x 120 cm.

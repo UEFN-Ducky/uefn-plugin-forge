@@ -144,6 +144,23 @@ def _indexed(mesh: Mesh, pid: str, uv: bool = False) -> dict[str, Any]:
         out["smooth"] = True
     if uv:
         out["ub"] = _b64(corners)
+    if any(m and m != "default" for m in mesh.face_mat):
+        slots = list(dict.fromkeys(mesh.face_mat))
+        slot_index = {m: i for i, m in enumerate(slots)}
+        groups = []
+        for ti, fi in enumerate(faces):
+            slot = slot_index.get(mesh.face_mat[fi] if fi < len(mesh.face_mat) else "default", 0)
+            if groups and groups[-1][2] == slot:
+                groups[-1][1] += 3
+            else:
+                groups.append([ti * 3, 3, slot])
+        out["material_slots"], out["groups"] = slots, groups
+    normals = mesh.attrs.get("nrm:source")
+    if normals and len(normals) == len(mesh.verts):
+        out["nb"] = _b64(array.array("f", (c for n in normals for c in n)))
+    colors = mesh.attrs.get("col:color")
+    if colors and len(colors) == len(mesh.verts):
+        out["vcb"] = _b64(array.array("f", (c for color in colors for c in color[:3])))
     blend = mesh.attrs.get("col:blend")
     if blend and len(blend) == len(mesh.verts):
         out["cb"] = _b64(array.array("f", (c for rgba in blend for c in rgba[:3])))
@@ -323,6 +340,8 @@ class Scene:
 
     def write_mesh(self, node: dict, mesh: Mesh) -> None:
         """Copy-on-write. Shared prototypes stay shared until this object is edited."""
+        # Geometry edits recompute normals; untouched shared imports keep theirs.
+        mesh.attrs.pop("nrm:source", None)
         proto = self.proto(node)
         if proto and self.user_count(proto["id"]) <= 1:
             proto["mesh"] = mesh.to_dict()
@@ -482,7 +501,7 @@ class Scene:
         """
         out = dict(packed)
         parts: dict[str, int] = {}
-        for key in ("pb", "ib", "fb", "ub", "cb"):
+        for key in ("pb", "ib", "fb", "ub", "cb", "nb", "vcb"):
             val = out.get(key)
             if isinstance(val, str) and len(val) > _GEOM_PART:
                 self._geom_hold[(str(packed.get("id") or ""), key)] = val
@@ -576,6 +595,7 @@ class Scene:
         uv_mats = self.uv_materials()
         uv_pids = {n.get("prototype") or n["id"] for n in self.data["nodes"]
                    if n.get("type") == "object" and n.get("material") in uv_mats} if uv_mats else set()
+        uv_pids.update(pid for pid, mesh in meshes.items() if uv_mats.intersection(mesh.face_mat))
         for n in self.data["nodes"]:
             if n.get("type") != "object":
                 add_n({
@@ -723,6 +743,9 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
     params = dict(params or {})
     op = (op or "").strip()
     with _LOCK:
+        if op == "scene_import_preview":
+            from .blend_import import import_blend
+            return import_blend(str(params.get("path") or ""), preview=True, scale=params.get("scale", 1))
         if op == "scene_list":
             return {"scenes": list_scenes()}
         if op == "scene_new":
@@ -1436,9 +1459,14 @@ def _op_list_files(_scene: Scene, _p: dict) -> dict[str, Any]:
 def _op_import_blend(_scene: Scene, p: dict) -> dict[str, Any]:
     from .blend_import import import_blend
 
-    imported = import_blend(str(p.get("path") or ""), str(p.get("name") or ""))
+    imported = import_blend(str(p.get("path") or ""), str(p.get("name") or ""), scale=p.get("scale", 1))
     forget(imported["name"])
     return {"summary": f"Imported {imported['name']}", "ids": [], **imported}
+
+
+def _op_import_mesh(scene: Scene, p: dict) -> dict[str, Any]:
+    from .blend_import import import_blend
+    return import_blend(str(p.get("path") or ""), target=scene, scale=p.get("scale", 1))
 
 
 def _op_get(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1938,14 +1966,14 @@ def _op_batch(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Batch of {len(steps)}", "ids": list(dict.fromkeys(i for i in ids if i)), "steps": brief}
 
 
-def _op_merge(scene: Scene, p: dict) -> dict[str, Any]:
+def _op_merge(scene: Scene, p: dict, source_scene=None) -> dict[str, Any]:
     """Copy another scene's objects, groups, meshes, materials, textures, and rigs into this one."""
     import shutil
 
     source = str(p.get("source") or "")
-    if not source or _safe(source) == _safe(scene.name):
+    if source_scene is None and (not source or _safe(source) == _safe(scene.name)):
         raise ValueError("source must be another scene")
-    src = load(source)
+    src = source_scene if source_scene is not None else load(source)
     data = copy.deepcopy(src.data)
     offset = [float(v) for v in (p.get("offset") or [0, 0, 0])][:3]
     if len(offset) != 3 or not all(math.isfinite(v) for v in offset):
@@ -2044,4 +2072,5 @@ _OPS = {
     "scene_open": _op_open_file,
     "scene_files": _op_list_files,
     "scene_import_blend": _op_import_blend,
+    "import_mesh": _op_import_mesh,
 }

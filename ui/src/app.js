@@ -30,15 +30,28 @@ function call(method, params) {
   });
 }
 
+let panelVisible = true;
+window.addEventListener("message", ev => {
+  const event = ev.data?.event;
+  if (ev.source === parent && ev.data?.channel === CHANNEL && event?.type === "panel.visibility") panelVisible = event.visible !== false;
+});
+let importJob = "";
+let importReport = "";
+let importPrefs = {};
+call("prefs.get", {id: "mesh-import"}).then(result => { const value = typeof result?.value === "string" ? JSON.parse(result.value) : result?.value; importPrefs = value && typeof value === "object" ? value : {}; }).catch(() => {});
+
 async function rpc(method, params) {
   if (!["forge_call", "forge_texture"].includes(method)) return call("plugin.call", { method, params: params || {} });
   let reply = await call("plugin.call", { method: "forge_submit", params: { method, params: params || {} } });
   const job = reply.job;
+  const importing = ["scene_import_preview", "scene_import_blend", "import_mesh"].includes(params?.op);
+  if (importing) { importJob = job || ""; const cancel = document.getElementById("cancel-import"); if (cancel) cancel.disabled = !job; }
   while (reply.ok && !reply.done) {
-    await new Promise(resolve => setTimeout(resolve, 60));
+    await new Promise(resolve => setTimeout(resolve, (!panelVisible || document.hidden) ? 1000 : 100));
     reply = await call("plugin.call", { method: "forge_job", params: { job } });
-    if (reply.elapsed >= 1 && state.pending) setStatus(`Processing ${params?.op?.replaceAll("_", " ") || "scene"} · ${reply.elapsed}s`);
+    if (reply.elapsed >= 1 && state.pending) setStatus(`${reply.stage || "Processing"} · ${reply.elapsed}s`);
   }
+  if (importing) { importJob = ""; const cancel = document.getElementById("cancel-import"); if (cancel) cancel.disabled = true; }
   if (!reply.ok) throw new Error(reply.error || "Forge operation failed");
   return reply.result;
 }
@@ -300,6 +313,7 @@ function cachedGeometry(proto) {
 async function prepareProto(proto) {
   if (cachedGeometry(proto)) return;
   const packed = await meshTask("prepare", proto);
+  if (proto.nb) packed.normals = new Float32Array(b64buf(proto.nb));
   const geo = new THREE.BufferGeometry();
   if (proto.ub) {
     // Textured scenes draw per-corner UVs, so vertices split at seams. Picking keeps the worker's indexed copy.
@@ -322,9 +336,16 @@ async function prepareProto(proto) {
     geo.setIndex(new THREE.BufferAttribute(packed.indices, 1));
     if (packed.normals) geo.setAttribute("normal", new THREE.BufferAttribute(packed.normals, 3));
   }
+  if (proto.vcb) {
+    const colors = new Float32Array(b64buf(proto.vcb));
+    const expanded = proto.ub ? new Float32Array(packed.indices.length * 3) : colors;
+    if (proto.ub) packed.indices.forEach((v, i) => expanded.set(colors.subarray(v * 3, v * 3 + 3), i * 3));
+    geo.setAttribute("color", new THREE.BufferAttribute(expanded, 3));
+  }
   geo.boundingBox = new THREE.Box3(new THREE.Vector3(...packed.box[0]), new THREE.Vector3(...packed.box[1]));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(...packed.sphere[0]), packed.sphere[1]);
-  geo.userData = {source: proto, faceIds: packed.faces, workerKey: packed.key};
+  for (const [start, count, slot] of proto.groups || []) geo.addGroup(start, count, slot);
+  geo.userData = {source: proto, faceIds: packed.faces, workerKey: packed.key, materialSets: new Map()};
   geoCache.get(proto.id)?.dispose();
   geoCache.set(proto.id, geo);
 }
@@ -380,6 +401,16 @@ function blendShader(mat, uniforms) {
   mat.customProgramCacheKey = () => "forge-blend";
 }
 
+function materialsForProto(proto, fallback, materials) {
+  if (!proto.material_slots?.length) return materialFor(fallback, materials, !!proto.smooth);
+  const geo = geometryFor(proto);
+  const next = proto.material_slots.map(id => materialFor(id && id !== "default" ? id : fallback, materials, !!proto.smooth));
+  const previous = geo.userData.materialSets.get(fallback);
+  if (previous && previous.length === next.length && previous.every((m, i) => m === next[i])) return previous;
+  geo.userData.materialSets.set(fallback, next);
+  return next;
+}
+
 function materialFor(matId, materials, smooth) {
   const authored = (materials || []).find(m => m.id === matId);
   const tex = authored?.textures?.base_color || "";
@@ -388,7 +419,7 @@ function materialFor(matId, materials, smooth) {
   const key = [matId || "", smooth ? "s" : "", tex, blended ? layers.map(l => l ? `${l.id}:${l.textures?.base_color || ""}` : "").join(",") : ""].join("|");
   let mat = matCache.get(key);
   if (!mat) {
-    mat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, flatShading: !smooth });
+    mat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, flatShading: !smooth, vertexColors: true });
     if (tex || blended) mat.map = textureFor(tex);  // a white map still turns on UVs for the layers
     if (blended) {
       mat.userData.layers = [1, 2, 3].map(i => ({ [`forgeColor${i}`]: { value: new THREE.Color() }, [`forgeMap${i}`]: { value: textureFor(layers[i - 1]?.textures?.base_color || "") } }));
@@ -1139,7 +1170,7 @@ function buildBatches() {
     const proto = protos.get(rows[0][1]);
     if (!proto) continue;
     const geo = geometryFor(proto);
-    const mat = materialFor(rows[0][12], payload.materials, !!proto.smooth);
+    const mat = materialsForProto(proto, rows[0][12], payload.materials);
     for (let c = 0; c < rows.length; c += CHUNK) {
       const slice = rows.slice(c, c + CHUNK);
       const batchKey = `${rows[0][1]}\0${rows[0][12] || ""}\0${c}`;
@@ -1183,7 +1214,7 @@ function buildBatches() {
   if (pulled) {
     const proto = protos.get(pulled[1]);
     if (proto) {
-      const mesh = new THREE.Mesh(geometryFor(proto), materialFor(pulled[12], payload.materials, !!proto.smooth));
+      const mesh = new THREE.Mesh(geometryFor(proto), materialsForProto(proto, pulled[12], payload.materials));
       composeRow(pulled, local);
       mesh.matrix.multiplyMatrices(world(pulled[2]), local);
       mesh.matrixAutoUpdate = false;
@@ -1445,6 +1476,7 @@ function endFly(ev) {
 let lastFrame = performance.now();
 function animate() {
   requestAnimationFrame(animate);
+  if (!panelVisible || document.hidden) { lastFrame = performance.now(); return; }
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
   stepFly(dt);
@@ -1804,7 +1836,7 @@ async function refreshScenes(select) {
 }
 
 async function poll() {
-  if (!state.name || state.dragging || state.polling || state.pending) return;
+  if (!panelVisible || document.hidden || !state.name || state.dragging || state.polling || state.pending) return;
   const sceneName = state.name;
   const epoch = state.epoch;
   const stale = () => state.name !== sceneName || epoch !== state.epoch || state.pending || state.dragging;
@@ -2184,11 +2216,17 @@ function exportPanel() {
   return `<div class="row"><label for="ex-mode">Mode</label><select id="ex-mode"><option value="each">Unique meshes</option><option value="group">Groups combined</option><option value="all">Everything</option></select></div>
     <div class="row"><label for="ex-place">Place</label><input id="ex-place" type="checkbox" /><span class="dim">Put the assets in the level in front of the camera</span></div>
     <div class="row"><button id="send" type="button">Send to UEFN</button></div>
-    <h2>File</h2>
-    <div class="row"><input id="blend-path" placeholder="C:\\path\\stadium.blend" aria-label="Path to a .blend file" style="flex:1" /></div>
-    <div class="row"><button id="import-blend" type="button">Import Blend</button></div>
-    <p class="dim">Writes one SM_ per shape or group, imports T_ color, normal, and ORM, and creates an MI_ on M_Forge_Master for each material. Objects bound to a rig become one SK_ skeletal mesh with an AS_ clip per animation; placed, it goes on an Animated Mesh device playing the first clip. Collision uses the simple fallback; custom collision meshes are not imported. UEFN needs to be open.</p>`;
+    <h2>Import mesh</h2>
+    <div class="row"><input id="blend-path" value="${esc(importPrefs.path || "")}" placeholder="Choose a Blend, FBX, GLB or glTF file" aria-label="Mesh file path" style="flex:1" /><button id="pick-mesh" type="button">Browse…</button></div>
+    <div class="row"><label for="import-target">Destination</label><select id="import-target"><option value="new">New scene</option><option value="current" ${importPrefs.target === "current" ? "selected" : ""}>Current scene (one undo)</option></select></div>
+    <div class="row"><label for="import-name">New scene name</label><input id="import-name" value="${esc(importPrefs.name || "")}" placeholder="Use filename" /></div>
+    <div class="row"><label for="import-scale">Scale multiplier</label><input id="import-scale" type="number" min="0.0001" max="10000" step="any" value="${Number(importPrefs.scale) || 1}" /></div>
+    <p class="dim">File units and axes are converted automatically to centimetres, Z-up. Scale 1 preserves the source size. Requires local Blender. Binary FBX only.</p>
+    <div class="row"><button id="preview-mesh" type="button">Inspect dimensions</button><button id="import-blend" type="button">Import mesh</button><button id="cancel-import" type="button" ${importJob ? "" : "disabled"}>Cancel</button></div>
+    <div id="import-result" role="status" aria-live="polite" class="dim">${esc(importReport)}</div>
+    <p class="dim">Static meshes, hierarchy, UVs, material slots and direct base-color images. Rigs, animations and procedural shaders are not transferred. Keep texture sidecars beside the source file.</p>`;
 }
+
 
 function xyz(prefix, values, label) {
   return ["x", "y", "z"].map((axis, i) => `<label>${axis.toUpperCase()}<input id="${prefix + axis}" type="number" step="any" aria-label="${label} ${axis.toUpperCase()}" value="${Number((+values[i] || 0).toFixed(3))}" /></label>`).join("");
@@ -2542,22 +2580,60 @@ function bindPanel() {
   };
   const fix = document.getElementById("fix-all");
   if (fix) fix.onclick = () => op("fix", { issues: "all" });
-  const importBlend = document.getElementById("import-blend");
-  if (importBlend) importBlend.onclick = async () => {
-    const path = document.getElementById("blend-path").value.trim();
-    if (!path) { setStatus("Paste the path to a .blend file", true); return; }
-    const fileName = path.split(/[/\\]/).pop();
-    showLoading(fileName, LOAD_BLEND);
-    loadStep("export", "Blender is reading every object and group. A stadium stays here because the export has to finish before any of it can draw.");
-    setStatus("Importing Blend…");
-    const opened = await op("scene_import_blend", { path });
-    if (!opened || opened.ok === false) { hideLoading(); return; }
-    const sceneName = opened.opened || opened.name;
-    await refreshScenes(sceneName);
-    state.name = sceneName;
-    state.rev = -1;
-    setStatus(`Imported ${opened.objects || 0} objects into ${sceneName}`);
+  const rememberImport = () => {
+    importPrefs = {path: document.getElementById("blend-path").value.trim(),
+      name: document.getElementById("import-name").value.trim(),
+      target: document.getElementById("import-target").value,
+      scale: Number(document.getElementById("import-scale").value)};
+    call("prefs.set", {id: "mesh-import", value: JSON.stringify(importPrefs)}).catch(() => {});
   };
+  for (const id of ["blend-path", "import-name", "import-target", "import-scale"]) {
+    const input = document.getElementById(id);
+    if (input) input.onchange = rememberImport;
+  }
+  const pickMesh = document.getElementById("pick-mesh");
+  if (pickMesh) pickMesh.onclick = async () => {
+    try {
+      const picked = await call("files.pick", { accept: "any", multiple: false });
+      const path = picked?.files?.[0]?.path;
+      if (path) { document.getElementById("blend-path").value = path; rememberImport(); }
+    } catch (err) { setStatus(err.message || String(err), true); }
+  };
+  const runImport = async (preview) => {
+    if (state.pending) return;
+    rememberImport();
+    if (!importPrefs.path) { setStatus("Choose a mesh file first", true); return; }
+    state.pending = true;
+    try {
+      const operation = preview ? "scene_import_preview" : importPrefs.target === "current" ? "import_mesh" : "scene_import_blend";
+      const result = await rpc("forge_call", {name: state.name, op: operation, params: importPrefs});
+      if (result.ok === false) throw new Error(result.error);
+      importReport = `${result.objects} objects · ${result.triangles} triangles · ${result.materials} materials · ${result.dimensions_cm.map(v => (v / 100).toFixed(2)).join(" × ")} m. ${(result.warnings || []).join(" ")}`;
+      if (!preview) {
+        const sceneName = result.opened || result.name;
+        resetScene();
+        await refreshScenes(sceneName);
+        state.name = sceneName;
+        state.rev = -1;
+      }
+      const report = document.getElementById("import-result");
+      if (report) report.textContent = importReport;
+      setStatus(preview ? "Preview ready; no scene changed" : "Mesh imported");
+    } catch (err) { setStatus(err.message || String(err), true); }
+    finally { state.pending = false; importJob = ""; const cancel = document.getElementById("cancel-import"); if (cancel) cancel.disabled = true; }
+  };
+  const previewMesh = document.getElementById("preview-mesh");
+  if (previewMesh) previewMesh.onclick = () => runImport(true);
+  const importBlend = document.getElementById("import-blend");
+  if (importBlend) importBlend.onclick = () => runImport(false);
+  const cancelImport = document.getElementById("cancel-import");
+  if (cancelImport) cancelImport.onclick = async () => {
+    if (!importJob) return;
+    cancelImport.disabled = true;
+    try { await call("plugin.call", {method: "forge_cancel", params: {job: importJob}}); setStatus("Cancelling import…"); }
+    catch (err) { setStatus(err.message, true); }
+  };
+
   const send = document.getElementById("send");
   if (send) send.onclick = async () => {
     setStatus("Sending to UEFN…");
