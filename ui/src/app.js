@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import * as Brush from "./brush.js";
+import { applyMaterialDisplay } from "./material-display.js";
+import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { runMeshTask as compatibleMeshTask } from "./mesh-engine.js";
 import { version } from "../../plugin.json";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -132,6 +134,13 @@ scene3.add(new THREE.AmbientLight(WHITE, 0.55));
 const sun = new THREE.DirectionalLight(WHITE, 1.1);
 sun.position.set(400, -800, 1200);
 scene3.add(sun);
+// Local procedural studio reflections keep metal and glass readable from every side.
+const studio = new RoomEnvironment();
+const pmrem = new THREE.PMREMGenerator(renderer);
+const studioEnvironment = pmrem.fromScene(studio);
+scene3.environment = studioEnvironment.texture;
+studio.dispose();
+pmrem.dispose();
 function fortniteGrid(cell, tiles, color, opacity) {
   const g = new THREE.GridHelper(cell * tiles, tiles, color, color);
   g.rotation.x = -Math.PI / 2;
@@ -361,12 +370,12 @@ const WHITE_PIXEL = Object.assign(document.createElement("canvas"), { width: 1, 
 Object.assign(WHITE_PIXEL.getContext("2d"), { fillStyle: "#fff" }).fillRect(0, 0, 1, 1);
 
 // One THREE texture per stored file; file names change on every save, so a name never goes stale.
-function textureFor(fname) {
-  const key = fname || "";
+function textureFor(fname, colorSpace = THREE.SRGBColorSpace) {
+  const key = `${fname || ""}|${colorSpace}`;
   let tex = texCache.get(key);
   if (tex) return tex;
   tex = new THREE.Texture(WHITE_PIXEL);
-  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.colorSpace = colorSpace;
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;  // box-projected tiling UVs run past 0..1
   tex.needsUpdate = true;
   texCache.set(key, tex);
@@ -416,7 +425,7 @@ function materialFor(matId, materials, smooth) {
   const tex = authored?.textures?.base_color || "";
   const layers = (authored?.layers || []).map(id => (materials || []).find(m => m.id === id) || null);
   const blended = layers.some(Boolean);
-  const key = [matId || "", smooth ? "s" : "", tex, blended ? layers.map(l => l ? `${l.id}:${l.textures?.base_color || ""}` : "").join(",") : ""].join("|");
+  const key = [matId || "", smooth ? "s" : "", tex, authored?.textures?.normal || "", authored?.textures?.orm || "", (authored?.opacity ?? authored?.base_color?.[3] ?? 1) < 1 ? "transparent" : "opaque", blended ? layers.map(l => l ? `${l.id}:${l.textures?.base_color || ""}` : "").join(",") : ""].join("|");
   let mat = matCache.get(key);
   if (!mat) {
     mat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, flatShading: !smooth, vertexColors: true });
@@ -429,8 +438,7 @@ function materialFor(matId, materials, smooth) {
   }
   // A texture replaces the flat colour, as UseBaseColorTex does in UEFN.
   mat.color.copy(tex ? WHITE : colorOf(matId, materials));
-  mat.roughness = authored?.roughness ?? 0.5;
-  mat.metalness = authored?.metallic ?? 0;
+  applyMaterialDisplay(mat, authored, textureFor);
   if (blended) layers.forEach((layer, i) => {
     const target = mat.userData.layers[i][`forgeColor${i + 1}`].value;
     if (!layer) target.copy(colorOf(matId, materials));
