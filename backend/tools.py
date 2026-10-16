@@ -115,7 +115,7 @@ def register_tools(api: Any) -> None:
 
     @api.tool(**host)
     def forge_scene_new(name: str) -> dict:
-        """Create an empty Forge scene."""
+        """Create a new, empty Forge scene to model a fresh asset in."""
         return _run(api, name, "scene_new", {"name": name})
 
     @api.tool(**host)
@@ -125,12 +125,12 @@ def register_tools(api: Any) -> None:
 
     @api.tool(**host)
     def forge_undo(name: str) -> dict:
-        """Undo the last Forge edit."""
+        """Undo the last Forge edit in the current scene (forge_redo brings it back)."""
         return _run(api, name, "undo")
 
     @api.tool(**host)
     def forge_redo(name: str) -> dict:
-        """Redo a Forge edit."""
+        """Redo the Forge edit that forge_undo last took back."""
         return _run(api, name, "redo")
 
     @api.tool(**host)
