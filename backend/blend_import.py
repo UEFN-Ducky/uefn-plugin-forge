@@ -12,9 +12,8 @@ from pathlib import Path
 from .files import save_forge
 from .scene import _safe, forget, scenes_root
 
+# Blender runs this file; it lives outside backend/ so a compiled build still ships it.
 _SCRIPT = Path(__file__).resolve().parents[1] / "assets" / "blend_export_script.txt"
-if not _SCRIPT.is_file():  # source checkout, before packaging
-    _SCRIPT = Path(__file__).with_name("blend_export_script.py")
 _FORMATS = {".blend", ".fbx", ".glb", ".gltf"}
 
 

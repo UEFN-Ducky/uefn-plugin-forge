@@ -14,10 +14,16 @@ def verify(path):
         manifest = json.loads(archive.read("plugin.json"))
         assert manifest["id"] == "forge"
         assert re.search(manifest["contributes"]["agent.tools"]["intent_pattern"], "import mesh")
-        required = {"backend/__init__.py", "ui/forge.bundle.js", "assets/blend_export_script.txt", "THIRD_PARTY_NOTICES.md", "skills/forge/SKILL.md", "RELEASE_NOTES.md"}
+        compiled = any(n.endswith(".pyd") for n in names)
+        required = {"ui/forge.bundle.js", "assets/blend_export_script.txt", "THIRD_PARTY_NOTICES.md", "skills/forge/SKILL.md", "RELEASE_NOTES.md"}
+        if not compiled:
+            required.add("backend/__init__.py")
         assert required <= names, required - names
-        assert "backend/blend_export_script.py" not in names
-        assert not any(n.startswith(("node_modules/", "ui/src/", "deploy/")) or "/test_" in n for n in names)
+        assert not any(n.startswith(("node_modules/", "deploy/")) or "/test_" in n for n in names)
+        if compiled:  # the Store build: no Python source in backend/ (the build engine also ships ui/src/ minified)
+            assert not any(n.startswith("backend/") and n.endswith(".py") for n in names)
+        else:
+            assert not any(n.startswith("ui/src/") for n in names)
         assert b"three.js authors" in archive.read("THIRD_PARTY_NOTICES.md")
         for name in names:
             if name.endswith(".py") or name == "assets/blend_export_script.txt":

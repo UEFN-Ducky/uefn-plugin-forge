@@ -9,6 +9,7 @@ Env:
 Usage:
   py scripts/release.py
   py scripts/release.py --publish --changelog "v1.0.0: Forge modeler"
+  py scripts/release.py --plain                          # readable zip (escape hatch only)
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
-from build_zip import build_zip  # noqa: E402
+from build_zip import build_compiled_zip, build_zip  # noqa: E402
 
 
 def _load_dotenv() -> None:
@@ -178,13 +179,19 @@ def main() -> None:
     parser.add_argument("--publish", action="store_true", help="Upload + publish via Store MCP")
     parser.add_argument("--changelog", default="", help="Version changelog for Store")
     parser.add_argument("--category", default=os.environ.get("UDS_CATEGORY") or "plugins")
+    parser.add_argument(
+        "--plain",
+        action="store_true",
+        help="ship the readable Python source instead of the compiled build",
+    )
     args = parser.parse_args()
 
     if args.publish:
         from commit_before_store import commit_and_push_before_publish
 
         commit_and_push_before_publish(ROOT, args.changelog)
-    zip_path = build_zip()
+    # The Store gets the compiled build: no Python source ships, and the license check is baked in.
+    zip_path = build_zip() if args.plain else build_compiled_zip(release=args.publish)
     if args.publish:
         publish(zip_path, category=args.category, changelog=args.changelog)
     else:
