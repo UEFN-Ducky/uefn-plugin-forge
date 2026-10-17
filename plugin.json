@@ -7,6 +7,19 @@
   "min_app_version": "1.2.357",
   "default_enabled": true,
   "secret_keys": [],
+  "team_folders": [
+    {
+      "id": "scenes",
+      "root": "{LOCALAPPDATA}/UEFN-Ducky/forge/scenes",
+      "unit": "*",
+      "lock": "unit",
+      "on_locked": "quarantine",
+      "last": ["scene.json"],
+      "merge": ["transforms.json"],
+      "ignore": ["*/history.json", "*/history-index.json", "*/history-snapshots/**", "*/export/**", "**/*.tmp"],
+      "after_pull": "reload"
+    }
+  ],
   "contributes": {
     "automations": {
       "nodes": [{
