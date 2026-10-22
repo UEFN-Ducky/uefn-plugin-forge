@@ -1,7 +1,7 @@
 {
   "id": "forge",
   "kind": "plugin",
-  "version": "1.2.8",
+  "version": "1.2.9",
   "label": "Ducky Forge",
   "description": "Model, sculpt, paint, rig, and animate assets inside UEFN-Ducky, by hand or with the agent: Fortnite 512-unit grid, editor fly camera, QWER tools, layers, nested groups, solid booleans, smooth subdivision and sculpt brushes, shape keys, smart UV unwrap, texture painting, blend materials with painted masks, biped and chain skeletons with painted weights and IK, clips you can generate, key, and scrub, and a Send that lands SM_ and SK_ meshes, AS_ clips, morph targets, and MI_ materials and can place them in the level.",
   "min_app_version": "1.2.357",
