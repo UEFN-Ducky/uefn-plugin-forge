@@ -30,6 +30,10 @@ def test_bundle_shape():
     assert "category" in r and r["kind"] == "bundle"
 
 
+def test_no_background_removal_anywhere():
+    assert "image.remove_bg" not in json.dumps(row())
+
+
 def test_calls_and_edges_resolve():
     r = row()
     keys = {w["key"] for w in r["workflows"]}
@@ -75,12 +79,21 @@ with mock.patch.object(store, "use_db", lambda *_: False), mock.patch.object(sto
      mock.patch.object(templates, "_announce_templates_changed", lambda: None), \\
      mock.patch.object(host, "get_ui_contributions", lambda: {"automations_templates": [parsed]}), \\
      mock.patch.object(pstore, "get_enabled_plugin_ids", lambda: ["forge", "meshy", "studio3d", "uefn"]):
-    tid = next(t["id"] for t in templates.list_templates() if t["id"].endswith("forge-character"))
+    listed = next(t for t in templates.list_templates() if t["id"].endswith("forge-character"))
+    tid = listed["id"]
+    need = set(listed.get("requires_plugins") or [])
+    assert not need & {"meshy", "studio3d"}, need
     out = templates.use_template(tid, "local", "")
     assert out["shape"] == "bundle" and len(store.list_workflows()) == 7, out
     main = store.get_workflow(out["main"])
     called = {n["config"]["workflow_id"] for n in main["graph"]["nodes"] if n["type"] == "workflow.call"}
     assert len(called) == 6 and all(store.get_workflow(i) for i in called)
+    from backend.automations.catalog import node_specs
+    from backend.automations.pins import check_wires
+    from backend.automations.runner import _signature
+    for wf in store.list_workflows():
+        bad = check_wires(store.get_workflow(wf["id"])["graph"], node_specs(), _signature)
+        assert bad == [], (wf["name"], bad)
 print("OK")
 """
 
