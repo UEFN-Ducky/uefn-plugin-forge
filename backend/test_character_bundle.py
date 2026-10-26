@@ -1,13 +1,17 @@
 """The Forge: Character folder template: shape, wiring between its workflows, and the Forge tools its prompts name."""
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 NODE_TYPES = {
     "start.chat", "flow.input", "flow.output", "workflow.call", "llm.ask", "llm.extract", "llm.vision", "text.template",
     "flow.repeat", "flow.choose", "flow.branch", "logic.if", "image.generate", "image.edit", "image.remove_bg", "list.make",
-    "pipeline.agent", "pipeline.finish", "notify.message", "tool.call", "uefn.open_project", "uefn.import", "mesh.rig",
+    "pipeline.agent", "pipeline.finish", "notify.message", "tool.call", "uefn.open_project", "uefn.import", "mesh.rig", "input.text", "logic.expression",
 }
 
 
@@ -23,6 +27,7 @@ def test_bundle_shape():
     assert names == ["Character", "Spec", "Concept sheet", "Make 3D", "Rig", "Gear", "Ship to UEFN"]
     assert len({w["key"] for w in r["workflows"]}) == 7
     assert {w["folder"] for w in r["workflows"]} <= {""} | set(r["folders"])
+    assert "category" in r and r["kind"] == "bundle"
 
 
 def test_calls_and_edges_resolve():
@@ -37,6 +42,55 @@ def test_calls_and_edges_resolve():
                 assert n["config"]["workflow_id"].lstrip("@") in keys
         for e in w["graph"]["edges"]:
             assert e["source"] in ids and e["target"] in ids, (w["name"], e)
+
+
+TRIPO = ROOT.parent / "uefn-plugin-tripo" / "plugin.json"
+CORE = ROOT.parent.parent / "UEFN-Ducky-Release" / "ducky_app"
+
+
+def test_spec_and_sheet_are_tripos_unchanged():
+    if not TRIPO.exists():
+        return pytest.skip("tripo plugin not checked out")
+    tripo = json.loads(TRIPO.read_text(encoding="utf-8"))
+    rows = next(t for t in tripo["contributes"]["automations"]["templates"] if t["id"] == "tripo-character")["bundle"]["workflows"]
+    mine = {w["key"]: w for w in row()["workflows"]}
+    for w in rows:
+        if w["key"] in ("spec", "sheet"):
+            assert mine[w["key"]] == w, w["key"]
+
+
+CORE_CHECK = """
+import json, sys, tempfile
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])  # core's own `backend` package, not this plugin's
+from backend.automations import store, templates
+from backend.uefn_plugins import host, store as pstore
+tmp = Path(tempfile.mkdtemp())
+(tmp / "workflows").mkdir()
+parsed = host._automation_template_row(json.loads(sys.stdin.read()), "forge")
+with mock.patch.object(store, "use_db", lambda *_: False), mock.patch.object(store, "_files_dir", lambda: tmp / "workflows"), \\
+     mock.patch.object(store, "_announce_graphs_changed", lambda: None), \\
+     mock.patch.object(templates, "_dir", lambda *, for_write=False: tmp), \\
+     mock.patch.object(templates, "_announce_templates_changed", lambda: None), \\
+     mock.patch.object(host, "get_ui_contributions", lambda: {"automations_templates": [parsed]}), \\
+     mock.patch.object(pstore, "get_enabled_plugin_ids", lambda: ["forge", "meshy", "studio3d", "uefn"]):
+    tid = next(t["id"] for t in templates.list_templates() if t["id"].endswith("forge-character"))
+    out = templates.use_template(tid, "local", "")
+    assert out["shape"] == "bundle" and len(store.list_workflows()) == 7, out
+    main = store.get_workflow(out["main"])
+    called = {n["config"]["workflow_id"] for n in main["graph"]["nodes"] if n["type"] == "workflow.call"}
+    assert len(called) == 6 and all(store.get_workflow(i) for i in called)
+print("OK")
+"""
+
+
+def test_installs_and_saves_through_core():
+    if not CORE.exists():
+        return pytest.skip("core app not checked out")
+    done = subprocess.run([sys.executable, "-c", CORE_CHECK, str(CORE)], input=json.dumps(row()), text=True,
+                          capture_output=True, cwd=str(CORE), timeout=120)
+    assert done.returncode == 0 and "OK" in done.stdout, done.stderr[-2000:]
 
 
 def graph(key):

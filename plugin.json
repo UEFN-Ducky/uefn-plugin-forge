@@ -55,18 +55,18 @@
         "id": "forge-character", "label": "Forge: Character", "kind": "bundle", "category": "Characters", "icon": "🧍",
         "description": "One prompt to a rigged, animated NPC in your island, modeled, rigged and animated in Forge. Free: no Blender and no 3D credits; only the concept images use an image backend (Ducky AI by default). Asks which island (if the prompt names none), whether to use the concept sheet, and after 3 failed tries.",
         "root": "Forge Character",
-        "folders": ["Parts"],
+        "folders": [],
         "workflows": [
           {"key": "main", "name": "Character", "folder": "", "description": "Prompt in, rigged NPC out. Runs Spec, Concept sheet, Make 3D, Rig, Gear and Ship to UEFN.", "graph": {
             "nodes": [
               {"id": "s", "type": "start.chat", "x": 0, "y": 0, "config": {}},
               {"id": "spec", "type": "workflow.call", "x": 300, "y": 0, "label": "Spec", "config": {"workflow_id": "@spec", "args": {"prompt": "{{prompt}}"}}},
-              {"id": "sheet", "type": "workflow.call", "x": 600, "y": 0, "label": "Concept sheet", "config": {"workflow_id": "@sheet", "args": {"spec": "{{nodes.spec.spec}}", "front_prompt": "{{nodes.spec.front_prompt}}", "side_prompt": "{{nodes.spec.side_prompt}}", "back_prompt": "{{nodes.spec.back_prompt}}"}}},
-              {"id": "make", "type": "workflow.call", "x": 900, "y": 0, "label": "Make 3D", "config": {"workflow_id": "@make3d", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.name}}", "style": "{{nodes.spec.style}}", "height_m": "{{nodes.spec.height_m}}", "views": "{{nodes.sheet.views}}"}}},
-              {"id": "rig", "type": "workflow.call", "x": 1200, "y": 0, "label": "Rig", "config": {"workflow_id": "@rig", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.name}}", "body": "{{nodes.spec.body}}", "animations": "{{nodes.spec.animations}}", "height_m": "{{nodes.spec.height_m}}"}}},
-              {"id": "gear", "type": "workflow.call", "x": 1500, "y": 0, "label": "Gear", "config": {"workflow_id": "@gear", "args": {"name": "{{nodes.spec.name}}", "gear": "{{nodes.spec.gear}}", "style": "{{nodes.spec.style}}", "body": "{{nodes.spec.body}}"}}},
-              {"id": "ship", "type": "workflow.call", "x": 1800, "y": 0, "label": "Ship to UEFN", "config": {"workflow_id": "@ship", "args": {"name": "{{nodes.spec.name}}", "island": "{{nodes.spec.island}}", "npc_role": "{{nodes.spec.npc_role}}", "route": "{{nodes.rig.route}}", "rigged_mesh": "{{nodes.rig.mesh}}", "retarget": "{{nodes.rig.retarget}}", "body": "{{nodes.spec.body}}"}}},
-              {"id": "fin", "type": "pipeline.finish", "x": 2100, "y": 0, "config": {"message": "{{nodes.spec.name}} is in {{nodes.spec.island}}: {{nodes.ship.report}}"}},
+              {"id": "sheet", "type": "workflow.call", "x": 600, "y": 0, "label": "Concept sheet", "config": {"workflow_id": "@sheet", "args": {"spec": "{{nodes.spec.spec}}", "prompts": "{{nodes.spec.prompts}}"}}},
+              {"id": "make", "type": "workflow.call", "x": 900, "y": 0, "label": "Make 3D", "config": {"workflow_id": "@make3d", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.spec.name}}", "style": "{{nodes.spec.spec.style}}", "height_m": "{{nodes.spec.spec.height_m}}", "views": "{{nodes.sheet.views}}"}}},
+              {"id": "rig", "type": "workflow.call", "x": 1200, "y": 0, "label": "Rig", "config": {"workflow_id": "@rig", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.spec.name}}", "body": "{{nodes.spec.spec.body}}", "animations": "{{nodes.spec.spec.animations}}", "height_m": "{{nodes.spec.spec.height_m}}"}}},
+              {"id": "gear", "type": "workflow.call", "x": 1500, "y": 0, "label": "Gear", "config": {"workflow_id": "@gear", "args": {"name": "{{nodes.spec.spec.name}}", "gear": "{{nodes.spec.spec.gear}}", "style": "{{nodes.spec.spec.style}}", "body": "{{nodes.spec.spec.body}}"}}},
+              {"id": "ship", "type": "workflow.call", "x": 1800, "y": 0, "label": "Ship to UEFN", "config": {"workflow_id": "@ship", "args": {"name": "{{nodes.spec.spec.name}}", "island": "{{nodes.spec.spec.island}}", "npc_role": "{{nodes.spec.spec.npc_role}}", "route": "{{nodes.rig.route}}", "rigged_mesh": "{{nodes.rig.mesh}}", "retarget": "{{nodes.rig.retarget}}", "body": "{{nodes.spec.spec.body}}"}}},
+              {"id": "fin", "type": "pipeline.finish", "x": 2100, "y": 0, "config": {"message": "{{nodes.spec.spec.name}} is in {{nodes.spec.spec.island}}: {{nodes.ship.report}}"}},
               {"id": "fail", "type": "notify.message", "x": 2100, "y": 160, "config": {"on_fail": true, "message": "Forge: Character failed. {{error}}"}}
             ],
             "edges": [
@@ -75,69 +75,112 @@
               {"source": "rig", "target": "gear", "kind": "main"}, {"source": "gear", "target": "ship", "kind": "main"},
               {"source": "ship", "target": "fin", "kind": "main"}
             ]}},
-          {"key": "spec", "name": "Spec", "folder": "Parts", "description": "Turns the prompt into a character spec (name, body, style, palette, height, gear, animations, role, island) and the three view prompts.", "graph": {
-            "nodes": [
-              {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "prompt", "type": "text"}]}},
-              {"id": "ask", "type": "llm.ask", "x": 300, "y": 120, "config": {"system": "You design game characters. Reply with ONLY one JSON object: {\"name\": PascalCase no spaces, \"body\": \"humanoid\" or \"quadruped\", \"style\": short art style, \"palette\": colors, \"height_m\": real height in metres (number), \"gear\": [up to 3 held or worn items], \"animations\": [from idle, walk, run, attack, hurt], \"npc_role\": enemy|friendly|neutral, \"island\": the island name the request names, or empty}. No prose."}},
-              {"id": "ex", "type": "llm.extract", "x": 600, "y": 120, "config": {"names": ["name", "body", "style", "palette", "height_m", "gear", "animations", "npc_role", "island"]}},
-              {"id": "front", "type": "text.template", "x": 900, "y": 40, "config": {"names": ["name", "style", "palette", "body"], "template": "Character concept, FRONT view, full body, {{body}}, {{name}}, {{style}} style, palette {{palette}}, neutral standing pose, plain flat background, no text"}},
-              {"id": "side", "type": "text.template", "x": 900, "y": 160, "config": {"names": ["name", "style"], "template": "Same character {{name}} in the same {{style}} style, exact same design, SIDE view, full body, plain flat background"}},
-              {"id": "back", "type": "text.template", "x": 900, "y": 280, "config": {"names": ["name", "style"], "template": "Same character {{name}} in the same {{style}} style, exact same design, BACK view, full body, plain flat background"}},
-              {"id": "out", "type": "flow.output", "x": 1200, "y": 0, "config": {"outputs": [
-                {"name": "spec", "type": "text", "value": "{{nodes.ask.text}}"}, {"name": "name", "type": "text", "value": "{{nodes.ex.name}}"},
-                {"name": "body", "type": "text", "value": "{{nodes.ex.body}}"}, {"name": "style", "type": "text", "value": "{{nodes.ex.style}}"},
-                {"name": "height_m", "type": "text", "value": "{{nodes.ex.height_m}}"}, {"name": "gear", "type": "text", "value": "{{nodes.ex.gear}}"},
-                {"name": "animations", "type": "text", "value": "{{nodes.ex.animations}}"}, {"name": "npc_role", "type": "text", "value": "{{nodes.ex.npc_role}}"},
-                {"name": "island", "type": "text", "value": "{{nodes.ex.island}}"},
-                {"name": "front_prompt", "type": "text", "value": "{{nodes.front.text}}"}, {"name": "side_prompt", "type": "text", "value": "{{nodes.side.text}}"}, {"name": "back_prompt", "type": "text", "value": "{{nodes.back.text}}"},
-                {"name": "run_title", "type": "text", "value": "{{nodes.ex.name}}"}]}}
-            ],
-            "edges": [
-              {"source": "in", "target": "out", "kind": "main"},
-              {"source": "in", "target": "ask", "kind": "data", "source_pin": "prompt", "target_pin": "prompt"},
-              {"source": "ask", "target": "ex", "kind": "data", "source_pin": "text", "target_pin": "text"},
-              {"source": "ex", "target": "front", "kind": "data", "source_pin": "name", "target_pin": "name"},
-              {"source": "ex", "target": "side", "kind": "data", "source_pin": "name", "target_pin": "name"},
-              {"source": "ex", "target": "back", "kind": "data", "source_pin": "name", "target_pin": "name"}
-            ]}},
-          {"key": "sheet", "name": "Concept sheet", "folder": "Parts", "description": "Front, side and back views, cut out, checked by a vision model, then you approve. Nothing paid runs before that.", "graph": {
-            "nodes": [
-              {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "spec", "type": "text"}, {"name": "front_prompt", "type": "text"}, {"name": "side_prompt", "type": "text"}, {"name": "back_prompt", "type": "text"}]}},
-              {"id": "rep", "type": "flow.repeat", "x": 300, "y": 0, "config": {"max": 3, "expression": "false"}},
-              {"id": "gen", "type": "image.generate", "x": 300, "y": 160, "config": {}},
-              {"id": "e1", "type": "image.edit", "x": 600, "y": 160, "config": {}},
-              {"id": "e2", "type": "image.edit", "x": 600, "y": 300, "config": {}},
-              {"id": "c0", "type": "image.remove_bg", "x": 900, "y": 100, "config": {}},
-              {"id": "c1", "type": "image.remove_bg", "x": 900, "y": 220, "config": {}},
-              {"id": "c2", "type": "image.remove_bg", "x": 900, "y": 340, "config": {}},
-              {"id": "views", "type": "list.make", "x": 1200, "y": 220, "config": {"names": ["front", "side", "back"]}},
-              {"id": "chk", "type": "llm.vision", "x": 1500, "y": 220, "config": {"system": "You check character turnaround sheets.", "inputs": {"prompt": "Do these 3 images show ONE consistent character (same design, colors, proportions) as front, side and back, full body, on a plain background? Spec: {{spec}}. Answer PASS or FAIL then one sentence."}}},
-              {"id": "ok", "type": "logic.if", "x": 1500, "y": 0, "config": {"names": ["verdict"], "expression": "verdict.includes(\"PASS\")"}},
-              {"id": "ch", "type": "flow.choose", "x": 1800, "y": 0, "config": {"title": "Use this concept sheet?", "options": "Use this, Try again, Stop"}},
-              {"id": "out", "type": "flow.output", "x": 2100, "y": 0, "config": {"outputs": [{"name": "views", "type": "any", "value": "{{nodes.views.list}}"}]}},
-              {"id": "nofit", "type": "notify.message", "x": 600, "y": -160, "config": {"message": "Concept sheet: no approved sheet after 3 tries. Say what to change and run again."}},
-              {"id": "stop", "type": "pipeline.finish", "x": 900, "y": -160, "config": {"message": "Stopped at Concept sheet."}}
-            ],
-            "edges": [
-              {"source": "in", "target": "rep", "kind": "main"}, {"source": "rep", "target": "ok", "kind": "each"},
-              {"source": "ok", "target": "ch", "kind": "true"}, {"source": "ch", "target": "out", "kind": "true"},
-              {"source": "rep", "target": "nofit", "kind": "done"}, {"source": "nofit", "target": "stop", "kind": "main"},
-              {"source": "in", "target": "gen", "kind": "data", "source_pin": "front_prompt", "target_pin": "prompt"},
-              {"source": "gen", "target": "e1", "kind": "data", "source_pin": "image", "target_pin": "image"},
-              {"source": "in", "target": "e1", "kind": "data", "source_pin": "side_prompt", "target_pin": "prompt"},
-              {"source": "gen", "target": "e2", "kind": "data", "source_pin": "image", "target_pin": "image"},
-              {"source": "in", "target": "e2", "kind": "data", "source_pin": "back_prompt", "target_pin": "prompt"},
-              {"source": "gen", "target": "c0", "kind": "data", "source_pin": "image", "target_pin": "image"},
-              {"source": "e1", "target": "c1", "kind": "data", "source_pin": "image", "target_pin": "image"},
-              {"source": "e2", "target": "c2", "kind": "data", "source_pin": "image", "target_pin": "image"},
-              {"source": "c0", "target": "views", "kind": "data", "source_pin": "image", "target_pin": "front"},
-              {"source": "c1", "target": "views", "kind": "data", "source_pin": "image", "target_pin": "side"},
-              {"source": "c2", "target": "views", "kind": "data", "source_pin": "image", "target_pin": "back"},
-              {"source": "views", "target": "chk", "kind": "data", "source_pin": "list", "target_pin": "image"},
-              {"source": "chk", "target": "ok", "kind": "data", "source_pin": "text", "target_pin": "verdict"},
-              {"source": "views", "target": "ch", "kind": "data", "source_pin": "list", "target_pin": "images"}
-            ]}},
-          {"key": "make3d", "name": "Make 3D", "folder": "Parts", "description": "A Forge ducky models the character from the views at real scale, origin at the feet; render and a vision check, up to 3 tries.", "graph": {
+          {
+            "key": "spec",
+            "name": "Spec",
+            "description": "A prompt becomes the character spec (name, body, style, palette, height, gear, animations, role, island) and the three concept-sheet prompts. Returns spec, prompts and run_title.",
+            "folder": "",
+            "graph": {
+              "nodes": [
+                {"id": "in", "type": "flow.input", "x": 0, "y": 0, "label": "Prompt", "config": {"inputs": [{"name": "prompt", "type": "text", "default": "zombie for Roguelike"}]}},
+                {"id": "ask", "type": "llm.extract", "x": 300, "y": 0, "label": "Write the spec", "config": {
+                  "names": ["name", "body", "style", "palette", "height_m", "gear", "animations", "npc_role", "island"],
+                  "system": "The text asks for a game character. Fill: name = short Title Case name (Grey Wolf); body = exactly humanoid (two legs, two arms) or quadruped (four legs); style = art style, default stylized game-ready; palette = the 3 main colors in words; height_m = realistic height in meters as a number; gear = list of up to 3 held or worn items as strings ([] for none); animations = list of animation names, idle first, walk second, then up to 3 of run, attack, bite, hurt; npc_role = one word (enemy, ally, villager, boss); island = the island or project the request names (after for or in), else null."}},
+                {"id": "fr", "type": "text.template", "x": 600, "y": 0, "label": "Front prompt", "config": {
+                  "names": ["name", "style", "body", "palette", "gear"],
+                  "template": "Character concept art of {{name}}, a {{style}} {{body}} character. Color palette: {{palette}}. Gear: {{gear}}. Full body, front view, standing in a relaxed A-pose with arms (or front legs) slightly away from the body, all limbs and feet visible, one single character centered, plain white background, flat even lighting, no cast shadow, no text."}},
+                {"id": "sd", "type": "input.text", "x": 600, "y": 160, "label": "Side prompt", "config": {"value": "The exact same character, same design, colors, gear and proportions, now in a left side view, same pose, full body, plain white background, no cast shadow, no text."}},
+                {"id": "bk", "type": "input.text", "x": 600, "y": 320, "label": "Back prompt", "config": {"value": "The exact same character, same design, colors, gear and proportions, now seen from directly behind, same pose, full body, plain white background, no cast shadow, no text."}},
+                {"id": "pl", "type": "list.make", "x": 900, "y": 0, "label": "Prompts", "config": {"names": ["front", "side", "back"]}},
+                {"id": "ret", "type": "flow.output", "x": 1200, "y": 0, "label": "Return", "config": {"outputs": [{"name": "spec", "type": "json"}, {"name": "prompts", "type": "json"}, {"name": "run_title", "type": "text"}]}}
+              ],
+              "edges": [
+                {"source": "in", "target": "ret", "kind": "main"},
+                {"source": "in", "target": "ask", "kind": "data", "source_pin": "prompt", "target_pin": "text"},
+                {"source": "ask", "target": "fr", "kind": "data", "source_pin": "name", "target_pin": "name"},
+                {"source": "ask", "target": "fr", "kind": "data", "source_pin": "style", "target_pin": "style"},
+                {"source": "ask", "target": "fr", "kind": "data", "source_pin": "body", "target_pin": "body"},
+                {"source": "ask", "target": "fr", "kind": "data", "source_pin": "palette", "target_pin": "palette"},
+                {"source": "ask", "target": "fr", "kind": "data", "source_pin": "gear", "target_pin": "gear"},
+                {"source": "fr", "target": "pl", "kind": "data", "source_pin": "text", "target_pin": "front"},
+                {"source": "sd", "target": "pl", "kind": "data", "source_pin": "text", "target_pin": "side"},
+                {"source": "bk", "target": "pl", "kind": "data", "source_pin": "text", "target_pin": "back"},
+                {"source": "ask", "target": "ret", "kind": "data", "source_pin": "data", "target_pin": "spec"},
+                {"source": "pl", "target": "ret", "kind": "data", "source_pin": "list", "target_pin": "prompts"},
+                {"source": "ask", "target": "ret", "kind": "data", "source_pin": "name", "target_pin": "run_title"}
+              ]
+            }
+          },
+          {
+            "key": "sheet",
+            "name": "Concept sheet",
+            "description": "Front, side and back views of the character (picture, edited views, background removed), checked by a vision model up to 3 times, then shown for you to approve. Returns views.",
+            "folder": "",
+            "graph": {
+              "nodes": [
+                {"id": "in", "type": "flow.input", "x": 0, "y": 0, "label": "Spec and prompts", "config": {"inputs": [{"name": "spec", "type": "json"}, {"name": "prompts", "type": "json"}]}},
+                {"id": "pf", "type": "logic.expression", "x": 300, "y": -200, "label": "Front prompt", "config": {"names": ["p"], "expression": "p[0]"}},
+                {"id": "ps", "type": "logic.expression", "x": 300, "y": 0, "label": "Side prompt", "config": {"names": ["p"], "expression": "p[1]"}},
+                {"id": "pb", "type": "logic.expression", "x": 300, "y": 200, "label": "Back prompt", "config": {"names": ["p"], "expression": "p[2]"}},
+                {"id": "sn", "type": "logic.expression", "x": 300, "y": 400, "label": "Name", "config": {"names": ["spec"], "expression": "spec.name"}},
+                {"id": "gen", "type": "image.generate", "x": 600, "y": -200, "label": "Front view", "config": {"spend": true}},
+                {"id": "sd", "type": "image.edit", "x": 600, "y": 0, "label": "Side view", "config": {"spend": true}},
+                {"id": "bk", "type": "image.edit", "x": 600, "y": 200, "label": "Back view", "config": {"spend": true}},
+                {"id": "rf", "type": "image.remove_bg", "x": 900, "y": -200, "label": "Front, cut out", "config": {"spend": true}},
+                {"id": "rs", "type": "image.remove_bg", "x": 900, "y": 0, "label": "Side, cut out", "config": {"spend": true}},
+                {"id": "rb", "type": "image.remove_bg", "x": 900, "y": 200, "label": "Back, cut out", "config": {"spend": true}},
+                {"id": "vw", "type": "list.make", "x": 1200, "y": 0, "label": "Views", "config": {"names": ["front", "side", "back"]}},
+                {"id": "vx", "type": "logic.expression", "x": 1350, "y": 0, "label": "Views as pictures", "config": {"names": ["l"], "expression": "l"}},
+                {"id": "vq", "type": "input.text", "x": 1200, "y": 200, "label": "Check question", "config": {"value": "These are the front, side and back views of one game character on a plain background. Answer PASS only if all three show the same character (same design, colors, gear), each is a full body with nothing cut off, and each is a clean single figure. Otherwise answer FAIL and say in one sentence what is wrong."}},
+                {"id": "vis", "type": "llm.vision", "x": 1500, "y": 0, "label": "Vision check", "config": {}},
+                {"id": "ok", "type": "logic.expression", "x": 1800, "y": 0, "label": "Check passed", "config": {"names": ["a"], "expression": "contains(upper(a), 'PASS') && !contains(upper(a), 'FAIL')"}},
+                {"id": "msg", "type": "text.template", "x": 1800, "y": 200, "label": "Question", "config": {"names": ["name", "verdict"], "template": "Concept sheet for {{name}} (front, side, back). Automatic check: {{verdict}}\n\nUse this goes on to 3D and rigging (these cost credits). Try again makes a new sheet. Stop ends the run."}},
+                {"id": "approve", "type": "flow.repeat", "x": 300, "y": 600, "label": "Until you approve", "config": {"max": 6}},
+                {"id": "try", "type": "flow.repeat", "x": 600, "y": 600, "label": "Make and check (3 tries)", "config": {"max": 3}},
+                {"id": "pick", "type": "flow.choose", "x": 900, "y": 600, "label": "Approve the sheet", "config": {"title": "Concept sheet", "options": "Use this, Try again, Stop"}},
+                {"id": "okc", "type": "logic.expression", "x": 1200, "y": 600, "label": "You approved", "config": {"names": ["c"], "expression": "c == 'use'"}},
+                {"id": "gate", "type": "logic.if", "x": 600, "y": 800, "label": "Approved?", "config": {"expression": "passed"}},
+                {"id": "ret", "type": "flow.output", "x": 900, "y": 800, "label": "Return", "config": {"outputs": [{"name": "views", "type": "images"}]}},
+                {"id": "miss", "type": "notify.message", "x": 900, "y": 960, "label": "Not approved", "config": {"inputs": {"message": "Concept sheet: not approved after 6 sheets, so nothing was made in 3D."}}}
+              ],
+              "edges": [
+                {"source": "in", "target": "approve", "kind": "main"},
+                {"source": "approve", "target": "try", "kind": "each"},
+                {"source": "try", "target": "pick", "kind": "done"},
+                {"source": "approve", "target": "gate", "kind": "done"},
+                {"source": "gate", "target": "ret", "kind": "true"},
+                {"source": "gate", "target": "miss", "kind": "false"},
+                {"source": "okc", "target": "approve", "kind": "data", "source_pin": "result", "target_pin": "until"},
+                {"source": "ok", "target": "try", "kind": "data", "source_pin": "result", "target_pin": "until"},
+                {"source": "in", "target": "pf", "kind": "data", "source_pin": "prompts", "target_pin": "p"},
+                {"source": "in", "target": "ps", "kind": "data", "source_pin": "prompts", "target_pin": "p"},
+                {"source": "in", "target": "pb", "kind": "data", "source_pin": "prompts", "target_pin": "p"},
+                {"source": "in", "target": "sn", "kind": "data", "source_pin": "spec", "target_pin": "spec"},
+                {"source": "pf", "target": "gen", "kind": "data", "source_pin": "result", "target_pin": "prompt"},
+                {"source": "gen", "target": "sd", "kind": "data", "source_pin": "image", "target_pin": "image"},
+                {"source": "ps", "target": "sd", "kind": "data", "source_pin": "result", "target_pin": "prompt"},
+                {"source": "gen", "target": "bk", "kind": "data", "source_pin": "image", "target_pin": "image"},
+                {"source": "pb", "target": "bk", "kind": "data", "source_pin": "result", "target_pin": "prompt"},
+                {"source": "gen", "target": "rf", "kind": "data", "source_pin": "image", "target_pin": "image"},
+                {"source": "sd", "target": "rs", "kind": "data", "source_pin": "image", "target_pin": "image"},
+                {"source": "bk", "target": "rb", "kind": "data", "source_pin": "image", "target_pin": "image"},
+                {"source": "rf", "target": "vw", "kind": "data", "source_pin": "image", "target_pin": "front"},
+                {"source": "rs", "target": "vw", "kind": "data", "source_pin": "image", "target_pin": "side"},
+                {"source": "rb", "target": "vw", "kind": "data", "source_pin": "image", "target_pin": "back"},
+                {"source": "vw", "target": "vx", "kind": "data", "source_pin": "list", "target_pin": "l"},
+                {"source": "vx", "target": "vis", "kind": "data", "source_pin": "result", "target_pin": "image"},
+                {"source": "vq", "target": "vis", "kind": "data", "source_pin": "text", "target_pin": "prompt"},
+                {"source": "vis", "target": "ok", "kind": "data", "source_pin": "text", "target_pin": "a"},
+                {"source": "sn", "target": "msg", "kind": "data", "source_pin": "result", "target_pin": "name"},
+                {"source": "vis", "target": "msg", "kind": "data", "source_pin": "text", "target_pin": "verdict"},
+                {"source": "vx", "target": "pick", "kind": "data", "source_pin": "result", "target_pin": "images"},
+                {"source": "msg", "target": "pick", "kind": "data", "source_pin": "text", "target_pin": "message"},
+                {"source": "pick", "target": "okc", "kind": "data", "source_pin": "choice", "target_pin": "c"},
+                {"source": "vx", "target": "ret", "kind": "data", "source_pin": "result", "target_pin": "views"}
+              ]
+            }
+          },
+          {"key": "make3d", "name": "Make 3D", "folder": "", "description": "A Forge ducky models the character from the views at real scale, origin at the feet; render and a vision check, up to 3 tries.", "graph": {
             "nodes": [
               {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "spec", "type": "text"}, {"name": "name", "type": "text"}, {"name": "style", "type": "text"}, {"name": "height_m", "type": "text"}, {"name": "views", "type": "any"}]}},
               {"id": "rep", "type": "flow.repeat", "x": 300, "y": 0, "config": {"max": 3, "expression": "false"}},
@@ -155,7 +198,7 @@
               {"source": "agent", "target": "vis", "kind": "data", "source_pin": "files", "target_pin": "image"},
               {"source": "vis", "target": "ok", "kind": "data", "source_pin": "text", "target_pin": "verdict"}
             ]}},
-          {"key": "rig", "name": "Rig", "folder": "Parts", "description": "forge_rig for the body, forge_anim clips, a pose-test render and a vision check. Failing twice exports the mesh and rigs it in the cloud (auto).", "graph": {
+          {"key": "rig", "name": "Rig", "folder": "", "description": "forge_rig for the body, forge_anim clips, a pose-test render and a vision check. Failing twice exports the mesh and rigs it in the cloud (auto).", "graph": {
             "nodes": [
               {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "spec", "type": "text"}, {"name": "name", "type": "text"}, {"name": "body", "type": "text"}, {"name": "animations", "type": "text"}, {"name": "height_m", "type": "text"}]}},
               {"id": "rep", "type": "flow.repeat", "x": 300, "y": 0, "config": {"max": 2, "expression": "false"}},
@@ -179,7 +222,7 @@
               {"source": "exp", "target": "cloud", "kind": "data", "source_pin": "files", "target_pin": "mesh"},
               {"source": "cloud", "target": "out2", "kind": "data", "source_pin": "mesh", "target_pin": "mesh"}
             ]}},
-          {"key": "gear", "name": "Gear", "folder": "Parts", "description": "Models each gear item in Forge and parents it to the hand bone. Skips when the spec lists none.", "graph": {
+          {"key": "gear", "name": "Gear", "folder": "", "description": "Models each gear item in Forge and parents it to the hand bone. Skips when the spec lists none.", "graph": {
             "nodes": [
               {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "name", "type": "text"}, {"name": "gear", "type": "text"}, {"name": "style", "type": "text"}, {"name": "body", "type": "text"}]}},
               {"id": "any", "type": "flow.branch", "x": 300, "y": 0, "config": {"mode": "data", "field": "gear", "op": "exists"}},
@@ -190,7 +233,7 @@
               {"source": "in", "target": "any", "kind": "main"}, {"source": "any", "target": "agent", "kind": "true"},
               {"source": "any", "target": "out", "kind": "false"}, {"source": "agent", "target": "out", "kind": "main"}
             ]}},
-          {"key": "ship", "name": "Ship to UEFN", "folder": "Parts", "description": "Opens the island, imports the character into Characters/<Name> and makes its NPC definition.", "graph": {
+          {"key": "ship", "name": "Ship to UEFN", "folder": "", "description": "Differs from the shared Ship on purpose: Forge sends its own SK_ and clips with forge_send_to_uefn (or imports the cloud-rigged model), retargets Fortnite clips, then builds the NPC definition.", "graph": {
             "nodes": [
               {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "name", "type": "text"}, {"name": "island", "type": "text"}, {"name": "npc_role", "type": "text"}, {"name": "route", "type": "text"}, {"name": "rigged_mesh", "type": "any"}, {"name": "retarget", "type": "text"}, {"name": "body", "type": "text"}]}},
               {"id": "rtb", "type": "flow.branch", "x": 1100, "y": 120, "config": {"mode": "data", "field": "retarget", "op": "exists"}},
