@@ -53,27 +53,30 @@
         }
       }, {
         "id": "forge-character", "label": "Forge: Character", "kind": "bundle", "category": "Characters", "icon": "🧍",
-        "description": "One prompt to a rigged, animated NPC in your island, modeled, rigged and animated in Forge. Free: no Blender and no 3D credits; only the concept images use an image backend (Ducky AI by default). Asks which island (if the prompt names none), whether to use the concept sheet, and after 3 failed tries.",
+        "description": "One prompt to a rigged, animated character modeled, rigged and animated entirely in Forge. Free: no Blender, no 3D credits and no pictures. It only goes on to UEFN when the prompt names an island or says send to UEFN.",
         "root": "Forge Character",
         "folders": [],
         "workflows": [
-          {"key": "main", "name": "Character", "folder": "", "description": "Prompt in, rigged NPC out. Runs Spec, Concept sheet, Make 3D, Rig, Gear and Ship to UEFN.", "graph": {
+          {"key": "main", "name": "Character", "folder": "", "description": "Prompt in, rigged Forge character out. Runs Spec, Make 3D, Rig and Gear; Ship to UEFN runs only when the prompt names an island or says send to UEFN.", "graph": {
             "nodes": [
               {"id": "s", "type": "start.chat", "x": 0, "y": 0, "config": {}},
               {"id": "spec", "type": "workflow.call", "x": 300, "y": 0, "label": "Spec", "config": {"workflow_id": "@spec", "args": {"prompt": "{{prompt}}"}}},
-              {"id": "sheet", "type": "workflow.call", "x": 600, "y": 0, "label": "Concept sheet", "config": {"workflow_id": "@sheet", "args": {"spec": "{{nodes.spec.spec}}", "prompts": "{{nodes.spec.prompts}}"}}},
-              {"id": "make", "type": "workflow.call", "x": 900, "y": 0, "label": "Make 3D", "config": {"workflow_id": "@make3d", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.spec.name}}", "style": "{{nodes.spec.spec.style}}", "height_m": "{{nodes.spec.spec.height_m}}", "views": "{{nodes.sheet.views}}"}}},
+              {"id": "make", "type": "workflow.call", "x": 900, "y": 0, "label": "Make 3D", "config": {"workflow_id": "@make3d", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.spec.name}}", "style": "{{nodes.spec.spec.style}}", "height_m": "{{nodes.spec.spec.height_m}}"}}},
+              {"id": "go", "type": "logic.if", "x": 1650, "y": 0, "label": "Send to UEFN?", "config": {"names": ["spec", "p"], "expression": "len(text(spec.island)) > 0 && lower(text(spec.island)) != 'null' || contains(lower(text(p)), 'send to uefn')", "inputs": {"p": "{{prompt}}"}}},
               {"id": "rig", "type": "workflow.call", "x": 1200, "y": 0, "label": "Rig", "config": {"workflow_id": "@rig", "args": {"spec": "{{nodes.spec.spec}}", "name": "{{nodes.spec.spec.name}}", "body": "{{nodes.spec.spec.body}}", "animations": "{{nodes.spec.spec.animations}}", "height_m": "{{nodes.spec.spec.height_m}}"}}},
               {"id": "gear", "type": "workflow.call", "x": 1500, "y": 0, "label": "Gear", "config": {"workflow_id": "@gear", "args": {"name": "{{nodes.spec.spec.name}}", "gear": "{{nodes.spec.spec.gear}}", "style": "{{nodes.spec.spec.style}}", "body": "{{nodes.spec.spec.body}}"}}},
               {"id": "ship", "type": "workflow.call", "x": 1800, "y": 0, "label": "Ship to UEFN", "config": {"workflow_id": "@ship", "args": {"name": "{{nodes.spec.spec.name}}", "island": "{{nodes.spec.spec.island}}", "npc_role": "{{nodes.spec.spec.npc_role}}", "route": "{{nodes.rig.route}}", "rigged_mesh": "{{nodes.rig.mesh}}", "retarget": "{{nodes.rig.retarget}}", "body": "{{nodes.spec.spec.body}}"}}},
-              {"id": "fin", "type": "pipeline.finish", "x": 2100, "y": 0, "config": {"message": "{{nodes.spec.spec.name}} is in {{nodes.spec.spec.island}}: {{nodes.ship.report}}"}},
-              {"id": "fail", "type": "notify.message", "x": 2100, "y": 160, "config": {"on_fail": true, "message": "Forge: Character failed. {{error}}"}}
+              {"id": "fin", "type": "pipeline.finish", "x": 2100, "y": 0, "config": {"message": "{{nodes.spec.spec.name}} is built and rigged in Forge (scene {{nodes.spec.spec.name}})."}},
+              {"id": "fin2", "type": "pipeline.finish", "x": 2100, "y": -160, "config": {"message": "{{nodes.spec.spec.name}} is built and rigged in Forge and shipped to {{nodes.spec.spec.island}}: {{nodes.ship.report}}"}},
+              {"id": "fail", "type": "notify.message", "x": 2100, "y": 160, "label": "Tell me if it fails", "config": {"on_fail": true, "inputs": {"message": "Forge: Character failed. {{error}}"}}}
             ],
             "edges": [
-              {"source": "s", "target": "spec", "kind": "main"}, {"source": "spec", "target": "sheet", "kind": "main"},
-              {"source": "sheet", "target": "make", "kind": "main"}, {"source": "make", "target": "rig", "kind": "main"},
-              {"source": "rig", "target": "gear", "kind": "main"}, {"source": "gear", "target": "ship", "kind": "main"},
-              {"source": "ship", "target": "fin", "kind": "main"}
+              {"source": "s", "target": "spec", "kind": "main"}, {"source": "spec", "target": "make", "kind": "main"},
+              {"source": "make", "target": "rig", "kind": "main"},
+              {"source": "rig", "target": "gear", "kind": "main"}, {"source": "gear", "target": "go", "kind": "main"},
+              {"source": "go", "target": "ship", "kind": "true"}, {"source": "go", "target": "fin", "kind": "false"},
+              {"source": "ship", "target": "fin2", "kind": "main"},
+              {"source": "spec", "target": "go", "kind": "data", "source_pin": "spec", "target_pin": "spec"}
             ]}},
           {
             "key": "spec",
@@ -178,29 +181,32 @@
               ]
             }
           },
-          {"key": "make3d", "name": "Make 3D", "folder": "", "description": "A Forge ducky models the character from the views at real scale, origin at the feet; render and a vision check, up to 3 tries.", "graph": {
+          {"key": "make3d", "name": "Make 3D", "folder": "", "description": "A Forge ducky models the character from the spec at real scale, origin at the feet; its renders go to a vision check, up to 3 tries.", "graph": {
             "nodes": [
-              {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "spec", "type": "text"}, {"name": "name", "type": "text"}, {"name": "style", "type": "text"}, {"name": "height_m", "type": "text"}, {"name": "views", "type": "any"}]}},
+              {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "spec", "type": "text"}, {"name": "name", "type": "text"}, {"name": "style", "type": "text"}, {"name": "height_m", "type": "text"}]}},
               {"id": "rep", "type": "flow.repeat", "x": 300, "y": 0, "config": {"max": 3, "expression": "false"}},
-              {"id": "agent", "type": "pipeline.agent", "x": 600, "y": 0, "label": "Model in Forge", "config": {"prompt": "Model the character {{name}} in Forge from the concept views ({{views}}). Spec: {{spec}}. Attempt {{attempt}} of 3; if a previous attempt was judged FAIL, fix what the judge said.\n1. forge_scene_new name=\"{{name}}\" (or reuse it; forge_scene_get to see).\n2. Build a clean low-poly, {{style}} character with forge_add, forge_shape, forge_sculpt and forge_mesh_op: one connected body with separate limbs ready to rig, real scale {{height_m}} m tall (Forge units: Fortnite grid, 1 m = 100), standing upright, origin at the feet.\n3. forge_material_set for each color, then forge_texture_generate if the style needs surface detail.\n4. forge_check and fix every hole, flipped face and missing UV it reports.\n5. forge_render front, side, three.\nReply with a short report and the render files."}},
-              {"id": "vis", "type": "llm.vision", "x": 900, "y": 160, "config": {"inputs": {"prompt": "Compare these renders of the model to the concept character: {{spec}}. Same body shape, proportions, colors, gear? Answer PASS or FAIL then one sentence of what to fix."}}},
+              {"id": "agent", "type": "pipeline.agent", "x": 600, "y": 0, "label": "Model in Forge", "config": {"prompt": "Model the character {{name}} in Forge. Spec: {{spec}}. Attempt {{attempt}} of 3; if a previous attempt was judged FAIL, fix what the judge said.\n1. forge_scene_new name=\"{{name}}\" (or reuse it; forge_scene_get to see).\n2. Build a clean low-poly, {{style}} character with forge_add, forge_shape, forge_sculpt and forge_mesh_op: one connected body with separate limbs ready to rig, real scale {{height_m}} m tall (Forge units: Fortnite grid, 1 m = 100), standing upright, origin at the feet.\n3. forge_material_set for each color, then forge_texture_generate if the style needs surface detail.\n4. forge_check and fix every hole, flipped face and missing UV it reports.\n5. forge_render front, side, three.\nReply with a short report, then as the LAST line `RENDERS: ` followed by the full file paths of the rendered PNGs, comma separated."}},
+              {"id": "rp", "type": "llm.extract", "x": 750, "y": 160, "label": "Render paths", "config": {"model": "claude_code:claude-opus-5-5", "names": ["renders"], "system": "From the text take the file paths listed after the line RENDERS: as a JSON list of strings; [] if none."}},
+              {"id": "vis", "type": "llm.vision", "x": 900, "y": 160, "config": {"inputs": {"prompt": "Compare these renders of the model to the character spec: {{spec}}. Same body shape, proportions, colors, gear? Answer PASS or FAIL then one sentence of what to fix."}}},
               {"id": "ok", "type": "logic.if", "x": 900, "y": 0, "config": {"names": ["verdict"], "expression": "verdict.includes(\"PASS\")"}},
               {"id": "out", "type": "flow.output", "x": 1200, "y": 0, "config": {"outputs": [{"name": "scene", "type": "text", "value": "{{name}}"}]}},
-              {"id": "nofit", "type": "notify.message", "x": 600, "y": 200, "config": {"message": "Make 3D: the Forge model did not match the concept after 3 tries."}},
+              {"id": "nofit", "type": "notify.message", "x": 600, "y": 200, "config": {"inputs": {"message": "Make 3D: the Forge model did not match the spec after 3 tries."}}},
               {"id": "stop", "type": "pipeline.finish", "x": 900, "y": 300, "config": {"message": "Stopped at Make 3D."}}
             ],
             "edges": [
               {"source": "in", "target": "rep", "kind": "main"}, {"source": "rep", "target": "agent", "kind": "each"},
               {"source": "agent", "target": "ok", "kind": "main"}, {"source": "ok", "target": "out", "kind": "true"},
               {"source": "rep", "target": "nofit", "kind": "done"}, {"source": "nofit", "target": "stop", "kind": "main"},
-              {"source": "agent", "target": "vis", "kind": "data", "source_pin": "files", "target_pin": "image"},
+              {"source": "agent", "target": "rp", "kind": "data", "source_pin": "text", "target_pin": "text"},
+              {"source": "rp", "target": "vis", "kind": "data", "source_pin": "renders", "target_pin": "image"},
               {"source": "vis", "target": "ok", "kind": "data", "source_pin": "text", "target_pin": "verdict"}
             ]}},
           {"key": "rig", "name": "Rig", "folder": "", "description": "forge_rig for the body, forge_anim clips, a pose-test render and a vision check. Failing twice exports the mesh and rigs it in the cloud (auto).", "graph": {
             "nodes": [
               {"id": "in", "type": "flow.input", "x": 0, "y": 0, "config": {"inputs": [{"name": "spec", "type": "text"}, {"name": "name", "type": "text"}, {"name": "body", "type": "text"}, {"name": "animations", "type": "text"}, {"name": "height_m", "type": "text"}]}},
               {"id": "rep", "type": "flow.repeat", "x": 300, "y": 0, "config": {"max": 2, "expression": "false"}},
-              {"id": "agent", "type": "pipeline.agent", "x": 600, "y": 0, "label": "Rig in Forge", "config": {"prompt": "In the Forge scene \"{{name}}\" ({{body}}): attempt {{attempt}} of 2.\n1. forge_rig action=template with template=biped for a humanoid body or the quadruped chain for an animal, then action=bind with auto=true so every part is weighted to its bone.\n2. forge_anim action=generate ONLY for idle and walk (needed for the renders and as fallback clips), named by kind. Do not hand-key any other animation: Fortnite clips for the rest are retargeted after Send. For a humanoid, finish your reply with one line `RETARGET: ` followed by the names in {{animations}} other than idle and walk (comma separated, may be empty). For a quadruped there is no retarget (the mannequin is a biped): hand-key the other names in {{animations}} with forge_anim and end with `RETARGET: ` empty.\n3. Pose test: forge_render with clip set to the walk clip (frames at the quarter points).\nReply with a short report and the pose-test render files."}},
+              {"id": "agent", "type": "pipeline.agent", "x": 600, "y": 0, "label": "Rig in Forge", "config": {"prompt": "In the Forge scene \"{{name}}\" ({{body}}): attempt {{attempt}} of 2.\n1. forge_rig action=template with template=biped for a humanoid body or the quadruped chain for an animal, then action=bind with auto=true so every part is weighted to its bone.\n2. forge_anim action=generate ONLY for idle and walk (needed for the renders and as fallback clips), named by kind. Do not hand-key any other animation: Fortnite clips for the rest are retargeted after Send. For a humanoid, finish your reply with one line `RETARGET: ` followed by the names in {{animations}} other than idle and walk (comma separated, may be empty). For a quadruped there is no retarget (the mannequin is a biped): hand-key the other names in {{animations}} with forge_anim and end with `RETARGET: ` empty.\n3. Pose test: forge_render with clip set to the walk clip (frames at the quarter points).\nReply with a short report, then as the LAST line `RENDERS: ` followed by the full file paths of the pose-test PNGs, comma separated."}},
+              {"id": "rp", "type": "llm.extract", "x": 750, "y": 160, "label": "Render paths", "config": {"model": "claude_code:claude-opus-5-5", "names": ["renders"], "system": "From the text take the file paths listed after the line RENDERS: as a JSON list of strings; [] if none."}},
               {"id": "vis", "type": "llm.vision", "x": 900, "y": 160, "config": {"inputs": {"prompt": "These are pose-test renders of a rigged {{body}} character walking. Is the mesh bending cleanly at the joints, with no stretched or detached parts? Answer PASS or FAIL then one sentence."}}},
               {"id": "ok", "type": "logic.if", "x": 900, "y": 0, "config": {"names": ["verdict"], "expression": "verdict.includes(\"PASS\")"}},
               {"id": "rt", "type": "llm.extract", "x": 900, "y": -120, "config": {"names": ["retarget"], "system": "From the text take the names after the line RETARGET: as a comma separated list; empty if none."}},
@@ -213,7 +219,8 @@
               {"source": "in", "target": "rep", "kind": "main"}, {"source": "rep", "target": "agent", "kind": "each"},
               {"source": "agent", "target": "ok", "kind": "main"}, {"source": "ok", "target": "out", "kind": "true"},
               {"source": "rep", "target": "exp", "kind": "done"}, {"source": "exp", "target": "out2", "kind": "main"},
-              {"source": "agent", "target": "vis", "kind": "data", "source_pin": "files", "target_pin": "image"},
+              {"source": "agent", "target": "rp", "kind": "data", "source_pin": "text", "target_pin": "text"},
+              {"source": "rp", "target": "vis", "kind": "data", "source_pin": "renders", "target_pin": "image"},
               {"source": "agent", "target": "rt", "kind": "data", "source_pin": "text", "target_pin": "text"},
               {"source": "rt", "target": "out", "kind": "data", "source_pin": "retarget", "target_pin": "retarget"},
               {"source": "vis", "target": "ok", "kind": "data", "source_pin": "text", "target_pin": "verdict"},
@@ -251,7 +258,7 @@
               {"id": "send", "type": "tool.call", "x": 900, "y": 120, "config": {"name": "forge_send_to_uefn", "arguments": {"name": "{{name}}", "mode": "each", "folder": "Characters/{{name}}", "collision": "simple", "place": false}}},
               {"id": "npc", "type": "pipeline.agent", "x": 1200, "y": 0, "label": "NPC definition", "config": {"prompt": "In the open island, find the SK_ skeletal mesh and the AS_ clips under Characters/{{name}}. Make the NPC: create_character_blueprint and create_anim_preset (idle/walk/run/attack from those clips), then create_npc_character_definition name=\"{{name}}\" with those paths, dest_folder Characters/{{name}}. Role: {{npc_role}} (enemy means a hostile behavior, otherwise none). Reply with the definition's asset path."}},
               {"id": "fin", "type": "flow.output", "x": 1500, "y": 0, "config": {"outputs": [{"name": "report", "type": "text", "value": "{{nodes.npc.text}}"}]}},
-              {"id": "fail", "type": "notify.message", "x": 1500, "y": 160, "config": {"on_fail": true, "message": "Ship to UEFN failed. {{error}}"}}
+              {"id": "fail", "type": "notify.message", "x": 1500, "y": 160, "config": {"on_fail": true, "inputs": {"message": "Ship to UEFN failed. {{error}}"}}}
             ],
             "edges": [
               {"source": "in", "target": "open", "kind": "main"}, {"source": "open", "target": "br", "kind": "main"},

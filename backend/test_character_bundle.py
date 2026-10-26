@@ -30,6 +30,28 @@ def test_bundle_shape():
     assert "category" in r and r["kind"] == "bundle"
 
 
+def test_main_path_is_forge_only_and_ship_is_conditional():
+    g = graph("main")
+    calls = [n["label"] for n in g["nodes"] if n["type"] == "workflow.call"]
+    assert calls == ["Spec", "Make 3D", "Rig", "Gear", "Ship to UEFN"]
+    assert not [n for n in g["nodes"] if n["type"].startswith(("image.", "mesh."))]
+    nxt = {(e["source"], e["kind"]): e["target"] for e in g["edges"] if e["kind"] != "data"}
+    assert nxt[("gear", "main")] == "go" and nxt[("go", "true")] == "ship" and nxt[("go", "false")] == "fin"
+
+
+def test_vision_checks_get_render_paths_and_notifies_have_messages():
+    for key in ("make3d", "rig"):
+        g = graph(key)
+        wires = {(e["source"], e["target"]) for e in g["edges"] if e["kind"] == "data"}
+        assert ("agent", "rp") in wires and ("rp", "vis") in wires, key
+        agent = next(n for n in g["nodes"] if n["id"] == "agent")
+        assert "RENDERS:" in agent["config"]["prompt"]
+    for w in row()["workflows"]:
+        for n in w["graph"]["nodes"]:
+            if n["type"] == "notify.message":
+                assert n["config"].get("inputs", {}).get("message"), (w["name"], n["id"])
+
+
 def test_no_background_removal_anywhere():
     assert "image.remove_bg" not in json.dumps(row())
 
@@ -87,7 +109,7 @@ with mock.patch.object(store, "use_db", lambda *_: False), mock.patch.object(sto
     assert out["shape"] == "bundle" and len(store.list_workflows()) == 7, out
     main = store.get_workflow(out["main"])
     called = {n["config"]["workflow_id"] for n in main["graph"]["nodes"] if n["type"] == "workflow.call"}
-    assert len(called) == 6 and all(store.get_workflow(i) for i in called)
+    assert len(called) == 5 and all(store.get_workflow(i) for i in called)
     from backend.automations.catalog import node_specs
     from backend.automations.pins import check_wires
     from backend.automations.runner import _signature
