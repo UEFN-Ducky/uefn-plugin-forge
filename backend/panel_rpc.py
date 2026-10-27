@@ -47,7 +47,19 @@ def forge_job(job: str = "", **_kwargs) -> dict:
     return poll(str(job))
 
 
+def forge_shot_render_start(name: str = "", shot: str = "", fps: int = 30, width: int = 1920, height: int = 1080, **_kwargs: Any) -> dict:
+    """The Shots panel's Render button: start the job and return; the panel draws its frames from forge_live."""
+    from . import live_view
+    try:
+        job = live_view.start_render(str(name), str(shot), int(fps or 30), int(width or 1920), int(height or 1080))
+        return {"ok": True, **live_view.job_result(job)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def register_panel_rpcs(api: Any) -> None:
+    from . import live_view
+
     def forge_send_bound(name: str = "", mode: str = "each", folder: str = "", collision: str = "simple", place: bool = False, **_kwargs: Any) -> dict:
         try:
             result = send_to_uefn(str(name), api.listener, mode=mode, folder=folder, collision=collision, place=bool(place))
@@ -63,3 +75,7 @@ def register_panel_rpcs(api: Any) -> None:
     api.register_panel_rpc("forge_call", forge_call)
     api.register_panel_rpc("forge_send", forge_send_bound)
     api.register_panel_rpc("forge_texture", forge_texture)
+    api.register_panel_rpc("forge_live", live_view.live_poll)
+    api.register_panel_rpc("forge_view_put", live_view.view_put)
+    api.register_panel_rpc("forge_frame_put", live_view.frame_put)
+    api.register_panel_rpc("forge_shot_render_start", forge_shot_render_start)

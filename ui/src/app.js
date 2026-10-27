@@ -6,6 +6,8 @@ import { runMeshTask as compatibleMeshTask } from "./mesh-engine.js";
 import { version } from "../../plugin.json";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
+import { createPresence } from "./presence.js";
+import { createShotsPanel } from "./shots-panel.js";
 
 document.getElementById("forge-version").textContent = `Forge ${version}`;
 
@@ -182,6 +184,7 @@ gizmo.addEventListener("dragging-changed", (ev) => {
       mesh.computeBoundingBox();
       mesh.computeBoundingSphere();
     }
+    presence.endDrag(pivot.userData.id);
     commitXform();
     applySnap();
   }
@@ -204,6 +207,7 @@ gizmo.addEventListener("objectChange", () => {
     touched.add(slot.mesh);
   });
   for (const mesh of touched) mesh.instanceMatrix.needsUpdate = true;
+  presence.sendDrag(pivot.userData.id, _delta);
 });
 
 let flashUntil = 0;
@@ -1035,6 +1039,7 @@ function startStroke(ev) {
     work.grab = { caught: Brush.grabStart(work.positions, hit.local, brush().radius / work.scale), start: hit.world.clone(),
       plane: new THREE.Plane().setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()).negate(), hit.world) };
   } else dab(hit.local);
+  presence.sendStroke(hit.world, brush().radius, state.mode);
   try { renderer.domElement.setPointerCapture(ev.pointerId); } catch { /* already captured */ }
   return true;
 }
@@ -1056,6 +1061,7 @@ function moveStroke(ev) {
   const hit = workHit(ev);
   showRing(hit);
   if (!hit) return;
+  presence.sendStroke(hit.world, brush().radius, state.mode);
   const step = brush().radius / work.scale * 0.25;
   const from = work.last, to = hit.local;
   const dist = Math.hypot(to[0] - from[0], to[1] - from[1], to[2] - from[2]);
@@ -1316,6 +1322,7 @@ function syncSelection() {
 }
 
 function rebuild(payload) {
+  previews.clear();  // the slots are new: a teammate's drag preview is in the payload now
   state.payload = payload;
   const selected = payload.selection?.object;
   if (selected && !state.picked.has(selected)) state.picked = new Set([selected]);
@@ -1348,6 +1355,7 @@ function applyTransforms(transforms) {
   for (const [id, transform] of Object.entries(transforms)) {
     const node = nodeById(id);
     if (!node) continue;
+    previews.delete(id);
     const before = node.transform;
     const slots = state.slots.get(id) || [];
     // Array placements retain their authored offsets; the shared geometry is untouched.
@@ -1481,6 +1489,57 @@ function endFly(ev) {
   }
 }
 
+// A teammate's drag in progress: their delta over the object's own matrices, until the change syncs.
+const previews = new Map();
+const _preview = new THREE.Matrix4();
+function previewDelta(id, elements) {
+  let rows = previews.get(id);
+  if (!elements) {
+    for (const { slot, base } of rows || []) { slot.mesh.setMatrixAt(slot.index, base); slot.mesh.instanceMatrix.needsUpdate = true; }
+    previews.delete(id);
+    return;
+  }
+  if (state.dragging && pivot.userData.id === id) return;
+  if (!rows) {
+    rows = (state.slots.get(id) || []).map(slot => ({ slot, base: new THREE.Matrix4() }));
+    for (const row of rows) row.slot.mesh.getMatrixAt(row.slot.index, row.base);
+    previews.set(id, rows);
+  }
+  _preview.fromArray(elements);
+  for (const { slot, base } of rows) {
+    _m.copy(base).premultiply(_preview);
+    slot.mesh.setMatrixAt(slot.index, _m);
+    slot.mesh.instanceMatrix.needsUpdate = true;
+    slot.mesh.frustumCulled = false;
+  }
+}
+
+function slotBounds(ids) {
+  const bounds = new THREE.Box3();
+  for (const slot of new Set(ids.flatMap(id => state.slots.get(id) || []))) {
+    const geo = slot.mesh.geometry;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    slot.mesh.getMatrixAt(slot.index, _m);
+    if (Math.abs(_m.determinant()) < 1e-12) continue; // hidden behind its rig-view copy
+    bounds.union(geo.boundingBox.clone().applyMatrix4(_m));
+  }
+  return bounds;
+}
+
+const presence = createPresence({
+  call, scene3, camera, orbit, renderer, content, host, state,
+  sceneName: () => (state.payload?.name === state.name ? state.name : ""),
+  boundsOf: slotBounds,
+  previewDelta,
+  gizmoId: () => (gizmo.object === pivot ? pivot.userData.id : ""),
+  setGizmoEnabled: on => { if (gizmo.enabled !== on) gizmo.enabled = on; },
+  cleanHide: () => [minorGrid, majorGrid, gizmoHelper, brushRing],
+});
+const shotsPanel = createShotsPanel({
+  rpc, call, op, state, presence, esc, setStatus,
+  repaint: () => { if (state.tab === "shots") paintPanels(false); },
+});
+
 let lastFrame = performance.now();
 function animate() {
   requestAnimationFrame(animate);
@@ -1488,6 +1547,8 @@ function animate() {
   const now = performance.now();
   const dt = Math.min(0.05, (now - lastFrame) / 1000);
   stepFly(dt);
+  presence.tick(now, dt);
+  shotsPanel.tick(now);
   lastFrame = now;
   const view = state.rigView;
   if (view && state.playing && view.frames && !state.dragging) {
@@ -1592,6 +1653,7 @@ function choose(id, additive, faces, elements) {
 }
 
 renderer.domElement.addEventListener("pointerdown", async (ev) => {
+  if (ev.button === 0 && ev.altKey) { presence.pingAt(ev); return; }
   if (ev.button === 2) { beginFly(ev); return; }
   if (ev.button !== 0 || state.dragging || state.flying || gizmo.axis) return;
   if (BRUSH_MODES.has(state.mode) && startStroke(ev)) return;  // a miss falls through to picking another object
@@ -1813,7 +1875,7 @@ function restoreView() {
   sessionRestore=null;
   const vector=v=>Array.isArray(v)&&v.length===3&&v.every(Number.isFinite);
   if(vector(value.camera)&&vector(value.target)){camera.position.fromArray(value.camera);orbit.target.fromArray(value.target);orbit.update();}
-  if(["props","layers","materials","rig","check","activity","export"].includes(value.tab))state.tab=value.tab;
+  if(["props","layers","materials","rig","shots","check","activity","export"].includes(value.tab))state.tab=value.tab;
   if(["select","translate","rotate","scale"].includes(value.gizmo))state.gizmo=value.gizmo;
   const ids=new Set((state.payload.nodes||[]).map(n=>n.id));
   for(const field of ["collapsed","locked","picked"])if(Array.isArray(value[field]))state[field]=new Set(value[field].filter(id=>ids.has(id)));
@@ -2003,8 +2065,10 @@ function paintPanels(refreshTree = true) {
   else if (state.tab === "check") panel.innerHTML = `<div id="check"></div><div class="row"><button id="run-check" type="button">Check</button><button id="fix-all" type="button">Fix all</button></div>`;
   else if (state.tab === "activity") panel.innerHTML = activity(p);
   else if (state.tab === "rig") panel.innerHTML = rigPanel(p);
+  else if (state.tab === "shots") panel.innerHTML = shotsPanel.html();
   else panel.innerHTML = exportPanel();
   bindPanel();
+  if (state.tab === "shots") shotsPanel.bind(panel);
   bindRigPanel();
   syncChrome();
   syncRigView();
@@ -2770,8 +2834,9 @@ function wire() {
     activity: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 18V6M4 18h16M8 14l3-4 3 2 4-6"/></svg>`,
     export: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 4v10M8 10l4 4 4-4M5 20h14"/></svg>`,
     rig: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="4" r="2"/><path d="M12 6v8M12 9l-5 4M12 9l5 4M12 14l-4 6M12 14l4 6"/></svg>`,
+    shots: `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="7" width="13" height="10" rx="1.5"/><path d="M16 11l5-3v8l-5-3"/></svg>`,
   };
-  for (const [id, label] of [["props", "Details"], ["layers", "Layers"], ["materials", "Materials"], ["rig", "Rig"], ["check", "Validate"], ["activity", "History"], ["export", "UEFN"]]) {
+  for (const [id, label] of [["props", "Details"], ["layers", "Layers"], ["materials", "Materials"], ["rig", "Rig"], ["shots", "Shots"], ["check", "Validate"], ["activity", "History"], ["export", "UEFN"]]) {
     const b = document.createElement("button");
     b.type = "button";
     b.dataset.tab = id;

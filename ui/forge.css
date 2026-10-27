@@ -92,6 +92,26 @@ p { margin: 4px 0; }
 #loading-steps li.on::before { content: '•'; position: absolute; left: 0; color: var(--accent); }
 #loading-steps li.done::before { content: '✓'; position: absolute; left: 0; }
 #loading-why { min-height: 3em; }
+/* People in the scene: one chip each, in their colour (--who comes from their name). */
+.people { position: absolute; z-index: 3; top: 52px; right: 8px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; max-width: 46%; }
+.people .chip { display: flex; align-items: center; gap: 6px; max-width: 100%; min-height: 24px; padding: 2px 9px; font-size: 11px; background: var(--panel-header); border-color: var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; box-shadow: var(--shadow-sm); }
+.people .chip::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--who, var(--accent)); flex: none; }
+.people .chip.on { border-color: var(--who, var(--accent)); }
+.people .chip.style { color: var(--fg-dim); }
+.people .chip.style::before { display: none; }
+.ping-arrows { position: absolute; inset: 0; pointer-events: none; z-index: 3; }
+.ping-arrow { position: absolute; transform: translate(-50%, -50%); padding: 2px 8px; font-size: 11px; color: var(--fg); background: var(--panel-header); border: 1px solid var(--ping, var(--accent)); border-radius: 10px; white-space: nowrap; }
+.ping-arrow::after { content: '➤'; position: absolute; left: 50%; top: 50%; color: var(--ping, var(--accent)); transform: translate(-50%, -50%) rotate(var(--angle, 0rad)) translateX(calc(100% + 34px)); }
+.shots { display: flex; flex-direction: column; gap: 8px; }
+.shots h4 { margin: 6px 0 0; font-size: 11px; color: var(--fg-dim); font-weight: 600; }
+.shots .row label { width: auto; display: flex; gap: 4px; align-items: center; }
+.shots .row label input { width: 64px; flex: none; }
+.shots .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shots code { word-break: break-all; font-size: 10px; }
+.keys { display: flex; flex-wrap: wrap; gap: 4px; }
+.key-chip { display: inline-flex; }
+.key-chip button { min-height: 24px; padding: 2px 6px; font-size: 11px; }
+.key-chip button + button { border-left: 0; color: var(--fg-dim); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
 @media (max-width: 800px) { .main { grid-template-columns: 40px minmax(140px, 1fr) 290px; } .brand, .view-help { display: none; } .hud { gap: 3px; } .top { gap: 4px; padding: 6px; } }

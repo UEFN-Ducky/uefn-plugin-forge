@@ -1,24 +1,25 @@
-# Forge 1.2.6 — Mesh import candidate
+# Forge 1.2.12 — Together in the viewport, and a camera for videos
 
-Adds local GLB, glTF 2.0 and binary FBX imports using the existing Blender converter. The File panel offers Browse, Inspect, scale multiplier, new/existing scene destination, progress and cancellation. Agent tool `forge_import_mesh` and workflow node `forge.import_mesh` share the same converter.
+## Live in the viewport
 
-Preserves static mesh hierarchy, UVs, corner normals, vertex colors and per-face material slots. The viewport now renders those material slots. Base-color images and texture × vertex-color combinations are supported. Alternate Unreal LOD and collision meshes remain available but start hidden to avoid overlaps. Dimensions describe visible object geometry in centimetres, automatically converted to Z-up.
+- In a live group, everyone in the same scene sees each other fly around as a small character in their own colour with their name above it (or as a camera: the Avatars / Cameras chip). What a teammate has selected is outlined in their colour.
+- AI duckies show up the same way, as a duck with their name and what they are doing ("Developer 🦆 · Extruded roof"). Every Forge call moves the duck to its work; it fades 10 s after the last one. Your own duckies show even when you are not live.
+- The People bar (top right of the viewport): click someone to glide to their view, Shift-click to follow them until you move.
+- Live edits: you watch a teammate's drag slide the object while they drag it, and their brush ring and "Ben is sculpting" while they sculpt or paint, until the change syncs. An object a teammate is moving can't be grabbed at the same time.
+- Alt-click pings a spot for everyone for 3 s, with an arrow at the edge when it's off screen.
 
-## Compatibility and migration
+## Cameras and shots
 
-- Existing scenes retain their storage format. No destructive migration runs.
-- New imports use unique scene names; existing-scene imports form one undo entry, including reopen/redo support.
-- Requires a locally installed Blender executable via standard Windows installation, PATH or FORGE_BLENDER.
-- Binary FBX only; ASCII FBX reports an explicit conversion requirement.
-- glTF sidecars must be local, present and contained under the model folder. Required unsupported extensions are rejected. Input and referenced resources are limited to 512 MB; conversion has a 15-minute timeout.
-- Sheared transforms are rejected rather than silently changed. Rigs, animation, shape keys and procedural shader graphs are not transferred. Texture channels other than base color use material factors.
-- Cancellation stops conversion before scene commit. Once committed, an existing-scene import is reversed with Undo.
-- The external Blender script ships as assets/blend_export_script.txt so Store compilation will not remove it. Three.js MIT notice is included.
+- New Shots tab: save cameras from your view (drawn as 🎥 frustums), look through them, and build shots: key the camera at a few times and Forge glides between them on a smooth curve with an ease. Scrub and Play preview the move.
+- Render MP4 draws the shot frame by frame (not a screen recording) at 1920×1080, 1280×720, 1080×1920 vertical or 3840×2160, 24–60 fps, using Ducky's ffmpeg and the fastest working H.264 encoder. Videos go to `%LOCALAPPDATA%\UEFN-Ducky\forge\videos`. Keep the Forge tab open while it renders.
+- Cameras and shots are saved in the scene: they sync with the team copy and Undo takes them back.
 
-## Real reference
+## For agents
 
-The exported CP_NeonCity_Building_A_B FBX contains LOD0–3 plus UCX collision. Its LOD0 module is approximately 30.72 × 30.72 × 15.36 metres. It is not the assembled 100.31-metre tower. MegaCity_Reference_Module is imported and rendered in Forge. Its FBX contains no original texture images; its material is explicitly labeled reference gray. Existing Miami scenes were not edited.
+- `forge_camera`: frame, orbit, goto, look_at, get, people, ping, save, cameras; `drive=true` moves the person's viewport with the ducky (for recording).
+- `forge_view`: a picture of the whole scene through a camera, rendered by the open tab, into the chat.
+- `forge_shot` and `forge_shot_render`; `imk_project` adds the finished clip to an Island Media Kit project.
 
-## Release gates
+## Checks
 
-This is a local source release candidate, not a published or installed Store update. Store draft validation and testing are blocked because no local Forge draft exists; opening the Store source requires team manage permission. Compiled Store packaging and live verification of the updated panel remain pending. Automated converter, scene, performance and package checks are run separately; source-level tests do not substitute for the installed-panel gate.
+`py -3 -m backend.test_forge` (with the new `backend/test_live.py`: shared path numbers, cameras/shots as undoable edits, ducky flyer and people, a panel round trip for pictures, and a real 3-frame MP4 encode) and `npm test` (`tests/shots.test.mjs`, `tests/presence.test.mjs`). The 20,000-instance payload budget is unchanged.

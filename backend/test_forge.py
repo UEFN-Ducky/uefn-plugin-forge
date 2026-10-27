@@ -594,6 +594,8 @@ if __name__ == "__main__":
     test_rig_anim_batch()
     test_sculpt_paint_shapes()
     test_send()
+    from .test_live import run as test_live
+    test_live()
     import unittest
     from .test_regressions import SceneRegressions
     from .test_import import ImportTests

@@ -42,9 +42,10 @@ from .kernel.ops import (
     subdivide,
 )
 from .uv import project
+from .shots import op_camera, op_cameras, op_shot
 
 _LOCK = threading.Lock()
-_READ = {"stats", "scene_get", "scene_list", "scene_payload", "scene_geom_part", "scene_save", "scene_open", "scene_files", "scene_import_blend", "rig_preview", "mesh_data"}
+_READ = {"cameras", "stats", "scene_get", "scene_list", "scene_payload", "scene_geom_part", "scene_save", "scene_open", "scene_files", "scene_import_blend", "rig_preview", "mesh_data"}
 # One dock message. Bigger buffers stay on the scene and load in pieces; every triangle is still sent.
 _GEOM_PART = 1024 * 1024
 _LOOK = {"check", "render"}
@@ -2073,4 +2074,7 @@ _OPS = {
     "scene_files": _op_list_files,
     "scene_import_blend": _op_import_blend,
     "import_mesh": _op_import_mesh,
+    "camera": op_camera,
+    "shot": op_shot,
+    "cameras": op_cameras,
 }

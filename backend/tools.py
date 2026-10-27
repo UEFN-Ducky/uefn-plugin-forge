@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from . import live_view
 from .scene import dispatch
 from .uefn import export_glbs, export_skinned, send_to_uefn
 
@@ -40,6 +41,8 @@ def _run(api: Any, name: str, op: str, params: dict | None = None) -> dict:
         )
     if op == "render":
         result = _attach_captures(result)
+    if name and op not in {"scene_list", "scene_new", "cameras"}:
+        live_view.note_activity(name, str(result.get("summary") or op), list(result.get("ids") or []))
     return result
 
 
@@ -81,6 +84,7 @@ def _attach_captures(result: dict) -> dict:
 
 def register_tools(api: Any) -> None:
     host = {"listener": False}
+    live_view.bind(api)
 
     @api.tool(**host)
     def forge_import_mesh(path: str, name: str = "", destination: str = "", scale: float = 1.0, preview: bool = False) -> dict:
@@ -417,6 +421,46 @@ def register_tools(api: Any) -> None:
             loop=loop, amount=amount or None, axis=axis, new_name=new_name, rig=rig, shape=shape, value=value,
             target=target, chain=chain if action == "ik" else None, pole=pole, keep_rotation=keep_rotation, span=span,
         ))
+
+    @api.tool(**host)
+    def forge_camera(name: str, action: str = "get", pos: list | None = None, target: list | None = None, fov: float | None = None,
+                     seconds: float = 1.0, ids: list | None = None, drive: bool = False, doing: str = "", camera_name: str = "") -> dict:
+        """Your own camera in a Forge scene. People with the Forge tab open see you there as a duck with your name and what you do (teammates too when live). action: get (yours and the person's viewport), goto (pos/target/fov), look_at (target or ids), frame (fit ids, or the whole scene), orbit (circle ids or the scene over seconds), people (who is in the scene and where they look), ping (mark target for everyone for 3 s), save (keep your view as a scene camera named camera_name), cameras (saved cameras and shots). seconds = glide time. drive=true moves the person's viewport with you (for recording). Centimetres, Z-up."""
+        result = live_view.camera(name, action, pos=pos, target=target, fov=fov, seconds=seconds, ids=ids, drive=drive,
+                                  doing=doing, camera_name=camera_name)
+        if action == "save":
+            api.changeset.record(command="forge_camera", kind="forge_scene", ident=name, summary=str(result.get("summary") or "camera"),
+                                 before=None, revertable="manual", reason="Use forge_undo to step back. Forge keeps its own history.")
+        return result
+
+    @api.tool(**host)
+    def forge_view(name: str, camera: Any = "", width: int = 1280, height: int = 720, clean: bool = False) -> dict:
+        """A picture of the whole scene through a camera, rendered by the open Forge tab, into this chat. camera: "ai" (yours, the default), "viewport" (what the person sees), a saved camera's name, or {pos, target, fov}. clean hides the grid, gizmos and flyers. For a quick look at single objects with the tab closed, use forge_render."""
+        result = live_view.view(name, camera, width, height, clean)
+        live_view.note_activity(name, "looking", [])
+        return _attach_captures(result) if result.get("ok") else result
+
+    @api.tool(**host)
+    def forge_shot(name: str, action: str = "add", shot: str = "", shot_name: str = "", t: float | None = None,
+                   pos: list | None = None, target: list | None = None, fov: float | None = None, from_view: str = "",
+                   duration: float | None = None, ease: str = "", camera: str = "") -> dict:
+        """Keyed camera shots for videos, saved in the scene. action: add (shot_name, duration seconds, ease), key (shot, t seconds, and pos/target/fov or from_view = "ai" | "viewport" | a saved camera's name), unkey (shot, t), edit (duration, ease linear|in_out|in|out, shot_name, camera), delete. The camera glides through the keys on a smooth curve. The person plays and scrubs it in the Forge tab's Shots panel; forge_shot_render makes the MP4."""
+        params = _given(action=action, shot=shot, shot_name=shot_name, t=t, pos=pos, target=target, fov=fov,
+                        duration=duration, ease=ease)
+        if camera:
+            params["camera"] = camera
+        if from_view:
+            params.update(live_view.resolve_pose(name, from_view))
+        return _run(api, name, "shot", params)
+
+    @api.tool(**host)
+    def forge_shot_render(name: str, shot: str = "", fps: int = 30, width: int = 1920, height: int = 1080, imk_project: str = "",
+                          job: str = "", wait_seconds: float = 300) -> dict:
+        """Render a shot frame by frame to an MP4 (smooth, not a screen recording). The Forge tab must be open: it draws the frames. Waits up to wait_seconds; a longer render returns job, so call again with job to keep waiting. imk_project also adds the clip to that Island Media Kit project. fps 24|25|30|50|60."""
+        result = live_view.render_shot(name, shot, fps, width, height, imk_project, job, wait_seconds)
+        if not job:
+            live_view.note_activity(name, "filming " + str(result.get("shot") or shot), [])
+        return result
 
     @api.tool(listener=True)
     def forge_send_to_uefn(name: str, mode: str = "each", folder: str = "", collision: str = "simple", place: bool = False, location: list | None = None) -> dict:
