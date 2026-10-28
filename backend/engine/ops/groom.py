@@ -19,6 +19,7 @@ STYLES = {
     "afro": dict(density=60, length=14, clump=0.1, curl=1.0, frizz=0.4, droop=0.0, points=8, region="top"),
     "fur": dict(density=100, length=3, clump=0.0, curl=0.0, frizz=0.1, droop=0.3, points=4, region="all"),
     "beard": dict(density=50, length=8, clump=0.3, curl=0.3, frizz=0.15, droop=0.7, points=6, region="jaw"),
+    "mane": dict(density=40, length=28, clump=0.6, curl=0.15, frizz=0.12, droop=0.8, points=8, region="top"),
 }
 COLORS = {"black": (0.03, 0.025, 0.02), "brown": (0.22, 0.12, 0.06), "auburn": (0.35, 0.13, 0.07),
           "blonde": (0.8, 0.6, 0.28), "red": (0.55, 0.12, 0.05), "white": (0.9, 0.9, 0.88),
@@ -207,7 +208,7 @@ def _png(path, w, h, rows, channels):
                            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-def bake_atlas(folder, size, color, variants, seed=1, stem="hair"):
+def bake_atlas(folder, size, color, variants, seed=1, stem="hair", root=0.55):
     """color+alpha atlas (RGBA) and data atlas (R root-tip, G depth, B strand id). Returns (cell grid, color file, data file)."""
     rng = random.Random(seed)
     grid = max(1, math.ceil(math.sqrt(variants)))
@@ -234,7 +235,7 @@ def bake_atlas(folder, size, color, variants, seed=1, stem="hair"):
                     i = (ox + x) * 4
                     if alpha < col[i + 3]:
                         continue
-                    shade = (0.55 + 0.45 * v) * (0.9 + 0.2 * ident) * (1 - 0.25 * d)
+                    shade = (root + (1 - root) * v) * (0.9 + 0.2 * ident) * (1 - 0.25 * d)
                     col[i:i + 4] = bytes([min(255, int(base[0] * shade * 255)), min(255, int(base[1] * shade * 255)),
                                           min(255, int(base[2] * shade * 255)), alpha])
                     j = (ox + x) * 3
@@ -266,6 +267,7 @@ def op_hair_cards(p):
     strands = build_strands(p)
     cards = max(1, min(int(p.get("cards") or 120), len(strands)))
     budget = int(p.get("budget") or 2800)
+    mane = style_of(p)["name"] == "mane"
     segs = max(1, min(16, budget // (cards * 2)))
     size = atlas_size(p.get("atlas"))
     cx = sum(s[0][0] for s in strands) / len(strands)
@@ -275,16 +277,23 @@ def op_hair_cards(p):
     for i, s in enumerate(order):
         groups[i * cards // len(order)].append(s)
     variants = min(cards, 16)
-    grid, color_file, data_file = bake_atlas(p["folder"], size, p.get("color"), variants, int(p.get("seed", 1)), str(p.get("stem") or "hair"))
+    grid, color_file, data_file = bake_atlas(p["folder"], size, p.get("color"), variants, int(p.get("seed", 1)), str(p.get("stem") or "hair"),
+                                            root=0.3 if mane else 0.55)  # manes get a dark root
     cs = 1.0 / grid
     verts, faces, uvs = [], [], []
     for ci, group in enumerate(groups):
         n = len(group[0])
         mean = [tuple(sum(s[k][i] for s in group) / len(group) for i in range(3)) for k in range(n)]
         line = _resample(mean, segs + 1)
+        out = _norm((mean[0][0] - cx, mean[0][1] - cy, 0.0))
+        layer = ci % 2 if mane else 0  # mane: inner cards short and tucked in, outer cards long and wide
+        if mane:
+            scale = 0.7 + 0.3 * layer
+            line = [tuple(line[0][i] + (q[i] - line[0][i]) * scale + out[i] * 1.2 * layer for i in range(3)) for q in line]
         xs, ys, zs = zip(*[s[0] for s in group])
         width = min(8.0, max(1.2, math.sqrt((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2 + (max(zs) - min(zs)) ** 2)))
-        out = _norm((mean[0][0] - cx, mean[0][1] - cy, 0.0))
+        if mane:
+            width = min(10.0, width * (1.0 + 0.4 * layer))
         cell = ci % variants
         u0, u1 = (cell % grid) * cs + 0.01 * cs, (cell % grid + 1) * cs - 0.01 * cs
         top = (cell // grid) * cs
@@ -337,18 +346,82 @@ def _vertex_normals(verts, faces):
     return [_norm(a) for a in acc]
 
 
+def _tris(faces):
+    return sum(len(f) - 2 for f in faces)
+
+
+def decimate(verts, faces, uvs, target):
+    """Vertex-clustering proxy of at most target tris: (verts, faces, uvs, rep). rep[i] = the original vertex a proxy
+    vertex sits on, so per-vertex data (skin weights) transfers by index. Proxy verts stay on the original surface."""
+    lo = [min(v[i] for v in verts) for i in range(3)]
+    span = max(max(v[i] for v in verts) - lo[i] for i in range(3)) or 1.0
+    size = span / math.sqrt(max(target, 1))
+    for _ in range(14):
+        cell = [tuple(int((v[i] - lo[i]) // size) for i in range(3)) for v in verts]
+        ids = {}
+        for c in cell:
+            ids.setdefault(c, len(ids))
+        vmap = [ids[c] for c in cell]
+        seen, out_faces, out_uvs = set(), [], []
+        for f, uv in zip(faces, uvs):
+            ring = [(vmap[i], k) for k, i in enumerate(f)]
+            ring = [r for j, r in enumerate(ring) if r[0] != ring[j - 1][0]]
+            if len(ring) < 3 or len({r[0] for r in ring}) < 3:
+                continue
+            key = frozenset(r[0] for r in ring)
+            if key in seen:
+                continue
+            seen.add(key)
+            out_faces.append([r[0] for r in ring])
+            out_uvs.append([uv[r[1]] for r in ring])
+        tris = _tris(out_faces)
+        if tris <= target:
+            break
+        size *= max(1.05, math.sqrt(tris / target))
+    n = len(ids)
+    sums, count = [[0.0, 0.0, 0.0] for _ in range(n)], [0] * n
+    for v, m in zip(verts, vmap):
+        count[m] += 1
+        for i in range(3):
+            sums[m][i] += v[i]
+    best = [None] * n
+    for k, (v, m) in enumerate(zip(verts, vmap)):
+        d = sum((v[i] - sums[m][i] / count[m]) ** 2 for i in range(3))
+        if best[m] is None or d < best[m][0]:
+            best[m] = (d, k)
+    rep = [b[1] for b in best]
+    return [list(verts[r]) for r in rep], out_faces, out_uvs, rep
+
+
 def op_fur_shells(p):
-    """layers offset copies of the mesh along vertex normals; shell k gets material index k (1-based)."""
-    verts, faces = p["verts"], p["faces"]
-    layers = max(1, min(32, int(p.get("layers") or 8)))
+    """layers offset copies of the mesh along vertex normals; shell k gets material index k (1-based).
+    With p["proxy"] (tris) the shells go on a decimated copy and rep maps their vertices to the body's;
+    with p["budget"] the layer count is cut to fit budget - base_tris."""
+    body_verts, body_faces = p["verts"], p["faces"]
+    wanted = max(1, min(32, int(p.get("layers") or 8)))
     length = float(p.get("length") or 2.0)
-    normals = _vertex_normals(verts, faces)
     uvs = p.get("uvs")
     if not uvs:
-        lo = [min(v[i] for v in verts) for i in range(3)]
-        hi = [max(v[i] for v in verts) for i in range(3)]
+        lo = [min(v[i] for v in body_verts) for i in range(3)]
+        hi = [max(v[i] for v in body_verts) for i in range(3)]
         span = max(hi[0] - lo[0], hi[1] - lo[1]) or 1.0
-        uvs = [[[(verts[i][0] - lo[0]) / span * 4, (verts[i][1] - lo[1]) / span * 4] for i in f] for f in faces]
+        uvs = [[[(body_verts[i][0] - lo[0]) / span * 4, (body_verts[i][1] - lo[1]) / span * 4] for i in f] for f in body_faces]
+    verts, faces, shell_uvs, rep = body_verts, body_faces, uvs, list(range(len(body_verts)))
+    proxy = int(p.get("proxy") or 0)
+    budget = p.get("budget")
+    room = int(budget) - int(p.get("base_tris") or 0) if budget else None
+    if proxy and _tris(faces) > proxy:
+        verts, faces, shell_uvs, rep = decimate(body_verts, body_faces, uvs, proxy)
+    per = _tris(faces) or 1
+    layers = wanted
+    if room is not None:
+        layers = min(wanted, room // per)
+        if layers < 1 and proxy and room >= 60:  # the proxy itself is too big: shrink it for one shell
+            verts, faces, shell_uvs, rep = decimate(body_verts, body_faces, uvs, room)
+            per, layers = _tris(faces) or 1, 1
+        layers = max(0, layers)
+    normals = _vertex_normals(verts, faces)
+    uvs, body_uvs = shell_uvs, uvs
     out_verts, out_faces, out_uvs, shell = [], [], [], []
     for k in range(1, layers + 1):
         base = len(out_verts)
@@ -360,5 +433,45 @@ def op_fur_shells(p):
     folder = Path(p["folder"])
     folder.mkdir(parents=True, exist_ok=True)
     _noise_png(folder / "fur_noise.png", 64, p.get("color"), int(p.get("seed", 1)))
-    return {"verts": out_verts, "faces": out_faces, "uvs": out_uvs, "base_uvs": uvs, "shell": shell, "layers": layers,
-            "noise_file": "fur_noise.png"}
+    return {"verts": out_verts, "faces": out_faces, "uvs": out_uvs, "base_uvs": body_uvs, "shell": shell, "layers": layers,
+            "wanted": wanted, "per_layer": per, "rep": rep, "noise_file": "fur_noise.png"}
+
+
+# ---- fur bake ---------------------------------------------------------------
+
+
+def op_fur_bake(p):
+    """Strand-streak BaseColor and a matching fur-direction normal map (tangent space, strands run down V)."""
+    size = max(64, min(4096, int(p.get("size") or 1024)))
+    rng = random.Random(int(p.get("seed", 1)))
+    base = rgb(p.get("color"))
+    height = [bytearray(size) for _ in range(size)]
+    for _ in range(size * size // 36):
+        x, y0, n, b = rng.randrange(size), rng.randrange(size), rng.randint(6, 22), rng.randint(90, 255)
+        for k in range(n):
+            row = height[(y0 + k) % size]
+            v = int(b * (0.55 + 0.45 * math.sin(math.pi * (k + 0.5) / n)))  # strands taper at both ends
+            if v > row[x]:
+                row[x] = v
+            if v * 0.6 > row[(x + 1) % size]:
+                row[(x + 1) % size] = int(v * 0.6)
+    cell = max(8, size // 16)
+    tint = [[0.85 + 0.3 * rng.random() for _ in range(size // cell + 1)] for _ in range(size // cell + 1)]
+    color_rows, normal_rows = [], []
+    for y in range(size):
+        crow, nrow = bytearray(), bytearray()
+        up, down, here = height[y - 1], height[(y + 1) % size], height[y]
+        for x in range(size):
+            shade = (0.45 + 0.55 * here[x] / 255) * tint[y // cell][x // cell]
+            crow += bytes(min(255, int(c * shade * 255)) for c in base)
+            nx = max(-0.7, min(0.7, (here[x - 1] - here[(x + 1) % size]) / 255.0 * 1.5))
+            ny = max(-0.7, min(0.7, (up[x] - down[x]) / 255.0 * 0.5))
+            nz = math.sqrt(max(0.05, 1 - nx * nx - ny * ny))
+            nrow += bytes((int((nx * 0.5 + 0.5) * 255), int((ny * 0.5 + 0.5) * 255), int((nz * 0.5 + 0.5) * 255)))
+        color_rows.append(crow)
+        normal_rows.append(nrow)
+    folder = Path(p["folder"])
+    folder.mkdir(parents=True, exist_ok=True)
+    _png(folder / p["color_file"], size, size, color_rows, 3)
+    _png(folder / p["normal_file"], size, size, normal_rows, 3)
+    return {"size": size, "color_file": p["color_file"], "normal_file": p["normal_file"]}

@@ -59,6 +59,14 @@ def region_tris(mesh, region):
     """World triangles of a named region (all, top, jaw, back) or an explicit face list."""
     lo, hi = mesh.bounds()
     height = (hi[2] - lo[2]) or 1.0
+    shape = None
+    if isinstance(region, dict):  # {"sphere": [x,y,z,r]} or {"box": [x0,y0,z0,x1,y1,z1]}, world cm
+        kind = next((k for k in region if k in ("sphere", "box")), None)
+        want = {"sphere": 4, "box": 6}.get(kind)
+        if kind is None or len(region[kind]) != want:
+            raise ValueError("Region dict needs {'sphere': [x,y,z,r]} or {'box': [x0,y0,z0,x1,y1,z1]} in world cm, got %r" % (region,))
+        shape = (kind, [float(c) for c in region[kind]])
+        region = "all"
     picks = set(region) if isinstance(region, (list, tuple)) else None
     if picks is None and region not in REGIONS:
         close = difflib.get_close_matches(str(region), REGIONS, n=1)
@@ -75,7 +83,11 @@ def region_tris(mesh, region):
         length = math.sqrt(sum(c * c for c in n)) or 1.0
         n = [c / length for c in n]
         z = sum(q[2] for q in pts) / len(pts)
-        if picks is not None:
+        c = [sum(q[i] for q in pts) / len(pts) for i in range(3)]
+        if shape is not None:
+            s = shape[1]
+            keep = math.dist(c, s[:3]) <= s[3] if shape[0] == "sphere" else all(min(s[i], s[i + 3]) <= c[i] <= max(s[i], s[i + 3]) for i in range(3))
+        elif picks is not None:
             keep = fi in picks
         elif region == "top":
             keep = n[2] > 0.3 and z >= lo[2] + 0.6 * height
@@ -128,8 +140,10 @@ def hair_cards(scene, p):
     rec = grooms[-1]
     tris = region_tris(scene.world_mesh(node), rec["params"]["region"])
     textures = _textures(scene)
-    result = _call("hair_cards", dict(rec["params"], tris=tris, cards=p.get("cards") or 120, atlas=p.get("atlas") or "1K",
-                                      budget=p.get("tris"), folder=str(textures), stem="hair_" + rec["id"]))
+    mane = rec["params"].get("style") == "mane"
+    budget = p.get("tris") or (3200 if mane else 2800)
+    result = _call("hair_cards", dict(rec["params"], tris=tris, cards=p.get("cards") or (220 if mane else 120), atlas=p.get("atlas") or "1K",
+                                      budget=budget, folder=str(textures), stem="hair_" + rec["id"]))
     color = strand.rgb(rec["params"].get("color"))
     mid = _material(scene, "HairCards", color, roughness=0.45, opacity=1.0, alpha_mode="MASK", alpha_cutoff=0.35, double_sided=True,
                     textures={"base_color": result["color_file"], "groom_data": result["data_file"]})
@@ -137,7 +151,7 @@ def hair_cards(scene, p):
     mesh.verts, mesh.faces, mesh.uvs = result["verts"], result["faces"], result["uvs"]
     mesh.face_mat = [mid] * len(mesh.faces)
     cards = _add_object(scene, (node.get("name") or node["id"]) + "_cards", mesh)
-    warnings = ["%d tris is over the %s budget; lower cards" % (result["tris"], p.get("tris") or 2800)] if result["over_budget"] else []
+    warnings = ["%d tris is over the %s budget; lower cards" % (result["tris"], budget)] if result["over_budget"] else []
     return {"ids": [cards["id"]], "tris": result["tris"], "cards": result["cards"], "atlas": result["atlas"],
             "summary": "%d cards, %d tris, %dK atlas (masked, two-sided)" % (result["cards"], result["tris"], result["atlas"] // 1024 or 1),
             "warnings": warnings}
@@ -264,18 +278,35 @@ def cloth(scene, p):
 # ---- fur --------------------------------------------------------------------
 
 
-@op("fur_shells", "fur_shells(id, layers=8, length=2) alpha-noise fur shells")
+UEFN_BUDGET = 20000
+PROXY_TRIS = 1500
+
+
+@op("fur_shells", "fur_shells(id, layers=8, length=2, budget=20000, decimate_shells=true) skinned alpha-noise fur shells")
 def fur_shells(scene, p):
     node = _node(scene, p.get("id"))
     mesh = scene.local_mesh(node)
     base_tris = mesh.tri_count()
     layers = max(1, min(32, int(p.get("layers") or 8)))
+    budget = p.get("budget")
+    budget = UEFN_BUDGET if budget is None and p.get("target", "uefn") == "uefn" else int(budget or 0)
+    proxy = p.get("decimate_shells", True)
+    proxy = PROXY_TRIS if proxy is True else int(proxy or 0)
     skin = mesh.face_mat[0] if mesh.face_mat else "default"
     base = (scene.materials().get(skin) or {}).get("base_color") or [0.75, 0.6, 0.45, 1]
     color = p.get("color") or base[:3]
     shaped = [list(map(list, uv)) for uv in mesh.uvs] if len(mesh.uvs) == len(mesh.faces) and all(len(u) == len(f) for u, f in zip(mesh.uvs, mesh.faces)) else None
     result = _call("fur_shells", {"verts": mesh.verts, "faces": mesh.faces, "uvs": shaped, "layers": layers, "length": p.get("length") or 2.0,
-                                  "color": color, "folder": str(_textures(scene)), "seed": zlib.crc32(node["id"].encode()) & 0xFFFF})
+                                  "color": color, "folder": str(_textures(scene)), "seed": zlib.crc32(node["id"].encode()) & 0xFFFF,
+                                  "proxy": proxy, "budget": budget, "base_tris": base_tris})
+    warnings = []
+    if result["layers"] < result["wanted"]:
+        warnings.append("fur layers cut from %d to %d to fit %d tris (body %d + %d x %d per shell)" % (
+            result["wanted"], result["layers"], budget, base_tris, result["layers"], result["per_layer"]))
+    if result["layers"] < 1:
+        return {"ids": [node["id"]], "layers": 0, "tris_added": 0, "summary": "no fur shells: body already uses %d of %d tris" % (base_tris, budget),
+                "warnings": warnings + ["raise budget, or fur_bake for texture-only fur"]}
+    layers = result["layers"]
     rgb = strand.rgb(color)
     shells = [_material(scene, "FurShell_%02d" % k, [c * (0.6 + 0.4 * k / layers) for c in rgb], roughness=0.9, opacity=1.0,
                         alpha_mode="MASK", alpha_cutoff=round(0.15 + 0.8 * k / layers, 3), double_sided=True,
@@ -283,11 +314,31 @@ def fur_shells(scene, p):
     count = len(mesh.verts)
     for key, values in list(mesh.attrs.items()):
         if isinstance(values, list) and len(values) == count:
-            mesh.attrs[key] = values + [list(v) if isinstance(v, list) else v for v in values] * layers
+            copy = [list(values[r]) if isinstance(values[r], list) else values[r] for r in result["rep"]]  # nearest-vertex transfer
+            mesh.attrs[key] = values + copy * layers
     mesh.verts = mesh.verts + result["verts"]
     mesh.faces = mesh.faces + [list(f) for f in result["faces"]]
     mesh.uvs = [list(map(list, uv)) for uv in result["base_uvs"]] + result["uvs"]
     mesh.face_mat = list(mesh.face_mat) + [shells[k - 1] for k in result["shell"]]
     scene.write_mesh(node, mesh)
     return {"ids": [node["id"]], "layers": layers, "tris_added": mesh.tri_count() - base_tris,
-            "summary": "%d fur shells, +%d tris" % (layers, mesh.tri_count() - base_tris)}
+            "tris": mesh.tri_count(), "summary": "%d fur shells, +%d tris (%d total)" % (layers, mesh.tri_count() - base_tris, mesh.tri_count()),
+            "warnings": warnings}
+
+
+@op("fur_bake", "fur_bake(id, size=1024) bake fur color + direction normal into the body's BaseColor and Normal")
+def fur_bake(scene, p):
+    node = _node(scene, p.get("id"))
+    mesh = scene.local_mesh(node)
+    mid = mesh.face_mat[0] if mesh.face_mat else None
+    mat = next((m for m in scene.data["materials"] if m.get("id") == mid), None)
+    if mat is None:
+        raise ValueError("%s has no material to bake into. Give it one with material(...) first" % node["id"])
+    color = p.get("color") or (mat.get("base_color") or [0.75, 0.6, 0.45])[:3]
+    name = "".join(c for c in (node.get("name") or node["id"]) if c.isalnum() or c == "_") or node["id"]
+    result = _call("fur_bake", {"size": int(p.get("size") or 1024), "color": color, "folder": str(_textures(scene)),
+                                "color_file": "T_%s_BC.png" % name, "normal_file": "T_%s_N.png" % name,
+                                "seed": zlib.crc32(node["id"].encode()) & 0xFFFF})
+    mat.setdefault("textures", {}).update(base_color=result["color_file"], normal=result["normal_file"])
+    return {"ids": [node["id"]], "size": result["size"], "textures": [result["color_file"], result["normal_file"]],
+            "summary": "baked %s + %s at %d (fur color and direction normal on %s)" % (result["color_file"], result["normal_file"], result["size"], mat.get("name"))}

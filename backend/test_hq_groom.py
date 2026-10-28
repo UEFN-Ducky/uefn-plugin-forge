@@ -14,7 +14,7 @@ from .engine.ops import cloth as ec, groom as eg
 from .hq import groom as hqg
 from .scene import dispatch, forget, load
 
-OPS = {"hair": eg.op_hair, "hair_cards": eg.op_hair_cards, "cloth": ec.op_cloth, "fur_shells": eg.op_fur_shells}
+OPS = {"hair": eg.op_hair, "hair_cards": eg.op_hair_cards, "cloth": ec.op_cloth, "fur_shells": eg.op_fur_shells, "fur_bake": eg.op_fur_bake}
 
 
 def direct(name, params, timeout=600.0):
@@ -174,6 +174,72 @@ class GroomTests(unittest.TestCase):
         outer = max(math.dist(v, [0, 0, 10]) for v in mesh.verts)
         self.assertAlmostEqual(outer, 11.4, delta=0.1)  # last shell sits `length` above the skin
         self.assertTrue((Path(scene.folder) / "textures" / "fur_noise.png").is_file())
+
+    def test_fur_shells_budget(self):
+        body = self.add("sphere", radius=40, seg=110, rings=58)
+        scene = load("Groom")
+        node = scene.node(body)
+        mesh = scene.local_mesh(node)
+        base = mesh.tri_count()
+        body_verts = len(mesh.verts)
+        self.assertGreater(base, 11000)
+        mesh.attrs["wt:Spine"] = [min(1.0, max(0.0, v[2] / 80 + 0.5)) for v in mesh.verts]
+        mesh.attrs["wt:Root"] = [1.0 - w for w in mesh.attrs["wt:Spine"]]
+        scene.write_mesh(node, mesh)
+        result = hqg.fur_shells(scene, {"id": body})
+        mesh = scene.local_mesh(scene.node(body))
+        self.assertLessEqual(mesh.tri_count(), 20000)
+        self.assertGreaterEqual(result["layers"], 3)
+        self.assertTrue(result["warnings"])  # asked for 8, fewer fit
+        self.assertIn("20000", result["warnings"][0])
+        for key in ("wt:Spine", "wt:Root"):  # shells deform with the rig
+            self.assertEqual(len(mesh.attrs[key]), len(mesh.verts))
+        spine = mesh.attrs["wt:Spine"]
+        self.assertLess(len(spine) - body_verts, 5 * 1500)  # shells sit on the small proxy, not a full body copy each
+        self.assertTrue(set(spine[body_verts:]) <= set(spine[:body_verts]))  # weights come from body vertices
+        self.assertEqual(len(mesh.uvs), len(mesh.faces))
+        tight = hqg.fur_shells(scene, {"id": self.add("sphere", radius=10), "layers": 8, "budget": 100})
+        self.assertLess(tight["layers"], 8)
+        self.assertLessEqual(len(json.dumps(hq.compact(result))), 300)
+
+    def test_mane_sphere_region(self):
+        nid = self.add("sphere", radius=30)
+        scene = load("Groom")
+        world = scene.world_mesh(scene.node(nid))
+        cap = hqg.region_tris(world, {"sphere": [0, 0, 60, 12]})
+        self.assertTrue(0 < len(cap) < len(hqg.region_tris(world, "all")))
+        self.assertTrue(all(math.dist([sum(p[i] for p in t) / 3 for i in range(3)], [0, 0, 60]) <= 12.5 for t in cap))
+        box = hqg.region_tris(world, {"box": [-40, -40, 45, 40, 40, 70]})
+        self.assertTrue(box and all(sum(p[2] for p in t) / 3 >= 44 for t in box))
+        with self.assertRaisesRegex(ValueError, "sphere"):
+            hqg.region_tris(world, {"sphere": [0, 0]})
+        result = hqg.hair(scene, {"id": nid, "style": "mane", "region": {"sphere": [0, 0, 60, 12]}})
+        self.assertGreater(result["strands"], 200)
+
+    def test_mane_cards_budget(self):
+        nid = self.add("sphere", radius=30)
+        scene = load("Groom")
+        hqg.hair(scene, {"id": nid, "style": "mane", "region": {"sphere": [0, 0, 60, 14]}, "color": "auburn"})
+        result = hqg.hair_cards(scene, {"id": nid})
+        self.assertLessEqual(result["tris"], 4000)
+        self.assertGreater(result["cards"], 100)
+        mesh = scene.local_mesh(scene.node(result["ids"][0]))
+        self.assertEqual(mesh.tri_count(), result["tris"])
+        self.assertFalse(result["warnings"])
+
+    def test_fur_bake_writes_maps(self):
+        nid = self.add("sphere", radius=10)
+        scene = load("Groom")
+        result = hqg.fur_bake(scene, {"id": nid, "size": 128})
+        mat = next(m for m in scene.data["materials"] if m.get("textures", {}).get("normal"))
+        self.assertEqual(mat["textures"]["normal"], "T_%s_N.png" % (scene.node(nid).get("name") or nid))
+        self.assertEqual(len(result["textures"]), 2)
+        import zlib as z
+        raw = (Path(scene.folder) / "textures" / mat["textures"]["normal"]).read_bytes()
+        self.assertEqual(struct.unpack(">II", raw[16:24]), (128, 128))
+        idat = raw[raw.index(b"IDAT") + 4:raw.index(b"IEND") - 8]
+        pixels = z.decompress(idat)
+        self.assertGreater(len(set(pixels[::7])), 8)  # not a flat (128,128,255) map
 
 
 if __name__ == "__main__":
