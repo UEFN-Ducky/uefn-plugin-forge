@@ -7,11 +7,17 @@ draw in the wrong order. Upgrade path is a z-buffer if a prop reads wrong.
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
 from pathlib import Path
 
 from PIL import Image, ImageDraw
 
 from .kernel.mesh import Mesh, vdot, vnorm, vsub
+
+# Which renderer made the last image: "eevee" or "fallback renderer" (callers add it to their `seen` line).
+last_renderer = "eevee"
 
 _VIEWS = {
     "three": (1.3, -1.6, 0.9),
@@ -81,21 +87,88 @@ def render_mesh(mesh: Mesh, view: str = "three", size: tuple[int, int] = (320, 2
     return im
 
 
+def _engine_views(mesh: Mesh, views: list[str], size: tuple[int, int], materials: dict | None, textures: Path | None,
+                  quality: str = "look", cold_ok: bool = True) -> list[Path] | None:
+    """Eevee PNGs (one per view, in a temp folder the caller deletes), or None when the engine is missing or fails.
+
+    cold_ok=False only uses an already-running worker (and starts it in the background), so a cold call never waits.
+    """
+    global last_renderer
+    last_renderer = "fallback renderer"
+    if not mesh.verts or os.environ.get("FORGE_SOFT_RENDER"):
+        return None
+    try:
+        from .engine import bridge, client, runtime
+        if runtime.engine_status()["state"] != "ready":
+            return None
+        if not cold_ok and not client._worker.alive():
+            client.warm()
+            return None
+        folder = Path(tempfile.mkdtemp(prefix="look-", dir=client.scratch()))
+    except Exception:
+        return None
+    try:
+        materials = materials or {}
+        slots = list(dict.fromkeys(mesh.face_mat)) or ["default"]
+        slot_of = {m: i for i, m in enumerate(slots)}
+        loops = [i for face in mesh.faces for i in face]
+        put = lambda name, values, shape, kind="d": (bridge.write_npy(folder / (name + ".npy"), values, shape, kind), name + ".npy")[1]
+        arrays = {
+            "verts": put("verts", [c for v in mesh.verts for c in v], (len(mesh.verts), 3)),
+            "sizes": put("sizes", [len(f) for f in mesh.faces], (len(mesh.faces),), "i"),
+            "loops": put("loops", loops, (len(loops),), "i"),
+            "face_mat": put("face_mat", [slot_of[m] for m in mesh.face_mat], (len(mesh.faces),), "i"),
+            "uv": put("uv", [c for face in mesh.uvs for uv in face for c in uv[:2]], (len(loops), 2)),
+        }
+        mats = []
+        for mid in slots:
+            forge = dict(materials.get(mid) or {})
+            forge.setdefault("id", mid)
+            if "base_color" not in forge:
+                forge["base_color"] = [c / 255 for c in _color(mid, materials)] + [1.0]
+            tex = {s: str(textures / n) for s, n in (forge.get("textures") or {}).items()} if textures else {}
+            mats.append({"forge": forge, "textures": tex})
+        identity = [[1.0 if r == c else 0.0 for c in range(4)] for r in range(4)]
+        payload = {"unit": 0.01, "folder": str(folder), "materials": mats, "rigs": [],
+                   "objects": [{"id": "look", "name": "look", "matrix": identity, "smooth": mesh.smooth, "mats": slots, "arrays": arrays}]}
+        result = client.call("render", {"scene": payload, "views": views, "size": list(size), "quality": quality,
+                                        "out_dir": str(folder), "stem": "v"}, timeout=120.0)
+        paths = [Path(p) for p in result["paths"]]
+        if len(paths) != len(views) or not all(p.is_file() for p in paths):
+            raise ValueError("engine wrote no image")
+        last_renderer = "eevee"
+        return paths
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        return None
+
+
 def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials: dict | None = None,
                textures: Path | None = None) -> list[str]:
     views = views or ["three"]
     path.parent.mkdir(parents=True, exist_ok=True)
     out = []
+    shots = _engine_views(mesh, views, (480, 360), materials, textures, cold_ok=False)  # ponytail: first png call is the soft one
     for i, view in enumerate(views):
         dest = path if len(views) == 1 else path.with_name(f"{path.stem}_{view}{path.suffix}")
-        render_mesh(mesh, view, materials=materials, textures=textures).save(dest)
+        if shots:
+            shutil.copyfile(shots[i], dest)
+        else:
+            render_mesh(mesh, view, materials=materials, textures=textures).save(dest)
         out.append(str(dest))
+    if shots:
+        shutil.rmtree(shots[0].parent, ignore_errors=True)
     return out
 
 
 def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | None = None,
-                 textures: Path | None = None, long_side: int = 768) -> str:
-    """One PNG, long side long_side px: a single view, or the views tiled two across."""
+                 textures: Path | None = None, long_side: int = 768, quality: str = "look") -> str:
+    """One PNG, long side long_side px: a single view, or the views tiled two across.
+
+    quality="final" is 64 samples at 1024 px for marketing shots; the default look is 16 samples.
+    """
+    if quality == "final":
+        long_side = 1024
     cols = 1 if len(views) == 1 else 2
     rows = (len(views) + cols - 1) // cols
     tw = long_side // cols
@@ -103,8 +176,16 @@ def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | Non
     if th * rows > long_side:
         th = long_side // rows
     sheet = Image.new("RGB", (tw * cols, th * rows), (22, 22, 26))
+    shots = _engine_views(mesh, views, (tw, th), materials, textures, quality)
     for i, view in enumerate(views):
-        sheet.paste(render_mesh(mesh, view, (tw, th), materials, textures), ((i % cols) * tw, (i // cols) * th))
+        if shots:
+            with Image.open(shots[i]) as tile:
+                tile = tile.convert("RGB")
+        else:
+            tile = render_mesh(mesh, view, (tw, th), materials, textures)
+        sheet.paste(tile, ((i % cols) * tw, (i // cols) * th))
+    if shots:
+        shutil.rmtree(shots[0].parent, ignore_errors=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(path)
     return str(path)
