@@ -16,8 +16,15 @@ from PIL import Image, ImageDraw
 
 from .kernel.mesh import Mesh, vdot, vnorm, vsub
 
-# Which renderer made the last image: "eevee" or "fallback renderer" (callers add it to their `seen` line).
+# Which renderer made the last image: "eevee" or "fallback renderer".
 last_renderer = "eevee"
+# "" after an Eevee render, else "fallback renderer: <reason>"; callers put it in their result and `seen`.
+last_note = ""
+
+
+def _fell_back(reason: str) -> None:
+    global last_note
+    last_note = "fallback renderer: " + (reason.strip().splitlines() or ["unknown"])[-1][:160]
 
 _VIEWS = {
     "three": (1.3, -1.6, 0.9),
@@ -93,19 +100,28 @@ def _engine_views(mesh: Mesh, views: list[str], size: tuple[int, int], materials
 
     cold_ok=False only uses an already-running worker (and starts it in the background), so a cold call never waits.
     """
-    global last_renderer
+    global last_renderer, last_note
     last_renderer = "fallback renderer"
-    if not mesh.verts or os.environ.get("FORGE_SOFT_RENDER"):
+    if not mesh.verts:
+        _fell_back("empty mesh")
+        return None
+    if os.environ.get("FORGE_SOFT_RENDER"):
+        _fell_back("FORGE_SOFT_RENDER is set; unset it for Eevee")
         return None
     try:
         from .engine import bridge, client, runtime
-        if runtime.engine_status()["state"] != "ready":
+        state = runtime.engine_status()["state"]
+        if state != "ready":
+            _fell_back("Blender engine is %s; install it from the Forge panel" % state)
             return None
-        if not cold_ok and not client._worker.alive():
+        # A small mesh on a cold worker would wait seconds for a start; a big one is slower in the soft renderer anyway.
+        if not cold_ok and not client._worker.alive() and len(mesh.faces) < 2000:
             client.warm()
+            _fell_back("engine is starting; look again in a few seconds")
             return None
         folder = Path(tempfile.mkdtemp(prefix="look-", dir=client.scratch()))
-    except Exception:
+    except Exception as exc:
+        _fell_back("%s: %s" % (type(exc).__name__, exc))
         return None
     try:
         materials = materials or {}
@@ -136,11 +152,18 @@ def _engine_views(mesh: Mesh, views: list[str], size: tuple[int, int], materials
         paths = [Path(p) for p in result["paths"]]
         if len(paths) != len(views) or not all(p.is_file() for p in paths):
             raise ValueError("engine wrote no image")
-        last_renderer = "eevee"
+        last_renderer, last_note = "eevee", ""
         return paths
-    except Exception:
+    except Exception as exc:
         shutil.rmtree(folder, ignore_errors=True)
+        _fell_back("%s: %s" % (type(exc).__name__, exc))
         return None
+
+
+def _stamp(im: Image.Image) -> Image.Image:
+    """The fallback reason, written on the image so a viewer never mistakes it for an Eevee render."""
+    ImageDraw.Draw(im).text((4, 4), last_note, fill=(255, 200, 60))
+    return im
 
 
 def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials: dict | None = None,
@@ -154,7 +177,7 @@ def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials
         if shots:
             shutil.copyfile(shots[i], dest)
         else:
-            render_mesh(mesh, view, materials=materials, textures=textures).save(dest)
+            _stamp(render_mesh(mesh, view, materials=materials, textures=textures)).save(dest)
         out.append(str(dest))
     if shots:
         shutil.rmtree(shots[0].parent, ignore_errors=True)
@@ -182,7 +205,7 @@ def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | Non
             with Image.open(shots[i]) as tile:
                 tile = tile.convert("RGB")
         else:
-            tile = render_mesh(mesh, view, (tw, th), materials, textures)
+            tile = _stamp(render_mesh(mesh, view, (tw, th), materials, textures))
         sheet.paste(tile, ((i % cols) * tw, (i // cols) * th))
     if shots:
         shutil.rmtree(shots[0].parent, ignore_errors=True)

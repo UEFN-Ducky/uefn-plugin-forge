@@ -74,6 +74,35 @@ class RenderHQ(unittest.TestCase):
         final = render.render_tiles(head(), self.dir / "final.png", ["three"], _MATS, quality="final")
         self.assertEqual(max(Image.open(final).size), 1024)
 
+    @unittest.skipUnless(_READY, "Blender engine not installed")
+    def test_static_look_with_strands(self):
+        m = head()
+        for i in range(60000):  # one thin triangle per strand
+            a = i * 2.399963
+            r = 31 + (i % 7)
+            base = len(m.verts)
+            x, y, z = math.cos(a) * r * 0.9, math.sin(a) * r * 0.9, 20 * math.sin(i * 0.37)
+            m.verts += [[x, y, z], [x + 0.3, y, z], [x * 1.2, y * 1.2, z - 6]]
+            m.add_face([base, base + 1, base + 2], "fur")
+        self.assertGreaterEqual(len(m.faces), 50000)
+        render.render_png(sphere(5, 8, 4, "skin"), self.dir / "warm.png", ["three"], _MATS)
+        t = time.perf_counter()
+        out = render.render_png(m, self.dir / "strands.png", ["three"], _MATS)
+        self.assertLessEqual(time.perf_counter() - t, 5.0)
+        self.assertEqual(render.last_renderer, "eevee")
+        self.assertEqual(render.last_note, "")
+        self.assertGreaterEqual(max(Image.open(out[0]).size), 480)
+
+    def test_fallback_is_reported(self):
+        with patch.object(runtime, "engine_status", lambda: {"state": "missing"}):
+            out = render.render_png(head(), self.dir / "r.png", ["three"], _MATS)
+        self.assertTrue(render.last_note.startswith("fallback renderer: Blender engine is missing"), render.last_note)
+        self.assertTrue(Path(out[0]).is_file())
+        with patch.object(client, "call", side_effect=client.EngineError("boom")), \
+                patch.object(runtime, "engine_status", lambda: {"state": "ready"}):
+            render.render_tiles(head(), self.dir / "t.png", ["three"], _MATS)
+        self.assertEqual(render.last_note, "fallback renderer: EngineError: boom")
+
     def test_fallback_when_engine_missing(self):
         with patch.object(runtime, "engine_status", lambda: {"state": "missing"}):
             path = render.render_tiles(head(), self.dir / "soft.png", ["three", "front"], _MATS)
