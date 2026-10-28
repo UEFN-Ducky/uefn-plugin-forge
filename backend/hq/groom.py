@@ -124,7 +124,8 @@ def hair(scene, p):
     if rec is None:
         rec = {"id": _nid("g"), "object": node["id"]}
         grooms.append(rec)
-    rec.update(params=params, count=result["count"], points=result["points"])
+    rec.update(params=params, count=result["count"], points=result["points"],
+               material=_material(scene, "Hair_" + str(params.get("style") or "short"), strand.rgb(params.get("color")), roughness=0.45))
     warnings = ["strands capped at %d; lower density or shrink the region" % strand.MAX_STRANDS] if result.get("capped") else []
     return {"ids": [node["id"]], "groom": rec["id"], "strands": result["count"],
             "summary": "%s: %d strands over %s cm2 (%s)" % (result["style"], result["count"], result["area"], params.get("color", "brown")),

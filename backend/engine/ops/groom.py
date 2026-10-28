@@ -19,7 +19,7 @@ STYLES = {
     "afro": dict(density=60, length=14, clump=0.1, curl=1.0, frizz=0.4, droop=0.0, points=8, region="top"),
     "fur": dict(density=100, length=3, clump=0.0, curl=0.0, frizz=0.1, droop=0.3, points=4, region="all"),
     "beard": dict(density=50, length=8, clump=0.3, curl=0.3, frizz=0.15, droop=0.7, points=6, region="jaw"),
-    "mane": dict(density=40, length=28, clump=0.6, curl=0.15, frizz=0.12, droop=0.8, points=8, region="top"),
+    "mane": dict(density=40, length=28, clump=0.6, curl=0.15, frizz=0.12, droop=0.1, points=8, region="top"),
 }
 COLORS = {"black": (0.03, 0.025, 0.02), "brown": (0.22, 0.12, 0.06), "auburn": (0.35, 0.13, 0.07),
           "blonde": (0.8, 0.6, 0.28), "red": (0.55, 0.12, 0.05), "white": (0.9, 0.9, 0.88),
@@ -110,6 +110,12 @@ def _walk(root, n, length, st, rng, tie):
             pts.append((tie[0] + off[0] * s, tie[1] + off[1] * s, tie[2] - step * k))
         return pts
     d, step = n, length / (points - 1)
+    if st.get("name") == "mane":  # out along the normal, then swept back (+Y) with lift on the crown and neck
+        for k in range(1, points):
+            t = k / (points - 1)
+            d = _norm((d[0], d[1] + 0.35, d[2] + 0.12 * max(0.0, n[2]) - 0.04))
+            pts.append(_add(pts[-1], d, step))
+        return pts
     for k in range(1, points):
         t = k / (points - 1)
         d = _norm((d[0], d[1], d[2] - st["droop"] * 0.35 * (0.3 + t)))
@@ -128,6 +134,7 @@ def build_strands(p):
     if count > MAX_STRANDS:
         count = MAX_STRANDS
     roots = sample_roots(tris, count, rng)
+    zmid = sorted(r[0][2] for r in roots)[len(roots) // 2] if roots else 0.0
     tie = None
     if st.get("gather") and roots:
         xs, ys, zs = [r[0][0] for r in roots], [r[0][1] for r in roots], [r[0][2] for r in roots]
@@ -137,6 +144,8 @@ def build_strands(p):
     strands = []
     for root, n in roots:
         length = st["length"] * (0.85 + 0.3 * rng.random())
+        if st["name"] == "mane" and n[1] < -0.3:  # fuller at the throat, shorter at the face edge
+            length *= 1.25 if root[2] < zmid else 0.6
         strands.append(_walk(root, n, length, st, rng, tie))
     last = st["points"] - 1
     if st["clump"] > 0 and strands:  # pull tips toward the mean strand of a 1.5 cm cell on the region
@@ -165,7 +174,7 @@ def build_strands(p):
     return strands
 
 
-def _blender_curves(strands, name):
+def _blender_curves(strands, name, color=None):
     """Mirror the strands as a Blender hair-curves object; False when bpy is not available."""
     try:
         import bpy
@@ -173,6 +182,12 @@ def _blender_curves(strands, name):
         curves.add_curves([len(s) for s in strands])
         curves.attributes["position"].data.foreach_set("vector", [c for s in strands for pt in s for c in (x * 0.01 for x in pt)])
         obj = bpy.data.objects.new(name, curves)
+        if color is not None:  # strands carry their base color, not the default grey
+            mat = bpy.data.materials.new(name + "_mat")
+            mat.diffuse_color = (*color, 1.0)
+            mat.use_nodes = True
+            mat.node_tree.nodes["Principled BSDF"].inputs["Base Color"].default_value = (*color, 1.0)
+            curves.materials.append(mat)
         bpy.context.scene.collection.objects.link(obj)
         obj["forge_hair"] = True  # not a mesh: the mesh bridge ignores it
         return True
@@ -183,7 +198,7 @@ def _blender_curves(strands, name):
 def op_hair(p):
     strands = build_strands(p)
     st = style_of(p)
-    mirrored = _blender_curves(strands, str(p.get("name") or "Hair")) if p.get("curves", True) else False
+    mirrored = _blender_curves(strands, str(p.get("name") or "Hair"), rgb(p.get("color"))) if p.get("curves", True) else False
     return {"count": len(strands), "points": sum(len(s) for s in strands), "style": st["name"],
             "area": round(region_area(p["tris"]), 2), "density": st["density"], "blender_curves": mirrored,
             "capped": len(strands) >= MAX_STRANDS}

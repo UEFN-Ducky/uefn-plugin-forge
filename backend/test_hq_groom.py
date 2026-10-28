@@ -216,6 +216,29 @@ class GroomTests(unittest.TestCase):
         result = hqg.hair(scene, {"id": nid, "style": "mane", "region": {"sphere": [0, 0, 60, 12]}})
         self.assertGreater(result["strands"], 200)
 
+    def test_mane_direction(self):
+        nid = self.add("sphere", radius=30)
+        scene = load("Groom")
+        tris = hqg.region_tris(scene.world_mesh(scene.node(nid)), {"sphere": [0, 0, 60, 14]})
+        strands = eg.build_strands({"tris": tris, "style": "mane", "density": 8, "seed": 3, "clump": 0, "curl": 0, "frizz": 0})
+        crown = [s for s in strands if s[0][2] > 58]
+        self.assertGreater(len(crown), 20)
+        mean = [sum(s[-1][i] - s[0][i] for s in crown) / len(crown) for i in range(3)]
+        self.assertGreater(mean[1], 1.0)  # swept back
+        self.assertGreater(mean[2], 1.0)  # lifted
+        low = min(s[0][2] for s in strands)
+        self.assertLess(sum(s[-1][2] < low for s in strands) / len(strands), 0.2)
+
+    def test_mane_color(self):
+        nid = self.add("sphere", radius=30)
+        scene = load("Groom")
+        color = [0.33, 0.19, 0.08]
+        result = hqg.hair(scene, {"id": nid, "style": "mane", "region": {"sphere": [0, 0, 60, 14]}, "color": color, "density": 4})
+        mat = scene.materials()[scene.data["grooms"][0]["material"]]
+        for got, want in zip(mat["base_color"], color):
+            self.assertAlmostEqual(got, want, delta=0.15 * want)
+        self.assertTrue(result["strands"])
+
     def test_mane_cards_budget(self):
         nid = self.add("sphere", radius=30)
         scene = load("Groom")
