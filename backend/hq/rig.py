@@ -14,7 +14,7 @@ from . import engine, op
 
 _ASSETS = Path(__file__).resolve().parents[2] / "assets" / "rigs"
 TEMPLATES = ("ue5_manny", "quadruped", "bird", "tail_chain")
-CLIP_KINDS = ("run", "jump", "attack", "hit", "death", "idle")
+CLIP_KINDS = ("walk", "run", "jump", "attack", "hit", "death", "idle")
 STYLES = {"heavy": (1.2, 1.25), "light": (0.9, 0.85), "cartoony": (1.0, 1.6)}  # (time scale, amplitude)
 _TAU = math.tau
 
@@ -252,6 +252,37 @@ def _run(c, travel):
     return f, True
 
 
+def _walk(c, travel):
+    """Biped: legs half a cycle apart, arms against them. Four legs (a tail_* chain, front legs on
+    upperarm/lowerarm): the four-beat walk, back-left, front-left, back-right, front-right."""
+    f, s, h = c.f, c.s, c.h
+    n = 8
+    four = any(name.startswith("tail_") for name in c.names) and c.bone("upperarm_l") is not None
+    c.put("pelvis", "loc", rg._keys(f, lambda t: [0, 0, 0.012 * h * s * (1 - math.cos(2 * _TAU * t)) / 2], n))
+    c.put("pelvis", "rot", rg._keys(f, lambda t: [0, 0, 3 * s * math.cos(_TAU * t)], n))
+    c.put("head", "rot", rg._keys(f, lambda t: [3 * s * math.sin(2 * _TAU * t), 0, 0], n))
+    if four:
+        phase = {("thigh", "l"): 0.0, ("upperarm", "l"): 0.25, ("thigh", "r"): 0.5, ("upperarm", "r"): 0.75}
+        for (upper, side), ph in phase.items():
+            lower = "calf" if upper == "thigh" else "lowerarm"
+            c.limb(upper, lower, side,
+                   rg._keys(f, lambda t, ph=ph: [-24 * s * math.cos(_TAU * (t + ph)), 0, 0], n),
+                   rg._keys(f, lambda t, ph=ph: [6 * s + 38 * s * max(0.0, -math.sin(_TAU * (t + ph))), 0, 0], n))
+        for i, name in enumerate(sorted(n_ for n_ in c.names if n_.startswith("tail_"))):
+            c.put(name, "rot", rg._keys(f, lambda t, i=i: [0, 0, (6 + 4 * i) * s * math.sin(_TAU * t - 0.6 * i)], n))
+    else:
+        for side, ph in (("l", 0.0), ("r", 0.5)):
+            c.limb("thigh", "calf", side,
+                   rg._keys(f, lambda t, ph=ph: [-28 * s * math.cos(_TAU * (t + ph)), 0, 0], n),
+                   rg._keys(f, lambda t, ph=ph: [5 * s + 45 * s * max(0.0, -math.sin(_TAU * (t + ph))), 0, 0], n))
+            c.limb("upperarm", "lowerarm", side,
+                   rg._keys(f, lambda t, ph=ph: [18 * s * math.cos(_TAU * (t + ph)), 0, 0], n),
+                   rg._keys(f, lambda t: [15 * s, 0, 0], n))
+    if travel and c.root:
+        c.tracks.setdefault(c.root, {})["loc"] = rg._keys(f, lambda t: [0, -0.6 * h * s * t, 0], 1, "linear")
+    return f, True
+
+
 def _idle(c, travel):
     f, s, h = c.f, c.s, c.h
     c.put("pelvis", "loc", rg._keys(f, lambda t: [0, 0, -0.004 * h * s * (1 - math.cos(_TAU * t)) / 2]))
@@ -315,7 +346,7 @@ def _death(c, travel):
     return f, False
 
 
-_BUILD = {"run": (_run, 20), "idle": (_idle, 60), "jump": (_jump, 30), "attack": (_attack, 24), "hit": (_hit, 14), "death": (_death, 40)}
+_BUILD = {"walk": (_walk, 32), "run": (_run, 20), "idle": (_idle, 60), "jump": (_jump, 30), "attack": (_attack, 24), "hit": (_hit, 14), "death": (_death, 40)}
 
 
 def make_clip(rig, kind, p):
@@ -333,10 +364,10 @@ def make_clip(rig, kind, p):
         raise ValueError("No bones matched for %s. Pass map={'pelvis': '<bone>', 'thigh_l': ...} or run rig_template first." % kind)
     name = str(p.get("name") or "%s%s" % (kind.title(), "_" + style if style else ""))
     return {"id": rg._nid("a"), "name": name, "fps": 30, "frames": frames, "loop": loop, "tracks": c.tracks,
-            "root_motion": travel and kind in ("run", "jump")}
+            "root_motion": travel and kind in ("walk", "run", "jump")}
 
 
-@op("clip", "clip(kind='run'|'jump'|'attack'|'hit'|'death'|'idle', speed=1, style='heavy'|'light'|'cartoony', root_motion=false, rig, map)")
+@op("clip", "clip(kind='walk'|'run'|'jump'|'attack'|'hit'|'death'|'idle', speed=1, style='heavy'|'light'|'cartoony', root_motion=false, rig, map)")
 def clip(scene, p):
     rig = rg.find_rig(scene, str(p.get("rig") or ""))
     made = make_clip(rig, p.get("kind"), p)

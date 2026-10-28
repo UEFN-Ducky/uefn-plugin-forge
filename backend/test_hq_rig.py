@@ -180,7 +180,7 @@ class ClipTests(Base):
         scene, rig = self.character()
         for kind in hq.CLIP_KINDS:
             made = hq.make_clip(rig, kind, {})
-            self.assertEqual(made["loop"], kind in ("run", "idle"), kind)
+            self.assertEqual(made["loop"], kind in ("walk", "run", "idle"), kind)
             if made["loop"]:
                 for bone, channels in made["tracks"].items():
                     if bone == "root":
@@ -211,6 +211,28 @@ class ClipTests(Base):
         self.assertLess(on["tracks"]["root"]["loc"][-1][1][1], 0)  # travels toward -Y, the front
         self.assertFalse(off["root_motion"])
         self.assertNotIn("root", off["tracks"])
+
+
+class QuadrupedWalkTests(Base):
+    def test_four_beat_walk_moves_every_leg_and_the_tail(self):
+        scene = self.scene("box", w=50, d=160, h=90)
+        HQ_OPS["rig_template"](scene, {"template": "quadruped"})
+        rig = scene.data["rigs"][0]
+        made = hq.make_clip(rig, "walk", {})
+        self.assertTrue(made["loop"])
+        legs = ("thigh_l", "thigh_r", "upperarm_l", "upperarm_r", "calf_l", "calf_r", "lowerarm_l", "lowerarm_r")
+        for bone in legs + ("tail_01", "tail_03"):
+            self.assertIn(bone, made["tracks"], bone)
+
+        def peak(bone):  # when the leg is furthest back: the four feet take turns
+            keys = made["tracks"][bone]["rot"]
+            return max(keys, key=lambda k: k[1][0])[0]
+
+        order = sorted(("thigh_l", "upperarm_l", "thigh_r", "upperarm_r"), key=peak)
+        self.assertEqual(len({peak(b) for b in order}), 4, order)
+        for bone, channels in made["tracks"].items():
+            for keys in channels.values():
+                self.assertEqual(keys[0][1], keys[-1][1], bone)
 
 
 class FaceTests(Base):

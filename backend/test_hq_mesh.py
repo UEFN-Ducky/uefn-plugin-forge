@@ -77,9 +77,24 @@ def test_retopo_quads():
     fresh()
     ob = blob()
     hq.run("remesh", ob, {"voxel": 0.04})
-    r = hq.run("retopo", ob, {"faces": 4000})
+    r = hq.run("retopo", ob, {"faces": 4000, "symmetry": True})
     assert r["quads"] / r["faces"] >= 0.9, r
+    assert watertight(ob), "retopo left open edges"
     assert len(ob.material_slots) >= 2
+
+
+def test_retopo_after_remesh_with_a_tiny_edge():
+    # Oct 28 2026: a remeshed lion had 4 edges under 0.1 mm where parts pinched; quadriflow
+    # refused it as "not manifold" though every edge had two faces.
+    fresh()
+    ob = blob()
+    hq.run("remesh", ob, {"voxel": 0.04})
+    edge = ob.data.edges[0]
+    a, b = (ob.data.vertices[i] for i in edge.vertices)
+    a.co = b.co + (b.co - a.co).normalized() * 5e-5
+    ob.data.update()
+    r = hq.run("retopo", ob, {"faces": 2000})
+    assert r["quads"] / r["faces"] >= 0.9, r
 
 
 def test_sculpt_hd_levels():

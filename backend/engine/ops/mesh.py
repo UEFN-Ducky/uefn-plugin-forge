@@ -80,10 +80,36 @@ def remesh(ob, p):
     return {"summary": f"voxel {voxel:g}m", **_stats(ob)}
 
 
+def _collapse_tiny_edges(ob):
+    """Quadriflow refuses any edge shorter than 1e-4 (Blender's quadriflow_check) and calls it
+    "not manifold". Voxel remesh leaves a few where two surfaces pinch: collapse them."""
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bmesh.ops.dissolve_degenerate(bm, dist=2e-4, edges=bm.edges[:])
+    bm.to_mesh(ob.data)
+    bm.free()
+    ob.data.update()
+
+
+def _tidy(ob):
+    """Quadriflow leaves a few stray artifacts (a lion: 6 open edges, 8 zero-area faces, a
+    duplicate vertex): weld them, drop the slivers and close the tiny holes they leave."""
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=6e-4)
+    bmesh.ops.dissolve_degenerate(bm, dist=1e-5, edges=bm.edges[:])
+    bmesh.ops.holes_fill(bm, edges=[e for e in bm.edges if e.is_boundary], sides=8)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(ob.data)
+    bm.free()
+    ob.data.update()
+
+
 def retopo(ob, p):
     """Quadriflow retopo to ~faces quads."""
     faces = int(p.get("faces", 4000))
     src = _snapshot(ob)
+    _collapse_tiny_edges(ob)
     with _ctx(ob):
         r = bpy.ops.object.quadriflow_remesh(
             target_faces=faces, use_mesh_symmetry=bool(p.get("symmetry", False)),
@@ -91,6 +117,7 @@ def retopo(ob, p):
     if "FINISHED" not in r:
         bpy.data.objects.remove(src, do_unlink=True)
         raise RuntimeError("quadriflow failed: mesh must be closed and manifold; run remesh first")
+    _tidy(ob)
     _finish(ob, src)
     return {"summary": f"retopo {faces}", **_stats(ob)}  # ponytail: quadriflow needs a closed mesh, remesh first
 
