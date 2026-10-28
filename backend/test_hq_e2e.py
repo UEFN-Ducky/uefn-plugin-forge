@@ -106,19 +106,24 @@ class EndToEnd(unittest.TestCase):
             ("retopo", {"id": crate, "faces": 500}),
             ("sculpt_hd", {"id": crate, "levels": 1}),
             ("lods", {"id": crate}),
+            ("cleanup", {"id": crate, "faces": 500}),
             ("bake", {"id": crate, "size": 64}),
             ("hair", {"id": head, "style": "short"}),
             ("hair_cards", {"id": head, "cards": 40}),
             ("fur_shells", {"id": head, "layers": 2}),
+            ("fur_bake", {"id": head, "size": 64}),
             ("face_shapes", {"ids": [head], "set": "basic12"}),
             ("auto_weights", {"ids": [torso]}),
             ("clip", {"kind": "run"}),
             ("pose", {"clip": "Run", "frame": 4, "controls": {"hand_l": {"ik": [30, -40, 120]}}}),
             ("cloth", {"preset": "cape", "collide": torso, "frames": 8}),
             ("rig_template", {"template": "tail_chain", "ids": [crate], "count": 3}),
+            ("creature", {"kind": "big_cat", "length": 120}),
             ("export", {"target": "generic"}),
         ]
-        registered = {n for n, fn in hq.HQ_OPS.items() if fn.__module__.startswith("backend.hq.")}
+        # These spend the person's Tripo/Meshy credits; test_hq_generate covers them with a mocked provider.
+        paid = {"generate", "creature_from_prompt"}
+        registered = {n for n, fn in hq.HQ_OPS.items() if fn.__module__.startswith("backend.hq.")} - paid
         self.assertEqual(registered - {op for op, _ in cases}, set(), "every registered HQ op needs a case here")
         failed, timing = {}, {}
         for op, params in cases:
