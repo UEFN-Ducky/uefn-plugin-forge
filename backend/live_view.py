@@ -363,7 +363,7 @@ def _size(width: Any, height: Any) -> tuple[int, int]:
     return w - w % 2, h - h % 2
 
 
-def view(name: str, spec: Any = None, width: int = 1280, height: int = 720, clean: bool = False) -> dict:
+def view(name: str, spec: Any = None, width: int = 960, height: int = 540, clean: bool = False) -> dict:
     """One picture of the live viewport's scene from a camera, rendered by the open panel."""
     pose = resolve_pose(name, spec)
     w, h = _size(width, height)

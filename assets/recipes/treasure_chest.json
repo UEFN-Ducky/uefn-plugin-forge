@@ -1,0 +1,13 @@
+{"about": "Treasure chest: wooden body, rounded lid, iron bands and a gold lock", "params": {"w": 90, "wood": "painted_wood", "iron": "rusty_iron", "gold": "gold"},
+ "let": {"d": "=w*0.55", "h": "=w*0.4"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "ChestWood", "preset": "$wood"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "ChestIron", "preset": "$iron"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "ChestGold", "preset": "$gold"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Body", "params": {"w": "$w", "d": "$d", "h": "$h"}, "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Lid", "params": {"radius": "=d/2", "height": "$w", "seg": 16}, "pos": [0, 0, "=h+d/2"], "rot": [0, 90, 0], "scale": [1, 1, 1], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "BandL", "params": {"w": "=w*0.08", "d": "=d*1.04", "h": "=h*1.02"}, "pos": ["=-w*0.3", 0, 0], "material": "$1"},
+  {"tool": "forge_add", "kind": "box", "object_name": "BandR", "params": {"w": "=w*0.08", "d": "=d*1.04", "h": "=h*1.02"}, "pos": ["=w*0.3", 0, 0], "material": "$1"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Lock", "params": {"w": "=w*0.1", "d": 4, "h": "=h*0.25"}, "pos": [0, "=-d/2", "=h*0.7"], "material": "$2"},
+  {"tool": "forge_group", "ids": ["$3", "$4", "$5", "$6", "$7"], "object_name": "TreasureChest"}
+ ]}

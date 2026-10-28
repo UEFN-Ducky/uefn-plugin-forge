@@ -1,0 +1,9 @@
+{"about": "Giant mushroom: lathed stem and a flattened cap", "params": {"height": 200, "cap": [0.7, 0.1, 0.1]},
+ "let": {"r": "=height*0.28"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Stem", "preset": "cotton"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Cap", "preset": "velvet", "overrides": {"color": "$cap"}}},
+  {"tool": "forge_add", "kind": "lathe", "object_name": "Stem", "params": {"profile": [[0, 0], ["=height*0.1", 0], ["=height*0.07", "=height*0.4"], ["=height*0.08", "=height*0.7"], [0, "=height*0.7"]], "seg": 14}, "material": "$0"},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Cap", "params": {"radius": "$r", "seg": 16, "rings": 8}, "scale": [1, 1, 0.55], "pos": [0, 0, "=height*0.7"], "material": "$1"},
+  {"tool": "forge_group", "ids": ["$2", "$3"], "object_name": "Mushroom"}
+ ]}

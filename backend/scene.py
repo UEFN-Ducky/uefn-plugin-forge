@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import array
 import base64
+import difflib
 import json
 import math
 import copy
 import os
+import re
 import secrets
 import threading
 import time
@@ -45,7 +47,7 @@ from .uv import project
 from .shots import op_camera, op_cameras, op_shot
 
 _LOCK = threading.Lock()
-_READ = {"cameras", "stats", "scene_get", "scene_list", "scene_payload", "scene_geom_part", "scene_save", "scene_open", "scene_files", "scene_import_blend", "rig_preview", "mesh_data"}
+_READ = {"look", "cameras", "stats", "scene_get", "scene_list", "scene_payload", "scene_geom_part", "scene_save", "scene_open", "scene_files", "scene_import_blend", "rig_preview", "mesh_data"}
 # One dock message. Bigger buffers stay on the scene and load in pieces; every triangle is still sent.
 _GEOM_PART = 1024 * 1024
 _LOOK = {"check", "render"}
@@ -198,19 +200,23 @@ class Scene:
         self._geometry_cache = {}
         self._payload_versions = {}
         self._geom_hold = {}
+        self._stamp_transforms = True  # transforms.json may exist from an earlier session until the first save
 
     @property
     def name(self) -> str:
         return str(self.data.get("name") or self.folder.name)
 
     def save(self) -> None:
-        self.folder.mkdir(parents=True, exist_ok=True)
+        if self._stamp is None:
+            self.folder.mkdir(parents=True, exist_ok=True)
         tmp = self.folder / "scene.json.tmp"
         tmp.write_text(json.dumps(storage.pack(self.data, self.folder)), encoding="utf-8")
         tmp.replace(self.folder / "scene.json")
         self._stamp = (self.folder / "scene.json").stat().st_mtime_ns
+        if self._transforms or self._stamp_transforms:
+            (self.folder / "transforms.json").unlink(missing_ok=True)
         self._transforms = {}
-        (self.folder / "transforms.json").unlink(missing_ok=True)
+        self._stamp_transforms = False
         storage.retain(self.data, self.folder)
 
     def save_transform(self, nid):
@@ -436,8 +442,13 @@ class Scene:
             node = self.node(node.get("parent"))
         return False
 
+    def last_object(self) -> dict[str, Any] | None:
+        """The most recently added object: the target when nothing is selected."""
+        return next((n for n in reversed(self.data["nodes"]) if n.get("type") == "object"), None)
+
     def _active(self) -> dict[str, Any]:
-        node = self.node(self.data["selection"].get("object"))
+        sel = self.data["selection"].get("object")
+        node = self.node(sel) if sel else self.last_object()
         if node is None or node.get("type") != "object":
             raise ValueError("Select an object first")
         if self.is_locked(node):
@@ -620,6 +631,7 @@ class Scene:
                         mirrored = True
                 tris *= copies
             view = n.copy()
+            view.pop("hq", None)  # HQ op data (LODs, sidecars) is for export, not the dock
             view["primitive"] = prim_of.get(pid)
             view["tris"] = tris
             add_n(view)
@@ -688,13 +700,24 @@ class Scene:
         return info
 
 
+_KEYS: dict[str, str] = {}  # folder -> resolved folder; resolve() is a syscall per call on Windows
+
+
+def _key(folder: Path) -> str:
+    raw = str(folder)
+    hit = _KEYS.get(raw)
+    if hit is None:
+        hit = _KEYS[raw] = str(folder.resolve())
+    return hit
+
+
 def forget(name: str) -> None:
-    _OPEN.pop(str((scenes_root() / _safe(name)).resolve()), None)
+    _OPEN.pop(_key(scenes_root() / _safe(name)), None)
 
 
 def load(name: str) -> Scene:
     folder = scenes_root() / _safe(name)
-    key = str(folder.resolve())
+    key = _key(folder)
     path = folder / "scene.json"
     hit = _OPEN.get(key)
     if hit is not None and path.is_file() and hit._stamp == path.stat().st_mtime_ns:
@@ -740,6 +763,27 @@ def list_scenes() -> list[dict[str, Any]]:
     return out
 
 
+def _no_such(kind: str, name: Any, options) -> ValueError:
+    """'No bone 'hand_left'. Did you mean 'hand_l'? Bones: ...' with at most 8 options."""
+    options = list(dict.fromkeys(str(o) for o in options if o))
+    close = difflib.get_close_matches(str(name), options, n=1, cutoff=0.5)
+    hint = f" Did you mean {close[0]!r}?" if close else ""
+    listed = ", ".join(options[:8]) + (f" (+{len(options) - 8} more)" if len(options) > 8 else "")
+    return ValueError(f"No {kind} {str(name)!r}.{hint} {kind[0].upper() + kind[1:]}s: {listed or 'none'}")
+
+
+def _hint_error(scene: Scene, exc: Exception) -> Exception:
+    """rig.py's 'No bone/clip/rig' errors, upgraded with the closest name."""
+    m = re.match(r"No (bone|clip|rig) '([^']*)'", str(exc))
+    if not m:
+        return exc
+    rigs = scene.data.get("rigs") or []
+    options = {"rig": [r.get("name") for r in rigs],
+               "bone": [b["name"] for r in rigs for b in r.get("bones") or []],
+               "clip": [c.get("name") for r in rigs for c in r.get("actions") or []]}[m[1]]
+    return _no_such(m[1], m[2], options)
+
+
 def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent") -> dict[str, Any]:
     params = dict(params or {})
     op = (op or "").strip()
@@ -755,7 +799,7 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
         scene = load(name)
         fn = _OPS.get(op)
         if fn is None:
-            raise ValueError(f"Unknown forge op {op!r}")
+            raise _no_such("op", op, sorted(_OPS))
         if op == "select":
             result = fn(scene, params)
             # Selection is session state: observable, without geometry/history/disk work.
@@ -767,16 +811,23 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
             return result
         if op == "edit" and set(params) <= {"id", "pos", "rot", "scale", "transform"}:
             return _edit_transform(scene, params, actor)
+        if op == "hq" and str(params.get("op") or "help") == "help":
+            return fn(scene, params)
         editing = op not in _READ and op not in {"undo", "redo", "revert"}
         before = scene._snapshot() if editing and op not in _LOOK else None
         try:
             result = fn(scene, params)
-        except Exception:
+        except Exception as exc:
             # A failed mesh operation may already have baked a prototype. Cached scenes
             # must roll back just as a fresh disk load did before session caching.
             if before is not None:
                 scene.data = before
+            better = _hint_error(scene, exc)
+            if better is not exc:
+                raise better from None
             raise
+        if op == "hq" and (result.get("state") or result.get("job") or result.get("ok") is False):
+            editing = False  # engine installing, job queued or failed: the scene did not change yet
         if editing:
             ids = list(result.get("ids") or [])
             scene.commit(
@@ -1150,11 +1201,11 @@ def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
         base = scene.base_mesh(node)
         faces = [fi for fi, face in enumerate(base.faces) if any(tuple(sorted((a, face[(i+1) % len(face)]))) in edges for i, a in enumerate(face))]
     if which in {"extrude", "inset", "subdivide", "delete"} and not faces and not (which == "delete" and (p.get("verts") or sel.get("verts"))):
-        raise ValueError("Click a face in Edit mode first")
+        raise ValueError("Click a face in Edit mode first (agent: pass faces=[...] or forge_select(query='top'))")
     if which == "bevel" and not (p.get("edges") or sel.get("edges") or faces):
-        raise ValueError("Click an edge, or a face, then Bevel")
+        raise ValueError("Click an edge, or a face, then Bevel (agent: pass edges=[[a, b]] or faces=[...])")
     if which == "loopcut" and not (p.get("edge") or sel.get("edges")):
-        raise ValueError("Click an edge, then Loop cut")
+        raise ValueError("Click an edge, then Loop cut (agent: forge_select(edges=[[a, b]]) first)")
     mesh = scene._bake(node)
     if which == "extrude":
         extrude_faces(mesh, faces, float(p.get("distance", 10)))
@@ -1201,7 +1252,8 @@ def _op_mesh(scene: Scene, p: dict) -> dict[str, Any]:
         t["pos"] = [t["pos"][i] + shift[i] for i in range(3)]
         node["transform"] = t
     else:
-        raise ValueError(f"Unknown mesh op {which!r}")
+        raise _no_such("mesh op", which, ["extrude", "inset", "bevel", "loopcut", "subdivide", "decimate", "bridge", "fill",
+                                         "merge", "dissolve", "delete", "normals", "shade", "origin"])
     scene.write_mesh(node, mesh)
     return {"summary": which or "mesh", "ids": [node["id"]], "tris": mesh.tri_count()}
 
@@ -1354,7 +1406,8 @@ def _material_ref(scene: Scene, ref: str) -> str:
     for m in scene.data["materials"]:
         if ref in (m["id"], m["name"]):
             return m["id"]
-    raise ValueError(f"No material {ref!r} in this scene; forge_material_set makes one")
+    err = _no_such("material", ref, [m["name"] for m in scene.data["materials"]])
+    raise ValueError(f"{err} (forge_material_set makes a new one)")
 
 
 def _op_material_assign(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1613,6 +1666,47 @@ def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Render {len(paths)}", "ids": [], "paths": paths, "kind": "look"}
 
 
+_LOOK_VIEWS = {"ai": ["three", "front", "side", "top"]}
+
+
+def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
+    """One tiled preview plus a 'seen' line: bounds cm, tris, materials, check issues. look = a view, "ai", or ids."""
+    from .render import _VIEWS, render_tiles
+
+    look = p.get("look") or "three"
+    ids = set(look) if isinstance(look, list) else set()
+    views = ["three"] if ids else _LOOK_VIEWS.get(look, [look])
+    bad = [v for v in views if v not in _VIEWS]
+    if bad:
+        raise ValueError(f"look={look!r} is not a view. Use one of: {', '.join([*_VIEWS, 'ai'])}, or a list of ids")
+
+    def wanted(n):
+        while n is not None:
+            if n["id"] in ids:
+                return True
+            n = scene.node(n.get("parent"))
+        return False
+
+    nodes = [n for n in scene.data["nodes"] if n.get("type") == "object" and n.get("visible", True)
+             and (not ids or wanted(n))]
+    mesh = Mesh()
+    for n in nodes:
+        mesh.append(scene.world_mesh(n))
+    mats = scene.materials()
+    lo, hi = mesh.bounds()
+    used = sorted({mats.get(m, {}).get("name") or m for m in mesh.face_mat})
+    keep = {n["id"] for n in nodes}
+    issues = [i for i in _op_check(scene, {})["issues"] if not ids or i.get("object") in keep]
+    kinds: dict = {}
+    for i in issues:
+        kinds[i["id"]] = kinds.get(i["id"], 0) + 1
+    seen = "%s cm, %d tris, %s, %s" % (
+        "x".join(str(round(hi[k] - lo[k])) for k in range(3)), mesh.tri_count(), ", ".join(used[:4]) or "no materials",
+        "; ".join(f"{k} x{c}" for k, c in list(kinds.items())[:3]) or "no issues")
+    path = render_tiles(mesh, _captures() / f"forge_{scene.name}_look.png", views, mats, scene.folder / "textures")
+    return {"summary": seen, "seen": seen, "ids": [], "paths": [path]}
+
+
 def _op_texture(scene: Scene, p: dict) -> dict[str, Any]:
     from io import BytesIO
 
@@ -1689,9 +1783,12 @@ def _gc_textures(scene: Scene, keep: set[str]) -> None:
 
 
 def _object(scene: Scene, p: dict, *, edit: bool = True) -> dict:
-    node = scene.node(str(p.get("id") or scene.data["selection"].get("object") or ""))
+    nid = str(p.get("id") or scene.data["selection"].get("object") or "")
+    node = (scene.node(nid) or next((n for n in scene.data["nodes"] if n.get("name") == nid), None)) if nid else scene.last_object()
     if node is None or node.get("type") != "object":
-        raise ValueError("Select an object or pass its id")
+        if nid:
+            raise _no_such("object", nid, [n.get("name") for n in scene.data["nodes"] if n.get("type") == "object"])
+        raise ValueError("No object yet: forge_add(kind='box') first")
     if edit and scene.is_locked(node):
         raise ValueError(f"{node.get('name')} is locked")
     return node
@@ -1703,13 +1800,41 @@ def _to_local(scene: Scene, node: dict, points) -> tuple[list, float]:
     return to_local(scene, node["id"], points)
 
 
+_DENSE_VERTS = 64  # fewer than this and a brush or vertex mask has nothing to move: a box becomes 98 after x2
+
+
+def _dense(mesh: Mesh, step, how: str) -> tuple[Mesh, list]:
+    """Subdivide a too-coarse mesh (up to x4) so sculpt and blend paint work; meshes with keys or weights stay."""
+    if len(mesh.verts) >= _DENSE_VERTS or any(a.startswith(("sk:", "wt:")) for a in mesh.attrs):
+        return mesh, []
+    levels = 0
+    while len(mesh.verts) < _DENSE_VERTS and levels < 4:
+        mesh = step(mesh) or mesh
+        levels += 1
+    return mesh, [f"{how} x{levels} ({len(mesh.verts)} verts)"]
+
+
+def _needs_unwrap(mesh: Mesh) -> bool:
+    """UVs missing, outside 0-1, or overlapping (total area over 1): texture paint would smear."""
+    area = 0.0
+    for fi, face in enumerate(mesh.faces):
+        uvs = mesh.uvs[fi] if fi < len(mesh.uvs) else []
+        if len(uvs) != len(face):
+            return True
+        if any(not (-1e-4 <= c <= 1.0001) for uv in uvs for c in uv[:2]):
+            return True
+        area += abs(sum(uvs[i][0] * uvs[i - 1][1] - uvs[i - 1][0] * uvs[i][1] for i in range(len(uvs)))) / 2
+    return area > 1.0001
+
+
 def _op_sculpt(scene: Scene, p: dict) -> dict[str, Any]:
-    from .kernel.sculpt import displace_noise, smooth_all, stroke, vertex_normals
+    from .kernel.sculpt import catmull_clark, displace_noise, smooth_all, stroke, vertex_normals
 
     node = _object(scene, p)
     mesh = scene._bake(node)
     brush = str(p.get("brush") or "draw")
     shape = str(p.get("shape") or "")
+    mesh, warnings = _dense(mesh, lambda m: catmull_clark(m, 1), "smooth-subdivided") if not shape else (mesh, [])
     if shape and f"sk:{shape}" not in mesh.attrs:
         raise ValueError(f"No shape key {shape!r} on {node.get('name')}; forge_shape(action='add') first")
     _, k = _to_local(scene, node, [])
@@ -1739,7 +1864,8 @@ def _op_sculpt(scene: Scene, p: dict) -> dict[str, Any]:
         mesh.attrs[f"sk:{shape}"] = [[v[a] - b[a] for a in range(3)] for v, b in zip(mesh.verts, base)]
         mesh.verts = base
     scene.write_mesh(node, mesh)
-    return {"summary": f"Sculpt {brush} on {node.get('name')}: {n} vertices", "ids": [node["id"]], "id": node["id"], "verts": n}
+    return {"summary": f"Sculpt {brush} on {node.get('name')}: {n} vertices", "ids": [node["id"]], "id": node["id"], "verts": n,
+            **({"warnings": warnings} if warnings else {})}
 
 
 def _op_values(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1847,8 +1973,9 @@ def _op_paint(scene: Scene, p: dict) -> dict[str, Any]:
 
     node = _object(scene, p)
     mode = str(p.get("mode") or "blend")
+    warnings: list = []
     if mode == "blend":
-        mesh = scene._bake(node)
+        mesh, warnings = _dense(scene._bake(node), lambda m: subdivide(m) and m, "subdivided")
         channel = {"r": 0, "g": 1, "b": 2}.get(str(p.get("channel") or "r").lower())
         if channel is None:
             raise ValueError("channel is r, g, or b (the blend material's layer 1, 2, or 3)")
@@ -1860,14 +1987,15 @@ def _op_paint(scene: Scene, p: dict) -> dict[str, Any]:
         values = paint.mask_values(mesh, str(p.get("mask") or "all"), params)
         paint.apply_mask(mesh, channel, values, str(p.get("combine") or "set"), float(p.get("strength", 1.0)))
         scene.write_mesh(node, mesh)
-        return {"summary": f"Blend {p.get('mask') or 'all'} into {'rgb'[channel]} on {node.get('name')}", "ids": [node["id"]]}
+        return {"summary": f"Blend {p.get('mask') or 'all'} into {'rgb'[channel]} on {node.get('name')}", "ids": [node["id"]],
+                **({"warnings": warnings} if warnings else {})}
     if mode != "texture":
         raise ValueError("mode is blend or texture")
     mats = scene.materials()
     mid = str(p.get("material") or node.get("material") or "")
     mat = mats.get(mid) or next((m for m in scene.data["materials"] if m["name"] == mid), None)
     if mat is None:
-        raise ValueError(f"No material {mid!r}")
+        raise _no_such("material", mid, [m["name"] for m in scene.data["materials"]])
     size = int(p.get("size") or 1024)
     current = (mat.get("textures") or {}).get("base_color")
     path = scene.folder / "textures" / current if current else None
@@ -1876,6 +2004,13 @@ def _op_paint(scene: Scene, p: dict) -> dict[str, Any]:
         img = paint.new_canvas(size, start or [0.75, 0.75, 0.78])
     else:
         img = Image.open(BytesIO(path.read_bytes())).convert("RGBA")
+    base = scene._bake(node)
+    if _needs_unwrap(base):
+        from .uv import smart_unwrap
+
+        smart_unwrap(base)
+        scene.write_mesh(node, base)
+        warnings.append(f"smart-unwrapped {node.get('name')} first")
     mesh = scene.local_mesh(node)
     done = []
     if p.get("faces"):
@@ -1887,7 +2022,8 @@ def _op_paint(scene: Scene, p: dict) -> dict[str, Any]:
         paint.grain(img, float(p["grain"]), float(p.get("grain_scale", 8)), int(p.get("seed", 0)))
         done.append("grain")
     _save_texture(scene, mat, img.convert("RGB"), tileable=False, derive=bool(p.get("derive_maps")))
-    return {"summary": f"Paint {mat['name']}: {', '.join(done) or 'new texture'}", "ids": [mat["id"]], "material": mat}
+    return {"summary": f"Paint {mat['name']}: {', '.join(done) or 'new texture'}", "ids": [mat["id"]], "material": mat,
+            **({"warnings": warnings} if warnings else {})}
 
 
 _BATCH = {
@@ -1898,6 +2034,7 @@ _BATCH = {
     "forge_material_set": "material_set", "forge_material_assign": "material_assign",
     "forge_uv_project": "uv", "forge_rig": "rig", "forge_anim": "anim", "forge_fix": "fix",
     "forge_sculpt": "sculpt", "forge_paint": "paint", "forge_shape": "shape", "forge_uv_transform": "uv_transform",
+    "forge_hq": "hq",
 }
 
 
@@ -1922,14 +2059,45 @@ def _ref(value: Any, results: list[dict]) -> Any:
         raise ValueError(f"{value} points at a step that has not run yet")
     got = results[k]
     if field:
+        field, _, index = field.partition(".")
         if field not in got:
             raise ValueError(f"{value}: step {k} returned no {field!r}")
-        return got[field]
+        if not index:
+            return got[field]
+        items = got[field]
+        try:
+            return items[int(index)]  # "$0.ids.1": one id; negative counts from the end
+        except (ValueError, TypeError, IndexError):
+            count = len(items) if isinstance(items, list) else 0
+            raise ValueError(f"{value}: step {k} has {count} {field} (use .0 to .{count - 1}, or -1 for the last)") from None
     if got.get("id"):
         return got["id"]
     if got.get("ids"):
         return got["ids"][0]
     raise ValueError(f"{value}: step {k} returned no id")
+
+
+def _op_hq(scene: Scene, p: dict) -> dict[str, Any]:
+    """One Blender-engine op (backend.hq); dispatch commits it as one undo step."""
+    from .hq import compact, run_hq
+    params = dict(p.get("params") or {})
+    for key in ("id", "wait", "verbose"):
+        if p.get(key):
+            params.setdefault(key, p[key])
+    op = str(p.get("op") or "help")
+    if op == "help":
+        return run_hq(scene, op, params)  # help is capped by hq itself; the 300-char result budget would cut it
+    verbose = bool(params.pop("verbose", False))
+    result = run_hq(scene, op, {**params, "verbose": True})  # full, so node_data survives to be stored
+    data = result.pop("node_data", None)
+    if isinstance(data, dict):
+        # ponytail: a long op queued as a job stores nothing here; run it with wait=True (batches do) to keep its data.
+        nid = params.get("id") or next(iter(result.get("ids") or []), "")
+        node = scene.node(str(nid))
+        if node is None:
+            raise ValueError(f"HQ op {op!r} returned node_data but no object id to store it on")
+        node["hq"] = {**(node.get("hq") or {}), op: copy.deepcopy(data)}
+    return result if verbose or result.get("job") or result.get("state") else compact(result)
 
 
 def _op_batch(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1941,6 +2109,7 @@ def _op_batch(scene: Scene, p: dict) -> dict[str, Any]:
         raise ValueError("Keep one batch under 500 steps")
     results: list[dict] = []
     ids: list = []
+    warnings: list = []
     for k, step in enumerate(steps):
         if not isinstance(step, dict):
             raise ValueError(f"step {k} must be an object like {{\"tool\": \"forge_add\", \"kind\": \"box\"}}")
@@ -1958,13 +2127,20 @@ def _op_batch(scene: Scene, p: dict) -> dict[str, Any]:
                 args.setdefault("name", args.pop("material"))
             if op == "group":
                 args.setdefault("combine", True)
+            if op == "hq":
+                args["wait"] = True  # long HQ ops run inline so the batch stays one undo step
             result = _OPS[op](scene, args)
         except Exception as exc:
-            raise ValueError(f"step {k} ({tool}) failed: {exc}. The whole batch was undone.") from None
+            raise ValueError(f"step {k} ({tool}) failed: {_hint_error(scene, exc)}. The whole batch was undone.") from None
         results.append(result)
         ids.extend(result.get("ids") or [])
+        warnings.extend(f"step {k}: {w}" for w in result.get("warnings") or [])
     brief = [{key: r[key] for key in ("summary", "id", "clip", "bones") if r.get(key)} for r in results]
-    return {"summary": f"Batch of {len(steps)}", "ids": list(dict.fromkeys(i for i in ids if i)), "steps": brief}
+    out = {"summary": f"Batch of {len(steps)}; last: {results[-1].get('summary') or steps[-1].get('tool')}",
+           "ids": list(dict.fromkeys(i for i in ids if i)), "steps": brief}
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 def _op_merge(scene: Scene, p: dict, source_scene=None) -> dict[str, Any]:
@@ -2034,6 +2210,7 @@ _OPS = {
     "anim": op_anim,
     "rig_preview": op_preview,
     "batch": _op_batch,
+    "hq": _op_hq,
     "merge_scene": _op_merge,
     "sculpt": _op_sculpt,
     "values": _op_values,
@@ -2068,6 +2245,7 @@ _OPS = {
     "check": _op_check,
     "fix": _op_fix,
     "render": _op_render,
+    "look": _op_look,
     "texture": _op_texture,
     "scene_save": _op_save_file,
     "scene_open": _op_open_file,

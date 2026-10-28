@@ -100,6 +100,15 @@ A looping clip must end where it starts: frame `frames` equals frame 0. Generato
 - In the dock, the Rig tab plays the clip. The user can scrub it or drag a bone's rotate gizmo, which keys the current frame. With the IK box ticked, dragging a hand or foot solves the chain above it on release. Shape-key sliders preview a weight, and Key stores it at the current frame.
 - `forge_check` catches keys on missing bones, keys after the end, and loops that pop.
 
+## Tool args
+
+`forge_anim(action=...)`. Rotations are in the bone's parent frame; check a motion with `forge_render(clip=...)`.
+- `generate`: `kind` idle|walk|wave on a biped; sway down a bone chain; spin|bob|swing|open on one bone. `amount` scales it, `axis` x|y|z.
+- `new` (`new_name`, `frames`, `fps`, `loop`); `edit` (frames, fps, loop, new_name); `delete`.
+- `key`: `bone`, `frame`, `rot` degrees / `loc` cm / `scale`; `shape` + `value` 0-1 keys a shape key; or `keys=[{bone, frame, rot} or {shape, frame, value}]` for many; `interp` smooth|linear|step.
+- `ik`: `bone` = hand/foot, `target` = world cm for its head, `chain` = bones to bend, `pole` = world point the elbow/knee bends toward, `keep_rotation` holds the hand/foot orientation; `frame`, or `span=[first, last]` to pin it across frames.
+- `unkey` (`bone` or `shape`, optional `frame`/`channel`).
+
 ## In UEFN
 
 Each clip becomes an `AS_` AnimSequence on the `SK_` skeleton at Send. `place=true` puts the asset on an Animated Mesh device playing its first clip. Other clips, NPC presets, or playing on the player go through the Animation plugin: `skill_read_subskill("animation", "runtime_playback")`.

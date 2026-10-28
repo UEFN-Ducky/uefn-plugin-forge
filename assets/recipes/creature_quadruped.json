@@ -1,0 +1,15 @@
+{"about": "Four-legged creature with head and tail, rigged on the quadruped template and running", "params": {"length": 160, "height": 90, "skin": "scales_green"},
+ "let": {"leg": "=height*0.5", "half": "=length*0.3"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Hide", "preset": "$skin"}},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Body", "params": {"radius": "=height*0.4", "seg": 16, "rings": 10}, "scale": [1, "=length/height*1.2", 1], "pos": [0, 0, "=leg"], "material": "$0"},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Head", "params": {"radius": "=height*0.22", "seg": 14, "rings": 8}, "pos": [0, "=length*0.62", "=height*0.75"], "material": "$0"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Tail", "params": {"radius": "=height*0.12", "height": "=length*0.5", "seg": 8}, "pos": [0, "=-length*0.45", "=height*0.6"], "rot": [100, 0, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegFL", "params": {"radius": "=height*0.07", "height": "=leg+10", "seg": 8}, "pos": ["=height*0.2", "=half", 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegFR", "params": {"radius": "=height*0.07", "height": "=leg+10", "seg": 8}, "pos": ["=-height*0.2", "=half", 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegBL", "params": {"radius": "=height*0.07", "height": "=leg+10", "seg": 8}, "pos": ["=height*0.2", "=-half", 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegBR", "params": {"radius": "=height*0.07", "height": "=leg+10", "seg": 8}, "pos": ["=-height*0.2", "=-half", 0], "material": "$0"},
+  {"tool": "forge_hq", "op": "rig_template", "params": {"template": "quadruped", "ids": ["$1", "$2", "$3", "$4", "$5", "$6", "$7"]}},
+  {"tool": "forge_hq", "op": "auto_weights", "params": {"ids": ["$1", "$2", "$3", "$4", "$5", "$6", "$7"]}},
+  {"tool": "forge_hq", "op": "clip", "params": {"kind": "run"}}
+ ]}

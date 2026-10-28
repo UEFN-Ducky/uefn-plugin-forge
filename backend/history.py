@@ -13,27 +13,45 @@ CAP = 20
 def _index(path):
     return path.with_name("history-index.json")
 
+_CACHE = {}  # index path -> (mtime_ns, data): read once per session, not on every edit
+
 def _load(path):
     index = _index(path)
-    if index.is_file():
-        return json.loads(index.read_text(encoding="utf-8"))
-    return {"undo": [], "redo": [], "legacy": path.is_file(), "added": 0}
+    try:
+        stamp = index.stat().st_mtime_ns
+    except OSError:
+        return {"undo": [], "redo": [], "legacy": path.is_file(), "added": 0}
+    hit = _CACHE.get(str(index))
+    if hit is not None and hit[0] == stamp:
+        return copy.deepcopy(hit[1])
+    data = json.loads(index.read_text(encoding="utf-8"))
+    _CACHE[str(index)] = (stamp, copy.deepcopy(data))
+    return data
+
+def _files(data):
+    return {e.get("file") for stack in (data["undo"], data["redo"]) for e in stack} - {None}
 
 def _save(path, data):
     index = _index(path)
-    index.parent.mkdir(parents=True, exist_ok=True)
+    hit = _CACHE.get(str(index))
+    if hit is None:
+        index.parent.mkdir(parents=True, exist_ok=True)
     tmp = index.with_suffix(".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
     tmp.replace(index)
+    _CACHE[str(index)] = (index.stat().st_mtime_ns, copy.deepcopy(data))
     folder = path.parent / "history-snapshots"
-    keep = {e.get("file") for stack in (data["undo"], data["redo"]) for e in stack}
-    if folder.is_dir():
-        for item in folder.glob("*.json"):
-            if item.name not in keep:
-                try:
-                    item.unlink()
-                except OSError:
-                    pass  # Stale snapshot cleanup must not fail a committed edit.
+    keep = _files(data)
+    # Known index: unlink just the snapshots that fell off the stacks. The first save of a session sweeps strays.
+    if hit is not None:
+        stale = [folder / name for name in _files(hit[1]) - keep]
+    else:
+        stale = [item for item in (folder.glob("*.json") if folder.is_dir() else []) if item.name not in keep]
+    for item in stale:
+        try:
+            item.unlink()
+        except OSError:
+            pass  # Stale snapshot cleanup must not fail a committed edit.
 
 def _snapshot(path, state):
     folder = path.parent / "history-snapshots"

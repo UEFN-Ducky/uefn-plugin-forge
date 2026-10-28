@@ -1,0 +1,10 @@
+{"about": "Sculpted boulder: faceted sphere, smooth-subdivided, noise-sculpted, decimated to budget", "params": {"radius": 60, "stone": "granite"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "RockMat", "preset": "$stone"}},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Boulder", "params": {"radius": "$radius", "seg": 12, "rings": 8}, "scale": [1.3, 1, 0.75], "material": "$0"},
+  {"tool": "forge_select", "object": "$1", "query": "all"},
+  {"tool": "forge_mesh_op", "op": "subdivide", "smooth": true, "levels": 2},
+  {"tool": "forge_sculpt", "id": "$1", "brush": "noise", "strength": "=radius*0.12", "scale": "=radius*0.7", "seed": 3},
+  {"tool": "forge_mesh_op", "op": "decimate", "ratio": 0.4},
+  {"tool": "forge_uv_project", "mode": "smart"}
+ ]}

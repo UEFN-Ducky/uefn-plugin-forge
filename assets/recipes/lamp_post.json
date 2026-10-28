@@ -1,0 +1,9 @@
+{"about": "Street lamp with a glowing bulb", "params": {"height": 380, "metal": "plastic_black", "glow": "neon_pink"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "LampMetal", "preset": "$metal"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "LampGlow", "preset": "$glow"}},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Pole", "params": {"radius": 6, "height": "$height", "seg": 12}, "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Arm", "params": {"w": 80, "d": 8, "h": 8}, "pos": [36, 0, "=height-20"], "material": "$0"},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Lamp", "params": {"radius": 14, "seg": 16, "rings": 8}, "pos": [70, 0, "=height-50"], "material": "$1"},
+  {"tool": "forge_group", "ids": ["$2", "$3", "$4"], "object_name": "LampPost"}
+ ]}

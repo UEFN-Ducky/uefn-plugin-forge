@@ -93,6 +93,23 @@ def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials
     return out
 
 
+def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | None = None,
+                 textures: Path | None = None, long_side: int = 768) -> str:
+    """One PNG, long side long_side px: a single view, or the views tiled two across."""
+    cols = 1 if len(views) == 1 else 2
+    rows = (len(views) + cols - 1) // cols
+    tw = long_side // cols
+    th = tw * 3 // 4
+    if th * rows > long_side:
+        th = long_side // rows
+    sheet = Image.new("RGB", (tw * cols, th * rows), (22, 22, 26))
+    for i, view in enumerate(views):
+        sheet.paste(render_mesh(mesh, view, (tw, th), materials, textures), ((i % cols) * tw, (i // cols) * th))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(path)
+    return str(path)
+
+
 def _shaded(col, shade: float) -> tuple[int, int, int]:
     return tuple(int(max(0, min(255, c * shade))) for c in col)
 

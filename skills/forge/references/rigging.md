@@ -110,6 +110,15 @@ At preview and Send, each vertex keeps its four strongest bones, normalized. A v
 
 `forge_check` adds rig issues: no bones, a cycle, nothing bound, a binding to a missing bone, keys on missing bones, keys after the last frame, and loops whose last frame doesn't match frame 0.
 
+## Tool args
+
+`forge_rig(action=...)`, centimetres, Z-up:
+- `template`: `biped` fits the selected objects (UE mannequin bone names, faces -Y, `_l` on +X, T-pose); `chain`: `count` bones from `start` to `end`, `prefix` names them; `single`: one bone at the base with the objects bound to it.
+- `new` (empty rig, `new_name`); `add_bone` (`bone`, `parent`, `head`, `tail`); `edit_bone` (`bone`, head/tail/parent/`new_name`); `delete_bone`.
+- `bind` (`ids` or selection): `bone=` moves the whole object rigidly; `auto=true` spreads smooth weights over `bones` or all.
+- `weights` (painted skin): seeds from the current binding the first time or with `init=true`; then `bone` + `mode` add|subtract|set|smooth with `strength` 0-1 and `value`, over `points`+`radius` (world cm), `faces`, or the whole object; `normalize=true` makes each vertex sum to 1.
+- `unbind`, `delete`.
+
 ## Problems
 
 | Symptom | Fix |

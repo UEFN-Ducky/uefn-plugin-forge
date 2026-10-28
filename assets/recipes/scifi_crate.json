@@ -1,0 +1,12 @@
+{"about": "Sci-fi supply crate with recessed panels and a glowing strip", "params": {"size": 100, "metal": "worn_steel", "glow": "neon_blue"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "CrateMetal", "preset": "$metal"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "CrateGlow", "preset": "$glow"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Crate", "params": {"w": "$size", "d": "$size", "h": "$size"}, "material": "$0"},
+  {"tool": "forge_select", "object": "$2", "query": "all"},
+  {"tool": "forge_mesh_op", "op": "inset", "amount": "=size*0.1"},
+  {"tool": "forge_mesh_op", "op": "extrude", "distance": "=-size*0.04"},
+  {"tool": "forge_uv_project", "mode": "box"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Strip", "params": {"w": "=size*0.7", "d": "=size*1.02", "h": "=size*0.06"}, "pos": [0, 0, "=size*0.5"], "material": "$1"},
+  {"tool": "forge_group", "ids": ["$2", "$7"], "object_name": "SciFiCrate"}
+ ]}

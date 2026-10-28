@@ -60,6 +60,32 @@ async function rpc(method, params) {
   return reply.result;
 }
 
+let engineTimer = 0;
+// Blender engine chip next to the version: Ready / Installing 42% / Error + Retry (click installs).
+const engineChip = document.createElement("button");
+engineChip.type = "button";
+engineChip.style.cssText = "flex:none;white-space:nowrap;background:none;border:1px solid var(--border);border-radius:9px;padding:0 7px;color:var(--fg-dim);font:inherit;cursor:pointer";
+document.getElementById("forge-version").after(engineChip);
+async function engineStatus(action = "status") {
+  let next = 30000;
+  try {
+    const s = await rpc("forge_engine", { action });
+    const label = { ready: "ready", installing: `installing ${s.progress || 0}%`, error: "error · Retry", missing: "downloads on first use" }[s.state] || s.state;
+    engineChip.textContent = `Blender engine · ${label}`;
+    engineChip.title = s.state === "error" ? s.error || "" : `${s.version || ""}${s.stage ? " · " + s.stage : ""}`;
+    engineChip.style.color = s.state === "error" ? "var(--red)" : "var(--fg-dim)";
+    engineChip.disabled = s.state === "ready" || s.state === "installing";
+    if (s.state === "installing") next = 2000;
+  } catch (err) {
+    engineChip.textContent = "Blender engine · unavailable";
+    engineChip.title = err.message;
+  }
+  clearTimeout(engineTimer);
+  engineTimer = setTimeout(() => engineStatus(), (panelVisible && !document.hidden) ? next : Math.max(next, 30000));
+}
+engineChip.addEventListener("click", () => engineStatus("install"));
+engineStatus();
+
 const state = {
   name: "",
   rev: -1,

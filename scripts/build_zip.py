@@ -61,6 +61,23 @@ SKIP_NAMES = {
 SKIP_SUFFIX = {".pyc", ".pyo", ".zip", ".ducky-plugin"}
 # Source for the esbuild bundle — ship viewer.bundle.js + draco/, not ui/src/.
 SKIP_REL_PREFIXES = ("ui/src/",)
+# Run by the embedded Blender engine's own CPython 3.13, never by Ducky's: always shipped as source.
+ENGINE_SOURCE = ("backend/engine/worker.py", "backend/engine/ops/")
+
+
+def engine_source_files() -> list[tuple[str, Path]]:
+    found = [ROOT / ENGINE_SOURCE[0]] + sorted((ROOT / ENGINE_SOURCE[1]).rglob("*.py"))
+    return [("/".join(p.relative_to(ROOT).parts), p) for p in found
+            if p.is_file() and "__pycache__" not in p.parts and not p.name.startswith("test_")]
+
+
+def add_engine_source(zip_path: Path) -> None:
+    """The compiled build turns backend/ into a .pyd; put the engine's worker files back as source."""
+    with zipfile.ZipFile(zip_path, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+        have = set(zf.namelist())
+        for rel, path in engine_source_files():
+            if rel not in have:
+                zf.write(path, rel)
 
 
 def build_zip(*, out: Path | None = None) -> Path:
@@ -156,6 +173,7 @@ def build_compiled_zip(*, out: Path | None = None, release: bool = False) -> Pat
         cmd.append("--release")
     print(f"compiling via {repo}")
     subprocess.run(cmd, cwd=str(ducky_app), env=env, check=True)
+    add_engine_source(dest)
     print(f"wrote {dest} ({dest.stat().st_size} bytes)")
     _prune_superseded_zips(dest)
     return dest

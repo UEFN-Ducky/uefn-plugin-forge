@@ -100,6 +100,19 @@ A head with a smile and a puff, and a clip that plays the smile:
 
 `origin` moves the pivot, not the object, so world stroke points stay where they were. `forge_stats` gives the bounds to aim at.
 
+## Tool args
+
+`forge_sculpt`
+- Stroke brushes run along `points` (world cm, near the surface): draw, clay, inflate, crease (strength = cm at the centre), smooth, flatten, pinch (strength 0-1), grab (drags along the stroke).
+- Whole-mesh brushes need no points: noise (strength cm, `scale` = feature size cm, `seed`), smooth_all (`iterations`, strength 0-1), inflate_all (strength cm).
+- `mirror="x"` sculpts both sides of the object's own X=0. `shape="Smile"` sculpts into that shape key instead of the base mesh.
+
+`forge_shape(action=...)`
+- `add`: an empty key to sculpt into with `forge_sculpt shape=key`.
+- `from_object`: key = the source object minus this one. Duplicate, reshape without adding vertices, then use it as `source`.
+- `delete`; `rename` (`new_name`).
+- Animate with `forge_anim` key rows `{shape, frame, value 0-1}`. A rig is needed to reach UEFN (`forge_rig template=single` is enough).
+
 ## The user in the dock
 
 The user sculpts the same mesh from the dock: Mode, then Sculpt, pick a brush and a target (Base mesh or a shape key), and drag. `[` and `]` resize the brush, "+ Key" adds a shape key, and Subdivide and Decimate step the resolution up or down. Each finished stroke is one undo step, like each of yours, and both of you can work on the same object in turns.

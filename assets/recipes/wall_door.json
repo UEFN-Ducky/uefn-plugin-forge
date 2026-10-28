@@ -1,0 +1,9 @@
+{"about": "Wall with a door and a window cut by booleans", "params": {"w": 512, "h": 384, "d": 20, "wall": "brick"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "WallMat", "preset": "$wall"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Wall", "params": {"w": "$w", "d": "$d", "h": "$h"}, "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "DoorCut", "params": {"w": 120, "d": "=d*3", "h": 250}, "pos": ["=-w*0.23", 0, -1]},
+  {"tool": "forge_add", "kind": "box", "object_name": "WindowCut", "params": {"w": 100, "d": "=d*3", "h": 90}, "pos": ["=w*0.25", 0, "=h*0.4"]},
+  {"tool": "forge_boolean", "a": "$1", "b": ["$2", "$3"], "op": "difference"},
+  {"tool": "forge_uv_project", "mode": "box"}
+ ]}

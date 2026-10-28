@@ -1,0 +1,14 @@
+{"about": "Stone well with two posts and a wooden roof", "params": {"radius": 80, "height": 90, "stone": "granite", "wood": "oak"},
+ "let": {"post": "=height+150"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "WellStone", "preset": "$stone"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "WellWood", "preset": "$wood"}},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Wall", "params": {"radius": "$radius", "height": "$height", "seg": 20}, "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Hole", "params": {"radius": "=radius*0.75", "height": "=height*2", "seg": 20}, "pos": [0, 0, "=height*0.2"]},
+  {"tool": "forge_boolean", "a": "$2", "b": "$3", "op": "difference"},
+  {"tool": "forge_uv_project", "mode": "box"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "PostL", "params": {"radius": 5, "height": "$post", "seg": 8}, "pos": ["=-radius*0.9", 0, "=height*0.9"], "material": "$1"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "PostR", "params": {"radius": 5, "height": "$post", "seg": 8}, "pos": ["=radius*0.9", 0, "=height*0.9"], "material": "$1"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Roof", "params": {"radius": "=radius*1.3", "height": 50, "seg": 4}, "pos": [0, 0, "=height+150"], "rot": [0, 0, 45], "material": "$1"},
+  {"tool": "forge_group", "ids": ["$4", "$6", "$7", "$8"], "object_name": "StoneWell"}
+ ]}

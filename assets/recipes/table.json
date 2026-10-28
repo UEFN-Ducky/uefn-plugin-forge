@@ -1,0 +1,11 @@
+{"about": "Table with four legs", "params": {"w": 160, "d": 90, "h": 75, "wood": "walnut"},
+ "let": {"x": "=w/2-6", "y": "=d/2-6", "leg": "=h-5"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "TableWood", "preset": "$wood"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Top", "params": {"w": "$w", "d": "$d", "h": 5}, "pos": [0, 0, "$leg"], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Leg1", "params": {"w": 6, "d": 6, "h": "$leg"}, "pos": ["$x", "$y", 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Leg2", "params": {"w": 6, "d": 6, "h": "$leg"}, "pos": ["=-x", "$y", 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Leg3", "params": {"w": 6, "d": 6, "h": "$leg"}, "pos": ["$x", "=-y", 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Leg4", "params": {"w": 6, "d": 6, "h": "$leg"}, "pos": ["=-x", "=-y", 0], "material": "$0"},
+  {"tool": "forge_group", "ids": ["$1", "$2", "$3", "$4", "$5"], "object_name": "Table"}
+ ]}

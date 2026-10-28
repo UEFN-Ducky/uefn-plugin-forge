@@ -146,18 +146,28 @@ def import_blend(path, name="", preview=False, target=None, scale=1.0):
     _validate_source(src)
     root = scenes_root()
     root.mkdir(parents=True, exist_ok=True)
+    try:
+        blender = _blender()
+    except ValueError:
+        blender = None  # no Blender install: the embedded engine's warm worker converts
     with tempfile.TemporaryDirectory(prefix="forge-import-") as temporary:
         output = Path(temporary) / "scene.json"
-        command = [str(_blender()), "--background", "--factory-startup", "--disable-autoexec"]
-        if src.suffix.lower() == ".blend":
-            command.append(str(src))
-        command += ["--python", str(_SCRIPT), "--", str(output), str(src)]
-        try:
-            proc = _convert(command)
-        except subprocess.TimeoutExpired as exc:
-            raise ValueError("Import timed out after 15 minutes; no scene was changed") from exc
-        if proc.returncode != 0 or not output.is_file():
-            raise ValueError((proc.stderr or proc.stdout or "Blender import failed")[-1000:])
+        if blender is None:
+            from .engine import client
+            client.call("import_file", {"output": str(output), "source": str(src), "script": str(_SCRIPT)}, timeout=900)
+            if not output.is_file():
+                raise ValueError("Blender engine import wrote no scene")
+        else:
+            command = [str(blender), "--background", "--factory-startup", "--disable-autoexec"]
+            if src.suffix.lower() == ".blend":
+                command.append(str(src))
+            command += ["--python", str(_SCRIPT), "--", str(output), str(src)]
+            try:
+                proc = _convert(command)
+            except subprocess.TimeoutExpired as exc:
+                raise ValueError("Import timed out after 15 minutes; no scene was changed") from exc
+            if proc.returncode != 0 or not output.is_file():
+                raise ValueError((proc.stderr or proc.stdout or "Blender import failed")[-1000:])
         data = json.loads(output.read_text(encoding="utf-8"))
         objects = sum(n.get("type") == "object" for n in data.get("nodes", []))
         if not objects or not data.get("prototypes"):

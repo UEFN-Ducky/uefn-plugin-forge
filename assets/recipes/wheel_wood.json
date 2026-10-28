@@ -1,0 +1,11 @@
+{"about": "Wooden cart wheel: iron rim, hub and four crossed spokes, axle along Y", "params": {"radius": 45, "wood": "oak", "iron": "worn_steel"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "WheelWood", "preset": "$wood"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "WheelIron", "preset": "$iron"}},
+  {"tool": "forge_add", "kind": "torus", "object_name": "Rim", "params": {"major": "$radius", "minor": 3, "seg": 24, "rings": 6}, "rot": [90, 0, 0], "pos": [0, 0, "=radius+3"], "material": "$1"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Hub", "params": {"radius": "=radius*0.14", "height": "=radius*0.3", "seg": 12}, "rot": [90, 0, 0], "pos": [0, "=-radius*0.15", "=radius+3"], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "SpokeV", "params": {"w": 4, "d": 4, "h": "=radius*2"}, "pos": [0, 0, 3], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "SpokeH", "params": {"w": "=radius*2", "d": 4, "h": 4}, "pos": [0, 0, "=radius+1"], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "SpokeD", "params": {"w": "=radius*2", "d": 4, "h": 4}, "pos": [0, 0, "=radius+1"], "rot": [0, 45, 0], "material": "$0"},
+  {"tool": "forge_group", "ids": ["$2", "$3", "$4", "$5", "$6"], "object_name": "Wheel"}
+ ]}

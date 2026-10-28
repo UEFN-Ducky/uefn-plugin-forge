@@ -47,6 +47,51 @@ def _to(src, src_out: str, prop) -> None:
     unreal.MaterialEditingLibrary.connect_material_property(src, src_out, prop)
 
 
+def _has_params(exprs, names) -> bool:
+    """True when every parameter name is on one of the material's expressions (an old master gets rebuilt)."""
+    found = set()
+    for node in exprs:
+        try:
+            found.add(str(node.get_editor_property("parameter_name")))
+        except Exception:
+            pass
+    return set(names) <= found
+
+
+def _sampler(node, kind: str) -> None:
+    """Texture parameter sampler type: normal = TC_Normalmap source, masks = linear ORM, color = sRGB."""
+    enum = getattr(unreal, "MaterialSamplerType", None)
+    value = getattr(enum, {"normal": "SAMPLERTYPE_NORMAL", "masks": "SAMPLERTYPE_MASKS"}.get(kind, "SAMPLERTYPE_COLOR"), None)
+    # The default texture must match the sampler type or the material fails to compile. Engine ships no linear
+    # default for masks, so ORM keeps the Color sampler (forge_set_texture_usage makes the texture itself linear).
+    if value is None or kind != "normal":
+        return
+    tex = unreal.EditorAssetLibrary.load_asset("/Engine/EngineMaterials/DefaultNormal")
+    if tex is None:
+        return  # keep the Color sampler; instance textures still import with the right compression
+    node.set_editor_property("texture", tex)
+    node.set_editor_property("sampler_type", value)
+
+
+def _ao(mat, orm, use_orm, y: int) -> None:
+    """Ambient occlusion = lerp(1, ORM.R, UseORM * AOStrength): the R channel of an ORM map."""
+    mask_r = _expr(mat, "ComponentMask", -500, y)
+    for channel, on in (("r", True), ("g", False), ("b", False), ("a", False)):
+        mask_r.set_editor_property(channel, on)
+    _connect(orm, "RGB", mask_r, "")
+    strength = _scalar(mat, "AOStrength", 1.0, -800, y + 140)
+    amount = _expr(mat, "Multiply", -350, y + 100)
+    _connect(use_orm, "", amount, "A")
+    _connect(strength, "", amount, "B")
+    one = _expr(mat, "Constant", -350, y - 80)
+    one.set_editor_property("r", 1.0)
+    mix = _expr(mat, "Lerp", -150, y)
+    _connect(one, "", mix, "A")
+    _connect(mask_r, "", mix, "B")
+    _connect(amount, "", mix, "Alpha")
+    _to(mix, "", unreal.MaterialProperty.MP_AMBIENT_OCCLUSION)
+
+
 def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> dict:
     """One cook-safe master. Instances set color, roughness, metal, and optional textures."""
     folder = pin_project_folder(folder, default_leaf="Materials")
@@ -59,7 +104,7 @@ def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> 
             break
     if existing is not None:
         exprs = list(unreal.MaterialEditingLibrary.get_material_expressions(existing) or [])
-        if len(exprs) >= 10:
+        if _has_params(exprs, ("NormalTex", "UseNormalTex", "ORMTex", "UseORM", "AOStrength")):
             return {"material_path": str(existing.get_path_name()), "created": False, "folder": folder}
         unreal.EditorAssetLibrary.delete_asset(existing.get_path_name().split(".")[0])
 
@@ -92,6 +137,7 @@ def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> 
     rough.set_editor_property("default_value", 0.5)
     orm = _expr(mat, "TextureSampleParameter2D", -800, 860)
     _name(orm, "ORMTex")
+    _sampler(orm, "masks")
     use_orm = _expr(mat, "ScalarParameter", -800, 1080)
     _name(use_orm, "UseORM")
     use_orm.set_editor_property("default_value", 0.0)
@@ -117,6 +163,7 @@ def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> 
     _connect(use_orm, "", lerp_r, "Alpha")
     _to(lerp_m, "", unreal.MaterialProperty.MP_METALLIC)
     _to(lerp_r, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    _ao(mat, orm, use_orm, 1700)
 
     emis = _expr(mat, "VectorParameter", -800, -220)
     _name(emis, "Emissive")
@@ -131,6 +178,7 @@ def forge_build_master(folder: str = "", asset_name: str = "M_Forge_Master") -> 
 
     normal_tex = _expr(mat, "TextureSampleParameter2D", -800, 1240)
     _name(normal_tex, "NormalTex")
+    _sampler(normal_tex, "normal")
     use_n = _expr(mat, "ScalarParameter", -800, 1460)
     _name(use_n, "UseNormalTex")
     use_n.set_editor_property("default_value", 0.0)
@@ -254,6 +302,135 @@ def forge_build_blend_master(folder: str = "", asset_name: str = "M_Forge_Blend"
     return {"material_path": str(mat.get_path_name()), "created": True, "folder": folder}
 
 
+def _fresh_material(folder: str, asset_name: str, marker: tuple):
+    """(material, None) to fill in, or (None, result) when an up-to-date one exists."""
+    folder = pin_project_folder(folder, default_leaf="Materials")
+    full = f"{folder.rstrip('/')}/{asset_name}"
+    existing = unreal.EditorAssetLibrary.load_asset(full)
+    if isinstance(existing, unreal.Material):
+        if _has_params(list(unreal.MaterialEditingLibrary.get_material_expressions(existing) or []), marker):
+            return None, {"material_path": str(existing.get_path_name()), "created": False, "folder": folder}
+        unreal.EditorAssetLibrary.delete_asset(full)
+    unreal.EditorAssetLibrary.make_directory(folder)
+    mat = unreal.AssetToolsHelpers.get_asset_tools().create_asset(asset_name, folder, unreal.Material, unreal.MaterialFactoryNew())
+    if mat is None:
+        raise RuntimeError(f"create_asset returned None for {full}")
+    unreal.MaterialEditingLibrary.delete_all_material_expressions(mat)
+    return mat, {"folder": folder}
+
+
+def _finish(mat, info: dict) -> dict:
+    layout = getattr(unreal.MaterialEditingLibrary, "layout_material_expressions", None)
+    if callable(layout):
+        layout(mat)
+    unreal.MaterialEditingLibrary.recompile_material(mat)
+    mat.modify(True)
+    unreal.EditorAssetLibrary.save_loaded_asset(mat, only_if_is_dirty=False)
+    return {"material_path": str(mat.get_path_name()), "created": True, **info}
+
+
+def _normal(mat, y: int) -> None:
+    """NormalTex / UseNormalTex -> Normal (flat when the switch is off)."""
+    tex = _expr(mat, "TextureSampleParameter2D", -800, y)
+    _name(tex, "NormalTex")
+    _sampler(tex, "normal")
+    use = _scalar(mat, "UseNormalTex", 0.0, -800, y + 220)
+    flat = _expr(mat, "Constant3Vector", -500, y)
+    flat.set_editor_property("constant", unreal.LinearColor(0, 0, 1, 1))
+    mix = _expr(mat, "Lerp", -250, y + 60)
+    _connect(flat, "", mix, "A")
+    _connect(tex, "RGB", mix, "B")
+    _connect(use, "", mix, "Alpha")
+    _to(mix, "", unreal.MaterialProperty.MP_NORMAL)
+
+
+def forge_build_hair(folder: str = "", asset_name: str = "M_Forge_Hair") -> dict:
+    """Hair cards: masked, two-sided. BaseColorTex.A is the strand mask; instances set tint, roughness, normal."""
+    mat, info = _fresh_material(folder, asset_name, ("BaseColor", "BaseColorTex", "NormalTex", "OpacityClip"))
+    if mat is None:
+        return info
+    mat.set_editor_property("blend_mode", unreal.BlendMode.BLEND_MASKED)
+    mat.set_editor_property("two_sided", True)
+    tint = _tinted(mat, "BaseColor", "BaseColorTex", "UseBaseColorTex", 0)
+    _sampler(_sampler_node(mat, "BaseColorTex"), "color")
+    _to(tint, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    tex = _sampler_node(mat, "BaseColorTex")
+    use = _sampler_node(mat, "UseBaseColorTex")
+    one = _expr(mat, "Constant", -1000, 520)
+    one.set_editor_property("r", 1.0)
+    mask = _expr(mat, "Lerp", -700, 520)
+    _connect(one, "", mask, "A")
+    _connect(tex, "A", mask, "B")
+    _connect(use, "", mask, "Alpha")
+    _to(mask, "", unreal.MaterialProperty.MP_OPACITY_MASK)
+    _to(_scalar(mat, "Roughness", 0.6, -700, 700), "", unreal.MaterialProperty.MP_ROUGHNESS)
+    _to(_scalar(mat, "Specular", 0.5, -700, 840), "", unreal.MaterialProperty.MP_SPECULAR)
+    clip = _scalar(mat, "OpacityClip", 0.33, -700, 980)  # marker; the cutoff itself is the material's clip value
+    mat.set_editor_property("opacity_mask_clip_value", 0.33)
+    del clip
+    _normal(mat, 1100)
+    return _finish(mat, info)
+
+
+def _sampler_node(mat, name: str):
+    """The parameter expression called name."""
+    for node in unreal.MaterialEditingLibrary.get_material_expressions(mat) or []:
+        try:
+            if str(node.get_editor_property("parameter_name")) == name:
+                return node
+        except Exception:
+            pass
+    raise RuntimeError(f"no parameter {name}")
+
+
+def forge_build_skin(folder: str = "", asset_name: str = "M_Forge_Skin", wrap: bool = False) -> dict:
+    """Skin: Subsurface shading with SubsurfaceColor; falls back to a Fresnel wrap glow when UEFN refuses it."""
+    mat, info = _fresh_material(folder, asset_name, ("BaseColor", "BaseColorTex", "NormalTex", "SubsurfaceColor"))
+    if mat is None:
+        return info
+    subsurface = False
+    if not wrap:
+        try:
+            mat.set_editor_property("shading_model", unreal.MaterialShadingModel.MSM_SUBSURFACE)
+            subsurface = True
+        except Exception:
+            subsurface = False
+    tint = _tinted(mat, "BaseColor", "BaseColorTex", "UseBaseColorTex", 0)
+    _to(tint, "", unreal.MaterialProperty.MP_BASE_COLOR)
+    sss = _expr(mat, "VectorParameter", -1400, 600)
+    _name(sss, "SubsurfaceColor")
+    sss.set_editor_property("default_value", unreal.LinearColor(0.8, 0.3, 0.2, 1))
+    if subsurface:
+        _to(sss, "", unreal.MaterialProperty.MP_SUBSURFACE_COLOR)
+    else:  # wrap: edge glow of the subsurface tint, a stand-in for light bleeding through thin skin
+        fresnel = _expr(mat, "Fresnel", -1000, 700)
+        strength = _scalar(mat, "WrapStrength", 0.25, -1000, 840)
+        glow = _expr(mat, "Multiply", -700, 720)
+        _connect(sss, "", glow, "A")
+        _connect(fresnel, "", glow, "B")
+        scaled = _expr(mat, "Multiply", -450, 760)
+        _connect(glow, "", scaled, "A")
+        _connect(strength, "", scaled, "B")
+        _to(scaled, "", unreal.MaterialProperty.MP_EMISSIVE_COLOR)
+    rough = _scalar(mat, "Roughness", 0.55, -700, 1000)
+    orm = _expr(mat, "TextureSampleParameter2D", -800, 1140)
+    _name(orm, "ORMTex")
+    _sampler(orm, "masks")
+    use_orm = _scalar(mat, "UseORM", 0.0, -800, 1360)
+    mask_g = _expr(mat, "ComponentMask", -500, 1140)
+    for channel, on in (("r", False), ("g", True), ("b", False), ("a", False)):
+        mask_g.set_editor_property(channel, on)
+    _connect(orm, "RGB", mask_g, "")
+    mix = _expr(mat, "Lerp", -250, 1100)
+    _connect(rough, "", mix, "A")
+    _connect(mask_g, "", mix, "B")
+    _connect(use_orm, "", mix, "Alpha")
+    _to(mix, "", unreal.MaterialProperty.MP_ROUGHNESS)
+    _ao(mat, orm, use_orm, 1500)
+    _normal(mat, 1740)
+    return _finish(mat, dict(info, subsurface=subsurface))
+
+
 def forge_set_mesh_materials(mesh_path: str, materials: list[str]) -> dict:
     """Replace imported stub materials on a static or skeletal mesh, slot order matches the GLB."""
     mesh = _load(mesh_path)
@@ -274,6 +451,28 @@ def forge_set_mesh_materials(mesh_path: str, materials: list[str]) -> dict:
     mesh.set_editor_property(prop, slots)
     unreal.EditorAssetLibrary.save_loaded_asset(mesh, only_if_is_dirty=False)
     return {"mesh_path": mesh.get_path_name(), "slots": len(slots), "applied": applied}
+
+
+def forge_set_mesh_options(mesh_path: str, nanite: bool = False, lod_count: int = 0, ratios: list | None = None) -> dict:
+    """Static mesh: Nanite on, and/or auto-reduced LODs (lod_count = total LODs incl. LOD0; ratios = triangle share each)."""
+    mesh = _load(mesh_path)
+    if not isinstance(mesh, unreal.StaticMesh):
+        raise ValueError(f"Not a StaticMesh: {mesh_path}")
+    out: dict[str, Any] = {"mesh_path": mesh.get_path_name(), "nanite": False, "lods": 0}
+    if nanite:
+        settings = mesh.get_editor_property("nanite_settings")
+        settings.set_editor_property("enabled", True)
+        mesh.set_editor_property("nanite_settings", settings)
+        out["nanite"] = True
+    if lod_count > 0 and not nanite:  # Nanite meshes need no LOD chain
+        sub = unreal.get_editor_subsystem(unreal.StaticMeshEditorSubsystem)
+        options = unreal.EditorScriptingMeshReductionOptions(auto_compute_lod_screen_size=True)
+        steps = [max(0.02, min(1.0, float(r))) for r in (ratios or [])] or [0.5 ** i for i in range(lod_count)]
+        options.reduction_settings = [
+            unreal.EditorScriptingMeshReductionSettings(percent_triangles=r, screen_size=r) for r in steps]
+        out["lods"] = int(sub.set_lods(mesh, options))  # total LODs including LOD0
+    unreal.EditorAssetLibrary.save_loaded_asset(mesh, only_if_is_dirty=False)
+    return out
 
 
 def forge_import_skeletal(source_file: str, destination_path: str = "") -> dict:
@@ -334,6 +533,9 @@ register("forge_set_mesh_materials")(forge_set_mesh_materials)
 register("forge_set_texture_usage")(forge_set_texture_usage)
 register("forge_import_skeletal")(forge_import_skeletal)
 register("forge_build_blend_master")(forge_build_blend_master)
+register("forge_build_hair")(forge_build_hair)
+register("forge_set_mesh_options")(forge_set_mesh_options)
+register("forge_build_skin")(forge_build_skin)
 
 try:  # older hosts have no plugin heavy-command opt-in
     from listener.tick import register_heavy

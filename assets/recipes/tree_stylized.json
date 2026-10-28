@@ -1,0 +1,10 @@
+{"about": "Stylized low-poly tree: trunk and two cone crowns", "params": {"height": 400, "bark": "walnut", "leaf": [0.2, 0.5, 0.2]},
+ "let": {"trunk": "=height*0.65", "r": "=height*0.4"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Bark", "preset": "$bark"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Leaves", "preset": "cotton", "overrides": {"color": "$leaf", "roughness": 0.8}}},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Trunk", "params": {"radius": "=height*0.045", "height": "$trunk", "seg": 8}, "material": "$0"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Crown1", "params": {"radius": "$r", "height": "=height*0.55", "seg": 8}, "pos": [0, 0, "=height*0.3"], "material": "$1"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Crown2", "params": {"radius": "=r*0.72", "height": "=height*0.47", "seg": 8}, "pos": [0, 0, "=height*0.55"], "material": "$1"},
+  {"tool": "forge_group", "ids": ["$2", "$3", "$4"], "object_name": "Tree"}
+ ]}

@@ -1,0 +1,16 @@
+{"about": "Boxy robot, rigged on the biped template with a walk cycle", "params": {"height": 180, "body": "polished_steel", "glow": "neon_blue"},
+ "let": {"s": "=height/180"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "RobotBody", "preset": "$body"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "RobotGlow", "preset": "$glow"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Torso", "params": {"w": "=50*s", "d": "=30*s", "h": "=65*s"}, "pos": [0, 0, "=90*s"], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Head", "params": {"w": "=26*s", "d": "=24*s", "h": "=22*s"}, "pos": [0, 0, "=158*s"], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "ArmL", "params": {"radius": "=6*s", "height": "=62*s", "seg": 10}, "pos": ["=58*s", 0, "=146*s"], "rot": [0, 90, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "ArmR", "params": {"radius": "=6*s", "height": "=62*s", "seg": 10}, "pos": ["=-58*s", 0, "=146*s"], "rot": [0, -90, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegL", "params": {"radius": "=9*s", "height": "=90*s", "seg": 10}, "pos": ["=14*s", 0, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegR", "params": {"radius": "=9*s", "height": "=90*s", "seg": 10}, "pos": ["=-14*s", 0, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Visor", "params": {"w": "=20*s", "d": "=2*s", "h": "=6*s"}, "pos": [0, "=-12*s", "=166*s"], "material": "$1"},
+  {"tool": "forge_rig", "action": "template", "template": "biped", "ids": ["$2", "$3", "$4", "$5", "$6", "$7", "$8"]},
+  {"tool": "forge_rig", "action": "bind", "ids": ["$2", "$3", "$4", "$5", "$6", "$7", "$8"], "auto": true},
+  {"tool": "forge_anim", "action": "generate", "kind": "walk"}
+ ]}

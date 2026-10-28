@@ -144,6 +144,15 @@ Make cutters deeper than the wall and start them just below the floor (`z = -1`)
 
 Low segment counts plus non-uniform scale give a faceted, stylized read at almost no triangle cost.
 
+## Tool args
+
+- `forge_add` kinds: box, rounded_box, plane, grid, sphere, cylinder, cone, torus, capsule, wedge, stairs, arch, lathe, extrude. `count` makes instances of one shared prototype. Centimetres; `pos` is the base centre; `rot` is degrees; `material` is a name or id.
+- `forge_mesh_op(op=...)`: extrude, inset, bevel, loopcut, subdivide (`smooth=true` rounds the whole object with Catmull-Clark, `levels` 1-4, for sculpting), decimate (`ratio` of vertices to keep, for budget), fill, merge, dissolve, delete, normals, shade, origin.
+- `forge_join`: combines in world space; `weld=true` merges vertices closer than 0.05 cm. For one solid shell use `forge_boolean` union.
+- `forge_boolean`: difference|union|intersect on closed meshes, concave included; `b` may be a list.
+- `forge_select(query="top")` selects upward faces so the next edit hits them. `forge_modifier`: mirror or array; action add|apply|clear. `forge_layer`: collision layers export as UCX.
+- `forge_batch`: each step is `{"tool": "forge_add", ...args without name}`; `$0` is step 0's id, `$0.ids` its id list; the first failing step undoes the whole batch.
+
 ## Merging pieces
 
 | Goal | Use |

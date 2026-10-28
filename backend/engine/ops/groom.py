@@ -1,0 +1,364 @@
+"""Hair strands, hair cards and fur shells. Pure stdlib maths (testable without Blender);
+bpy is only touched, lazily, to mirror the strands as a Blender hair-curves object.
+
+Everything is Forge centimetres, Z-up, -Y front, world space. The host (hq/groom.py) resolves the
+region into world triangles and the object's mesh into plain lists, so ops here are JSON in, JSON out.
+"""
+import bisect
+import math
+import random
+import struct
+import zlib
+from pathlib import Path
+
+MAX_STRANDS = 150000
+STYLES = {
+    "short": dict(density=55, length=6, clump=0.2, curl=0.0, frizz=0.05, droop=0.2, points=6, region="top"),
+    "long": dict(density=55, length=35, clump=0.3, curl=0.1, frizz=0.1, droop=1.0, points=10, region="top"),
+    "ponytail": dict(density=55, length=40, clump=0.5, curl=0.05, frizz=0.05, droop=1.0, points=10, region="top", gather=True),
+    "afro": dict(density=60, length=14, clump=0.1, curl=1.0, frizz=0.4, droop=0.0, points=8, region="top"),
+    "fur": dict(density=100, length=3, clump=0.0, curl=0.0, frizz=0.1, droop=0.3, points=4, region="all"),
+    "beard": dict(density=50, length=8, clump=0.3, curl=0.3, frizz=0.15, droop=0.7, points=6, region="jaw"),
+}
+COLORS = {"black": (0.03, 0.025, 0.02), "brown": (0.22, 0.12, 0.06), "auburn": (0.35, 0.13, 0.07),
+          "blonde": (0.8, 0.6, 0.28), "red": (0.55, 0.12, 0.05), "white": (0.9, 0.9, 0.88),
+          "gray": (0.5, 0.5, 0.5), "blue": (0.1, 0.25, 0.8), "pink": (0.9, 0.35, 0.6)}
+
+
+def rgb(color):
+    if isinstance(color, (list, tuple)) and len(color) >= 3:
+        return tuple(float(c) for c in color[:3])
+    name = str(color or "brown").lower()
+    if name not in COLORS:
+        import difflib
+        close = difflib.get_close_matches(name, COLORS, n=1)
+        raise ValueError("No hair color %r.%s Colors: %s, or [r,g,b]" % (name, " Did you mean %r?" % close[0] if close else "", ", ".join(COLORS)))
+    return COLORS[name]
+
+
+def style_of(p):
+    name = str(p.get("style") or "short").lower()
+    if name not in STYLES:
+        import difflib
+        close = difflib.get_close_matches(name, STYLES, n=1)
+        raise ValueError("No hair style %r.%s Styles: %s" % (name, " Did you mean %r?" % close[0] if close else "", ", ".join(STYLES)))
+    st = dict(STYLES[name])
+    for key in ("density", "length", "clump", "curl", "frizz"):
+        if p.get(key) is not None:
+            st[key] = float(p[key])
+    st["name"] = name
+    return st
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0])
+
+
+def _norm(v):
+    n = math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) or 1.0
+    return (v[0] / n, v[1] / n, v[2] / n)
+
+
+def _add(a, b, s=1.0):
+    return (a[0] + b[0] * s, a[1] + b[1] * s, a[2] + b[2] * s)
+
+
+def region_area(tris):
+    return sum(0.5 * math.sqrt(sum(c * c for c in _cross(_sub(t[1], t[0]), _sub(t[2], t[0])))) for t in tris)
+
+
+def sample_roots(tris, count, rng):
+    """count points spread over the triangles by area: [(point, outward normal)]."""
+    cum, total, normals = [], 0.0, []
+    for t in tris:
+        c = _cross(_sub(t[1], t[0]), _sub(t[2], t[0]))
+        area = 0.5 * math.sqrt(c[0] ** 2 + c[1] ** 2 + c[2] ** 2)
+        total += area
+        cum.append(total)
+        normals.append(_norm(c))
+    out = []
+    for _ in range(count):
+        k = min(bisect.bisect_left(cum, rng.random() * total), len(tris) - 1)
+        a, b, c = tris[k]
+        u, v = rng.random(), rng.random()
+        if u + v > 1.0:
+            u, v = 1.0 - u, 1.0 - v
+        out.append(((a[0] + (b[0] - a[0]) * u + (c[0] - a[0]) * v, a[1] + (b[1] - a[1]) * u + (c[1] - a[1]) * v,
+                     a[2] + (b[2] - a[2]) * u + (c[2] - a[2]) * v), normals[k]))
+    return out
+
+
+def _walk(root, n, length, st, rng, tie):
+    points, count = st["points"], st["points"]
+    pts = [root]
+    if tie:
+        lead = max(2, count // 3)
+        for k in range(1, lead + 1):
+            s = k / lead
+            p = _add((root[0] + (tie[0] - root[0]) * s, root[1] + (tie[1] - root[1]) * s, root[2] + (tie[2] - root[2]) * s), n, math.sin(math.pi * s) * 2.0)
+            pts.append(p)
+        rest = count - 1 - lead
+        step = length / max(1, rest)
+        off = ((rng.random() - 0.5) * 1.6, (rng.random() - 0.5) * 1.6)
+        for k in range(1, rest + 1):
+            s = k / max(1, rest)
+            pts.append((tie[0] + off[0] * s, tie[1] + off[1] * s, tie[2] - step * k))
+        return pts
+    d, step = n, length / (points - 1)
+    for k in range(1, points):
+        t = k / (points - 1)
+        d = _norm((d[0], d[1], d[2] - st["droop"] * 0.35 * (0.3 + t)))
+        pts.append(_add(pts[-1], d, step))
+    return pts
+
+
+def build_strands(p):
+    """List of strands (each a list of points, root first) for p = {tris, style, seed, density, ...}."""
+    st = style_of(p)
+    tris = [[tuple(v) for v in t] for t in p["tris"]]
+    if not tris:
+        raise ValueError("Region has no triangles. Regions: all, top, jaw, back, or face indices")
+    rng = random.Random(int(p.get("seed", 1)))
+    count = int(round(region_area(tris) * st["density"]))
+    if count > MAX_STRANDS:
+        count = MAX_STRANDS
+    roots = sample_roots(tris, count, rng)
+    tie = None
+    if st.get("gather") and roots:
+        xs, ys, zs = [r[0][0] for r in roots], [r[0][1] for r in roots], [r[0][2] for r in roots]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        radius = max(max(xs) - min(xs), max(ys) - min(ys)) / 2
+        tie = (cx, cy + radius, max(zs) - 0.15 * (max(zs) - min(zs)))
+    strands = []
+    for root, n in roots:
+        length = st["length"] * (0.85 + 0.3 * rng.random())
+        strands.append(_walk(root, n, length, st, rng, tie))
+    last = st["points"] - 1
+    if st["clump"] > 0 and strands:  # pull tips toward the mean strand of a 1.5 cm cell on the region
+        cells = {}
+        for s in strands:
+            cells.setdefault((int(s[0][0] // 1.5), int(s[0][1] // 1.5), int(s[0][2] // 1.5)), []).append(s)
+        for group in cells.values():
+            mean = [tuple(sum(s[k][i] for s in group) / len(group) for i in range(3)) for k in range(last + 1)]
+            for s in group:
+                for k in range(1, last + 1):
+                    w = st["clump"] * k / last
+                    s[k] = _add(s[k], _sub(mean[k], s[k]), w)
+    for s in strands:
+        phase = rng.random() * 6.283
+        for k in range(1, last + 1):
+            t = k / last
+            if st["curl"] > 0:
+                tan = _norm(_sub(s[min(k + 1, last)], s[k - 1]))
+                u = _norm(_cross(tan, (0.0, 0.0, 1.0))) if abs(tan[2]) < 0.99 else (1.0, 0.0, 0.0)
+                v = _cross(tan, u)
+                r, a = st["curl"] * st["length"] * 0.08 * t, phase + k * 1.9
+                s[k] = _add(_add(s[k], u, r * math.cos(a)), v, r * math.sin(a))
+            if st["frizz"] > 0:
+                f = st["frizz"] * st["length"] * 0.03 * t
+                s[k] = (s[k][0] + (rng.random() - 0.5) * f, s[k][1] + (rng.random() - 0.5) * f, s[k][2] + (rng.random() - 0.5) * f)
+    return strands
+
+
+def _blender_curves(strands, name):
+    """Mirror the strands as a Blender hair-curves object; False when bpy is not available."""
+    try:
+        import bpy
+        curves = bpy.data.hair_curves.new(name)
+        curves.add_curves([len(s) for s in strands])
+        curves.attributes["position"].data.foreach_set("vector", [c for s in strands for pt in s for c in (x * 0.01 for x in pt)])
+        obj = bpy.data.objects.new(name, curves)
+        bpy.context.scene.collection.objects.link(obj)
+        obj["forge_hair"] = True  # not a mesh: the mesh bridge ignores it
+        return True
+    except Exception:
+        return False
+
+
+def op_hair(p):
+    strands = build_strands(p)
+    st = style_of(p)
+    mirrored = _blender_curves(strands, str(p.get("name") or "Hair")) if p.get("curves", True) else False
+    return {"count": len(strands), "points": sum(len(s) for s in strands), "style": st["name"],
+            "area": round(region_area(p["tris"]), 2), "density": st["density"], "blender_curves": mirrored,
+            "capped": len(strands) >= MAX_STRANDS}
+
+
+# ---- cards ------------------------------------------------------------------
+
+
+def atlas_size(value):
+    text = str(value if value is not None else "1K").upper()
+    size = int(text[:-1]) * 1024 if text.endswith("K") else int(text)
+    return max(128, min(4096, size))
+
+
+def _png(path, w, h, rows, channels):
+    raw = b"".join(b"\x00" + bytes(r) for r in rows)
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+    Path(path).write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6 if channels == 4 else 2, 0, 0, 0))
+                           + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
+
+
+def bake_atlas(folder, size, color, variants, seed=1, stem="hair"):
+    """color+alpha atlas (RGBA) and data atlas (R root-tip, G depth, B strand id). Returns (cell grid, color file, data file)."""
+    rng = random.Random(seed)
+    grid = max(1, math.ceil(math.sqrt(variants)))
+    cs = size // grid
+    base = rgb(color)
+    col_rows = [bytearray(size * 4) for _ in range(size)]
+    dat_rows = [bytearray(size * 3) for _ in range(size)]
+    for cell in range(grid * grid):
+        ox, oy = (cell % grid) * cs, (cell // grid) * cs
+        count = max(4, cs // 5)
+        hw0 = max(1.5, cs / count * 0.9)
+        strands = [(rng.random() * cs, rng.random() * 6.283, rng.random()) for _ in range(count)]
+        for x0, phase, ident in sorted(strands, key=lambda s: s[2]):
+            for y in range(cs):
+                v = y / max(1, cs - 1)
+                xc = x0 + cs * 0.04 * math.sin(v * 6 + phase)
+                hw = hw0 * (1 - 0.75 * v)
+                col, dat = col_rows[oy + y], dat_rows[oy + y]
+                for x in range(max(0, int(xc - hw)), min(cs, int(xc + hw) + 1)):
+                    d = abs(x - xc) / hw
+                    if d > 1:
+                        continue
+                    alpha = 255 if d < 0.85 else int((1 - d) / 0.15 * 255)
+                    i = (ox + x) * 4
+                    if alpha < col[i + 3]:
+                        continue
+                    shade = (0.55 + 0.45 * v) * (0.9 + 0.2 * ident) * (1 - 0.25 * d)
+                    col[i:i + 4] = bytes([min(255, int(base[0] * shade * 255)), min(255, int(base[1] * shade * 255)),
+                                          min(255, int(base[2] * shade * 255)), alpha])
+                    j = (ox + x) * 3
+                    dat[j:j + 3] = bytes([int(255 * v), int(255 * (1 - d)), int(255 * ident)])
+    Path(folder).mkdir(parents=True, exist_ok=True)
+    _png(Path(folder) / (stem + "_color.png"), size, size, col_rows, 4)
+    _png(Path(folder) / (stem + "_data.png"), size, size, dat_rows, 3)
+    return grid, stem + "_color.png", stem + "_data.png"
+
+
+def _resample(pts, count):
+    lengths = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        lengths.append(lengths[-1] + math.dist(a, b))
+    total = lengths[-1] or 1.0
+    out, j = [], 0
+    for k in range(count):
+        s = total * k / (count - 1)
+        while j < len(pts) - 2 and lengths[j + 1] < s:
+            j += 1
+        span = (lengths[j + 1] - lengths[j]) or 1.0
+        t = min(1.0, max(0.0, (s - lengths[j]) / span))
+        out.append(tuple(pts[j][i] + (pts[j + 1][i] - pts[j][i]) * t for i in range(3)))
+    return out
+
+
+def op_hair_cards(p):
+    """Cluster strands, build one strip per cluster along its mean strand, bake the atlas."""
+    strands = build_strands(p)
+    cards = max(1, min(int(p.get("cards") or 120), len(strands)))
+    budget = int(p.get("budget") or 2800)
+    segs = max(1, min(16, budget // (cards * 2)))
+    size = atlas_size(p.get("atlas"))
+    cx = sum(s[0][0] for s in strands) / len(strands)
+    cy = sum(s[0][1] for s in strands) / len(strands)
+    order = sorted(strands, key=lambda s: math.atan2(s[0][1] - cy, s[0][0] - cx))
+    groups = [[] for _ in range(cards)]
+    for i, s in enumerate(order):
+        groups[i * cards // len(order)].append(s)
+    variants = min(cards, 16)
+    grid, color_file, data_file = bake_atlas(p["folder"], size, p.get("color"), variants, int(p.get("seed", 1)), str(p.get("stem") or "hair"))
+    cs = 1.0 / grid
+    verts, faces, uvs = [], [], []
+    for ci, group in enumerate(groups):
+        n = len(group[0])
+        mean = [tuple(sum(s[k][i] for s in group) / len(group) for i in range(3)) for k in range(n)]
+        line = _resample(mean, segs + 1)
+        xs, ys, zs = zip(*[s[0] for s in group])
+        width = min(8.0, max(1.2, math.sqrt((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2 + (max(zs) - min(zs)) ** 2)))
+        out = _norm((mean[0][0] - cx, mean[0][1] - cy, 0.0))
+        cell = ci % variants
+        u0, u1 = (cell % grid) * cs + 0.01 * cs, (cell % grid + 1) * cs - 0.01 * cs
+        top = (cell // grid) * cs
+        base = len(verts)
+        for j, pt in enumerate(line):
+            t = j / segs
+            tan = _norm(_sub(line[min(j + 1, segs)], line[max(j - 1, 0)]))
+            side = _cross(tan, out)
+            side = _norm(side) if sum(c * c for c in side) > 1e-6 else _norm(_cross(tan, (1.0, 0.0, 0.0)))
+            half = width * (1 - 0.65 * t ** 1.2) / 2
+            verts.append([round(pt[i] - side[i] * half, 3) for i in range(3)])
+            verts.append([round(pt[i] + side[i] * half, 3) for i in range(3)])
+        for j in range(segs):
+            a, b, c, d = base + 2 * j, base + 2 * j + 1, base + 2 * j + 2, base + 2 * j + 3
+            v0, v1 = 1 - (top + j / segs * cs), 1 - (top + (j + 1) / segs * cs)
+            faces += [[a, c, d], [a, d, b]]
+            uvs += [[[u0, v0], [u0, v1], [u1, v1]], [[u0, v0], [u1, v1], [u1, v0]]]
+    return {"verts": verts, "faces": faces, "uvs": uvs, "tris": len(faces), "cards": cards, "segs": segs, "atlas": size,
+            "color_file": color_file, "data_file": data_file, "over_budget": len(faces) > budget}
+
+
+# ---- fur shells -------------------------------------------------------------
+
+
+def _noise_png(path, size, color, seed):
+    rng = random.Random(seed)
+    grid = [[rng.random() for _ in range(size)] for _ in range(size)]
+    for _ in range(2):  # two wrapped box blurs give soft clumps that still tile
+        grid = [[(grid[y][x] + grid[y][(x + 1) % size] + grid[(y + 1) % size][x] + grid[y][x - 1] + grid[y - 1][x]) / 5
+                 for x in range(size)] for y in range(size)]
+    lo = min(min(r) for r in grid)
+    hi = max(max(r) for r in grid) or 1.0
+    base = [int(c * 255) for c in rgb(color)]
+    rows = [b"".join(bytes(base + [int(255 * (v - lo) / ((hi - lo) or 1.0))]) for v in row) for row in grid]
+    _png(path, size, size, rows, 4)
+
+
+def _vertex_normals(verts, faces):
+    acc = [[0.0, 0.0, 0.0] for _ in verts]
+    for f in faces:
+        n = [0.0, 0.0, 0.0]
+        for i in range(len(f)):  # Newell
+            a, b = verts[f[i]], verts[f[(i + 1) % len(f)]]
+            n[0] += (a[1] - b[1]) * (a[2] + b[2])
+            n[1] += (a[2] - b[2]) * (a[0] + b[0])
+            n[2] += (a[0] - b[0]) * (a[1] + b[1])
+        for i in f:
+            for k in range(3):
+                acc[i][k] += n[k]
+    return [_norm(a) for a in acc]
+
+
+def op_fur_shells(p):
+    """layers offset copies of the mesh along vertex normals; shell k gets material index k (1-based)."""
+    verts, faces = p["verts"], p["faces"]
+    layers = max(1, min(32, int(p.get("layers") or 8)))
+    length = float(p.get("length") or 2.0)
+    normals = _vertex_normals(verts, faces)
+    uvs = p.get("uvs")
+    if not uvs:
+        lo = [min(v[i] for v in verts) for i in range(3)]
+        hi = [max(v[i] for v in verts) for i in range(3)]
+        span = max(hi[0] - lo[0], hi[1] - lo[1]) or 1.0
+        uvs = [[[(verts[i][0] - lo[0]) / span * 4, (verts[i][1] - lo[1]) / span * 4] for i in f] for f in faces]
+    out_verts, out_faces, out_uvs, shell = [], [], [], []
+    for k in range(1, layers + 1):
+        base = len(out_verts)
+        off = length * k / layers
+        out_verts += [[round(v[i] + n[i] * off, 3) for i in range(3)] for v, n in zip(verts, normals)]
+        out_faces += [[base + i for i in f] for f in faces]
+        out_uvs += uvs
+        shell += [k] * len(faces)
+    folder = Path(p["folder"])
+    folder.mkdir(parents=True, exist_ok=True)
+    _noise_png(folder / "fur_noise.png", 64, p.get("color"), int(p.get("seed", 1)))
+    return {"verts": out_verts, "faces": out_faces, "uvs": out_uvs, "base_uvs": uvs, "shell": shell, "layers": layers,
+            "noise_file": "fur_noise.png"}

@@ -1,0 +1,9 @@
+{"about": "Wooden barrel with two iron hoops", "params": {"radius": 30, "height": 90, "wood": "oak", "iron": "rusty_iron"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Staves", "preset": "$wood"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Hoops", "preset": "$iron"}},
+  {"tool": "forge_add", "kind": "lathe", "object_name": "Staves", "params": {"profile": [[0, 0], ["=radius*0.9", 0], ["=radius*1.03", "=height*0.22"], ["=radius*1.07", "=height*0.5"], ["=radius*1.03", "=height*0.78"], ["=radius*0.9", "=height"], [0, "=height"]], "seg": 16}, "material": "$0"},
+  {"tool": "forge_add", "kind": "torus", "object_name": "HoopLow", "params": {"major": "=radius*1.02", "minor": 1.5, "seg": 24, "rings": 6}, "pos": [0, 0, "=height*0.18"], "material": "$1"},
+  {"tool": "forge_add", "kind": "torus", "object_name": "HoopHigh", "params": {"major": "=radius*1.04", "minor": 1.5, "seg": 24, "rings": 6}, "pos": [0, 0, "=height*0.74"], "material": "$1"},
+  {"tool": "forge_group", "ids": ["$2", "$3", "$4"], "object_name": "Barrel"}
+ ]}

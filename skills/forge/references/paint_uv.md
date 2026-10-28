@@ -85,6 +85,21 @@ The masks live on the vertices, so they need vertices where an edge should fall:
 ]
 ```
 
+## Tool args
+
+`forge_paint`
+- `mode=blend`: fills channel `r|g|b` (the blend material's layer 1|2|3) with a mask: all, up (`threshold`, `softness`), down, facing (`direction`), height (local z, `low`→`high` cm), noise (`scale` cm, `seed`, `contrast`), sphere (`center` world cm, `radius`), faces, cavity.
+- `combine`: set|add|subtract|max|min|multiply.
+- `mode=texture` paints the base-colour texture through UVs: `faces=[...]` fills faces; `points` + `radius` paints soft dabs; `fill="all"` starts a solid texture of `size` px; `grain` adds noise.
+- Colours are [r,g,b] 0-1 or "#rrggbb". Unwrap with `mode=smart` before texture painting.
+
+`forge_material_set`
+- `base_color` is 0-1 RGB. `layers=[matR, matG, matB]` makes a blend material: `forge_paint mode=blend` reveals those materials over it, and Send builds it on `M_Forge_Blend`.
+
+`forge_uv_project`
+- `mode=smart` unwraps properly: charts by `angle`, packed into 0-1 with even texel density and `margin`. Use it before texture painting or baking.
+- `box`, `planar`, `cylinder` project tiling UVs (`density` = UV units per cm).
+
 ## In UEFN
 
 - Painted textures import as `T_` textures on the material's `MI_`, like generated ones.

@@ -1,6 +1,6 @@
 # Ducky Forge
 
-A modeler, sculptor, painter, rigger, and animator inside UEFN-Ducky. Primitives, extrude, bevel, solid booleans, groups, smooth subdivision and sculpt brushes, shape keys, smart UV unwrap, texture painting, blend materials with painted masks, AI textures, biped and chain skeletons with painted weights and IK, generated and hand-keyed clips, and a Send that lands SM_ and SK_ meshes, AS_ clips, morph targets, and MI_ materials in UEFN, placed in the level if you ask. No Blender.
+A modeler, sculptor, painter, rigger, and animator inside UEFN-Ducky. Primitives, extrude, bevel, solid booleans, groups, smooth subdivision and sculpt brushes, shape keys, smart UV unwrap, texture painting, blend materials with painted masks, AI textures, biped and chain skeletons with painted weights and IK, generated and hand-keyed clips, and a Send that lands SM_ and SK_ meshes, AS_ clips, morph targets, and MI_ materials in UEFN, placed in the level if you ask. Blender engine built in, downloaded on first use.
 
 In a live group, teammates and AI duckies fly the viewport with their names; their drags and brush strokes show while they happen, and Alt-click pings a spot. The Shots tab keeps cameras and keyed camera moves and renders them frame by frame to MP4 (`forge_camera`, `forge_view`, `forge_shot`, `forge_shot_render` for agents).
 
@@ -16,3 +16,7 @@ py -3 scripts/build_zip.py
 ```
 
 `scripts/release.py --publish` uploads the compiled, signed build to the Store (`--plain` ships readable source, escape hatch only); only run it when a release is approved. Blender reads `assets/blend_export_script.txt` by path, and `listener/` stays readable for UEFN's Python.
+
+## License
+
+GPL-3.0-or-later (`LICENSE`). The Store build is compiled; its Corresponding Source is this repository at the release tag, offered free at https://github.com/UEFN-Ducky/uefn-plugin-forge. Blender (`bpy`) and its source: see `THIRD_PARTY_NOTICES.md`.

@@ -1,6 +1,12 @@
 # Third-party notices
 
-The viewer bundles Three.js. Blender is an external user-installed application, not included in this package. esbuild is a development build tool and is not distributed with the plugin.
+Ducky Forge is licensed under the GNU General Public License, version 3 or (at your option) any later version (GPL-3.0-or-later); see `LICENSE`. The viewer bundles Three.js. esbuild is a development build tool and is not distributed with the plugin.
+
+## Blender (bpy)
+
+Forge's HQ engine runs Blender as the `bpy` Python module. It is not inside this package: on first use Forge downloads `bpy` 5.2.3 from PyPI (https://pypi.org/project/bpy/) and the CPython 3.13 embeddable runtime from python.org into `%LOCALAPPDATA%/UEFN-Ducky/forge-engine/`.
+
+Blender is Copyright © Blender Foundation and contributors, licensed GPL-2.0-or-later (distributed here under GPL-3.0-or-later). Source: https://projects.blender.org/blender/blender (tag `v5.2.3`), mirror https://github.com/blender/blender. Python is under the PSF License Agreement (https://docs.python.org/3/license.html).
 
 ## Three.js
 

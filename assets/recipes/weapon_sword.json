@@ -1,0 +1,11 @@
+{"about": "Sword, tip up, blade length in cm", "params": {"length": 82, "steel": "polished_steel", "grip": "leather"},
+ "let": {"s": "=length/82"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Steel", "preset": "$steel"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Grip", "preset": "$grip"}},
+  {"tool": "forge_add", "kind": "extrude", "object_name": "Blade", "params": {"points": [["=-4*s", 0], ["=4*s", 0], ["=4*s", "=70*s"], [0, "=82*s"], ["=-4*s", "=70*s"]], "depth": 1.5}, "rot": [90, 0, 0], "pos": [0, 0.75, "=20*s"], "material": "$0"},
+  {"tool": "forge_add", "kind": "box", "object_name": "Guard", "params": {"w": "=22*s", "d": "=4*s", "h": "=3*s"}, "pos": [0, 0, "=17*s"], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "Grip", "params": {"radius": "=1.6*s", "height": "=16*s", "seg": 10}, "pos": [0, 0, "=1*s"], "material": "$1"},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Pommel", "params": {"radius": "=2.5*s", "seg": 10, "rings": 6}, "pos": [0, 0, "=-4*s"], "material": "$0"},
+  {"tool": "forge_group", "ids": ["$2", "$3", "$4", "$5"], "object_name": "Sword"}
+ ]}

@@ -1,0 +1,10 @@
+{"about": "Three glowing crystals leaning out of a rock base", "params": {"size": 120, "glow": "neon_blue", "stone": "granite"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "CrystalGlow", "preset": "$glow"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "CrystalRock", "preset": "$stone"}},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Base", "params": {"radius": "=size*0.3", "seg": 8, "rings": 5}, "scale": [1.2, 1, 0.4], "material": "$1"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Crystal1", "params": {"radius": "=size*0.1", "height": "$size", "seg": 6}, "pos": [0, 0, 0], "rot": [8, 0, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Crystal2", "params": {"radius": "=size*0.08", "height": "=size*0.75", "seg": 6}, "pos": ["=size*0.15", "=size*0.05", 0], "rot": [-12, 20, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cone", "object_name": "Crystal3", "params": {"radius": "=size*0.07", "height": "=size*0.55", "seg": 6}, "pos": ["=-size*0.14", "=-size*0.04", 0], "rot": [10, -25, 0], "material": "$0"},
+  {"tool": "forge_group", "ids": ["$2", "$3", "$4", "$5"], "object_name": "CrystalCluster"}
+ ]}

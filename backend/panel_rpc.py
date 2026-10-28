@@ -57,8 +57,16 @@ def forge_shot_render_start(name: str = "", shot: str = "", fps: int = 30, width
         return {"ok": False, "error": str(exc)}
 
 
+def forge_engine(action: str = "status", **_kwargs: Any) -> dict:
+    """Dock engine chip: status, or install (also the Retry after an error)."""
+    from .engine import runtime
+    status = runtime.install() if action == "install" else runtime.engine_status()
+    return {"ok": True, **status}
+
+
 def register_panel_rpcs(api: Any) -> None:
     from . import live_view
+    from .engine import client
 
     def forge_send_bound(name: str = "", mode: str = "each", folder: str = "", collision: str = "simple", place: bool = False, **_kwargs: Any) -> dict:
         try:
@@ -79,3 +87,5 @@ def register_panel_rpcs(api: Any) -> None:
     api.register_panel_rpc("forge_view_put", live_view.view_put)
     api.register_panel_rpc("forge_frame_put", live_view.frame_put)
     api.register_panel_rpc("forge_shot_render_start", forge_shot_render_start)
+    api.register_panel_rpc("forge_engine", forge_engine)
+    client.warm()

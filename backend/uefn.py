@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 from typing import Any, Callable
@@ -67,10 +68,15 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
                     parts.append(part)
         return parts
 
+    def stored(nodes: list[dict]) -> dict:
+        """The first node's HQ lods settings ({ratios, nanite}) among nodes, or {}."""
+        return next((n["hq"]["lods"] for n in nodes if (n.get("hq") or {}).get("lods")), {})
+
     exports: list[dict[str, Any]] = []
     if mode == "all":
         mesh = bake(visible)
-        exports.append({"name": scene.name, "mesh": mesh, "collision": [scene.world_mesh(n) for n in collision if n]})
+        exports.append({"name": scene.name, "mesh": mesh, "collision": [scene.world_mesh(n) for n in collision if n],
+                        "lods": stored(visible)})
     elif mode == "group":
         groups = [n for n in scene.data["nodes"] if n.get("type") == "group"]
         grouped: set[str] = set()
@@ -79,10 +85,12 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
             if not kids:
                 continue
             grouped.update(n["id"] for n in kids)
-            exports.append({"name": g.get("name") or g["id"], "mesh": bake(kids), "collision": ucx_for(g["id"])})
+            exports.append({"name": g.get("name") or g["id"], "mesh": bake(kids), "collision": ucx_for(g["id"]),
+                            "lods": stored(kids)})
         loose = [n for n in visible if n["id"] not in grouped]
         for n in loose:
-            exports.append({"name": n.get("name") or n["id"], "mesh": bake([n]), "collision": ucx_for(n.get("parent"))})
+            exports.append({"name": n.get("name") or n["id"], "mesh": bake([n]), "collision": ucx_for(n.get("parent")),
+                            "lods": stored([n])})
     else:
         # One SM per shared shape/material combination. Instances stay in the viewer.
         seen: set[tuple] = set()
@@ -94,7 +102,8 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
             mesh = scene.shaped_mesh(n)
             if mesh.verts:
                 set_origin(mesh, "base")
-            exports.append({"name": n.get("name") or n["id"], "mesh": mesh, "collision": ucx_for(n.get("parent"))})
+            exports.append({"name": n.get("name") or n["id"], "mesh": mesh, "collision": ucx_for(n.get("parent")),
+                            "lods": stored([n])})
     return [e for e in exports if e["mesh"].verts]
 
 
@@ -150,7 +159,8 @@ def export_glbs(scene: Scene, mode: str, folder: Path) -> list[dict[str, Any]]:
             if mat not in seen:
                 seen.add(mat)
                 order.append(mat)
-        out.append({"name": name, "glb": str(path), "materials": order, "collision": item["collision"]})
+        out.append({"name": name, "glb": str(path), "materials": order, "collision": item["collision"],
+                    "lods": item.get("lods") or {}})
     return out
 
 
@@ -179,6 +189,10 @@ def _texture(listener: Listener, scene: Scene, dest: str, tex_cache: dict, fname
     return tex_cache[fname]
 
 
+# material "shader" field -> (listener command, master asset); everything else uses M_Forge_Master
+SPECIAL_MASTERS = {"hair": ("forge_build_hair", "M_Forge_Hair"), "skin": ("forge_build_skin", "M_Forge_Skin")}
+
+
 def _instances(listener: Listener, scene: Scene, item: dict, dest: str, masters: dict, tex_cache: dict) -> list[str]:
     """One MI_ per material slot: on M_Forge_Master, or on M_Forge_Blend when the material has layers."""
     mats = scene.materials()
@@ -203,6 +217,13 @@ def _instances(listener: Listener, scene: Scene, item: dict, dest: str, masters:
             built = _call(listener, "forge_build_blend_master", {"folder": f"{dest}/Materials", "asset_name": "M_Forge_Blend"})
             masters["blend"] = str(built.get("material_path") or "").split(".")[0]
         parent = masters["blend"] if any(layers) and masters.get("blend") else masters["base"]
+        kind = str(mat.get("shader") or "").lower()
+        if kind in SPECIAL_MASTERS and not any(layers):
+            if kind not in masters:
+                command, asset = SPECIAL_MASTERS[kind]
+                built = _call(listener, command, {"folder": f"{dest}/Materials", "asset_name": asset})
+                masters[kind] = str(built.get("material_path") or "").split(".")[0]
+            parent = masters[kind] or parent
         mi_name = f"MI_{item['name']}_{_safe_name(str(mat.get('name') or mid))}"
         made = _call(listener, "create_material_instance", {
             "asset_name": mi_name,
@@ -212,6 +233,8 @@ def _instances(listener: Listener, scene: Scene, item: dict, dest: str, masters:
         mi = str(made.get("material_instance_path") or "").split(".")[0]
         vector(mi, "BaseColor", list(mat.get("base_color") or [0.75, 0.75, 0.78, 1]))
         vector(mi, "Emissive", list(mat.get("emissive") or [0, 0, 0])[:3] + [1])
+        if mat.get("subsurface_color"):
+            vector(mi, "SubsurfaceColor", list(mat["subsurface_color"]) + [1])
         scalar(mi, "Metallic", mat.get("metallic") or 0)
         scalar(mi, "Roughness", mat.get("roughness") if mat.get("roughness") is not None else 0.5)
         scalar(mi, "EmissiveStrength", mat.get("emissive_strength") or 0)
@@ -277,6 +300,27 @@ def _place(listener: Listener, landed: list[dict], location: list | None) -> tup
     return placed, notes
 
 
+def _names(paths) -> list[str]:
+    return [str(p).split("/")[-1].split(".")[0] for p in paths if p]
+
+
+def brief(out: dict[str, Any], limit: int = 300) -> dict[str, Any]:
+    """Asset names only, under `limit` chars: {ok, folder, assets, bad?, placed?}."""
+    names, bad = [], []
+    for a in out["assets"]:
+        names += _names([a["mesh"]] + a.get("animations", []) + a["materials"])
+        if not (a.get("valid") or {}).get("ok", True):
+            bad.append(_names([a["mesh"]])[0])
+    short = {"ok": not bad, "folder": out["folder"].rsplit("/", 1)[-1], "assets": names}
+    if bad:
+        short["invalid"] = bad
+    if out.get("placed"):
+        short["placed"] = len(out["placed"])
+    while len(json.dumps(short)) > limit and len(short["assets"]) > 1:
+        short["assets"] = short["assets"][:-2] + ["+%d" % (len(names) - len(short["assets"]) + 2)]
+    return short
+
+
 def send_to_uefn(
     scene_name: str,
     listener: Listener,
@@ -286,6 +330,9 @@ def send_to_uefn(
     collision: str = "simple",
     place: bool = False,
     location: list | None = None,
+    nanite: bool = False,
+    lods: int = 0,
+    verbose: bool = True,
 ) -> dict[str, Any]:
     scene = load(scene_name)
     info = _call(listener, "get_project_info", {})
@@ -339,6 +386,15 @@ def send_to_uefn(
             # GLB import does not attach UCX_ children. Simple convex is the fallback.
             # Upgrade: one FBX containing the render mesh plus UCX_ parts.
             _call(listener, "set_mesh_collision", {"asset_path": mesh_path, "collision_preset": "CTF_UseSimpleAsComplex"})
+        stored = item.get("lods") or {}
+        ratios = list(stored.get("ratios") or [])
+        want_nanite = bool(nanite or stored.get("nanite"))
+        count = int(lods) or len(ratios)  # an explicit lods argument overrides the stored ratios
+        if want_nanite or count:
+            options = {"mesh_path": mesh_path, "nanite": want_nanite, "lod_count": count}
+            if ratios and not lods:
+                options["ratios"] = ratios
+            _call(listener, "forge_set_mesh_options", options)
         valid = _call(listener, "validate_uefn_asset", {"asset_path": mesh_path})
         info_mesh = _call(listener, "get_static_mesh_info", {"asset_path": mesh_path})
         landed.append({
@@ -351,4 +407,4 @@ def send_to_uefn(
     out = {"folder": dest, "master": master_path, "assets": landed, "count": len(landed)}
     if place:
         out["placed"], out["notes"] = _place(listener, landed, location)
-    return out
+    return out if verbose else brief(out)
