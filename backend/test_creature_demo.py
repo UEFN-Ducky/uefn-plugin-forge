@@ -117,6 +117,32 @@ class LionBuilt(unittest.TestCase):
         self.assertGreater(len(rig["bones"]), 10)
 
 
+@unittest.skipUnless(_READY and os.environ.get("FORGE_DEMO_LIVE") == "1",
+                     "spends Tripo/Meshy credits: set FORGE_DEMO_LIVE=1 inside Ducky with the plugin installed")
+class LionGenerated(unittest.TestCase):
+    def test_lion_generated(self):
+        from . import live_view, render, rig as rg
+        if live_view._api is None:
+            self.skipTest("no Ducky plugin api: run from inside Ducky so generate can call Tripo/Meshy")
+        name = "Lion_Generated"
+        OUT.mkdir(parents=True, exist_ok=True)
+        with patch.object(tools, "_attach_captures", lambda r: r):
+            f = Fake(name)
+            f.t["forge_scene_new"](name=name)
+            f.hq("creature_from_prompt", prompt="adult male lion, full mane, standing, realistic", kind="quadruped", faces=12000)
+            body = max(_objects(name), key=lambda n: load(name).world_mesh(n).tri_count())["id"]
+            f.hq("fur_bake", id=body, size=1024)
+            look = f.t["forge_batch"](name=name, steps=[{"tool": "forge_hq", "op": "clip", "params": {"kind": "walk"}}], look="three")
+        shutil.copyfile(look["path"], OUT / "Lion_Generated_three.png")
+        scene = load(name)
+        rig = scene.data["rigs"][0]
+        walk = next(c for c in rig["actions"] if c["name"].startswith("Walk"))
+        self.assertTrue(walk.get("loop"))
+        for frame in (0, 8, 16, 24):
+            mesh = rg.posed_meshes(scene, _objects(name), rig, walk, frame)
+            render.render_tiles(mesh, OUT / f"Lion_Generated_walk_{frame:02d}.png", ["side"], scene.materials(), scene.folder / "textures")
+
+
 def load_dir(name):
     return load(name).folder
 
