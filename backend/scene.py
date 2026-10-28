@@ -1643,7 +1643,8 @@ def _op_fix(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
-    """One image per object and view, or with a clip, the whole asset posed at each frame."""
+    """The whole asset in one image (or one object with id), or with a clip, posed at each frame."""
+    from . import render as rd
     from .render import render_png
 
     views = list(p.get("views") or ["three"])
@@ -1659,11 +1660,21 @@ def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
         for f in frames:
             dest = folder / f"forge_{scene.name}_{_safe(clip['name'])}_f{round(f)}.png"
             paths.extend(render_png(posed_meshes(scene, nodes, rig, clip, f), dest, views, mats, scene.folder / "textures"))
-        return {"summary": f"Render {clip['name']} at {len(frames)} frames", "ids": [], "paths": paths, "kind": "look"}
+        return _noted({"summary": f"Render {clip['name']} at {len(frames)} frames", "ids": [], "paths": paths, "kind": "look"}, rd)
+    # Oct 28 2026: one image per object showed a lion's body and its hair cards as two separate pictures.
+    mesh = Mesh()
     for n in nodes:
-        dest = folder / f"forge_{scene.name}_{n['id']}.png"
-        paths.extend(render_png(scene.world_mesh(n), dest, views, mats, scene.folder / "textures"))
-    return {"summary": f"Render {len(paths)}", "ids": [], "paths": paths, "kind": "look"}
+        mesh.append(scene.world_mesh(n))
+    dest = folder / f"forge_{scene.name}_{p.get('id') or 'all'}.png"
+    paths.extend(render_png(mesh, dest, views, mats, scene.folder / "textures"))
+    return _noted({"summary": f"Render {len(paths)}", "ids": [], "paths": paths, "kind": "look"}, rd)
+
+
+def _noted(result: dict, rd) -> dict:
+    """A fallback picture says so in the result, so an AI never judges quality from it."""
+    if rd.last_note:
+        result["seen"] = (result.get("seen", "") + "; " if result.get("seen") else "") + rd.last_note
+    return result
 
 
 _LOOK_VIEWS = {"ai": ["three", "front", "side", "top"]}
@@ -1703,8 +1714,10 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
     seen = "%s cm, %d tris, %s, %s" % (
         "x".join(str(round(hi[k] - lo[k])) for k in range(3)), mesh.tri_count(), ", ".join(used[:4]) or "no materials",
         "; ".join(f"{k} x{c}" for k, c in list(kinds.items())[:3]) or "no issues")
+    from . import render as rd
+
     path = render_tiles(mesh, _captures() / f"forge_{scene.name}_look.png", views, mats, scene.folder / "textures")
-    return {"summary": seen, "seen": seen, "ids": [], "paths": [path]}
+    return _noted({"summary": seen, "seen": seen, "ids": [], "paths": [path]}, rd)
 
 
 def _op_texture(scene: Scene, p: dict) -> dict[str, Any]:
