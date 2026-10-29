@@ -8,7 +8,10 @@ from . import engine, op
 
 MANES = ("lion",)
 TIPS = ("flame",)
-_KEYS = ("id", "region", "mane", "count", "length", "width", "curl", "layers", "tip", "seed", "budget", "sweep", "smooth", "wait")
+STYLES = ("leaf", "flame")
+TARGETS = ("head", "tail")
+_KEYS = ("id", "region", "mane", "count", "length", "width", "curl", "layers", "tip", "seed", "budget", "sweep", "smooth", "wait",
+         "style", "rows", "face_ring", "peak", "beard", "target", "at", "dir")
 
 
 def _host(scene, ident):
@@ -59,12 +62,59 @@ def _regions(scene, mesh, region, mane):
     return specs, r
 
 
-@op("tufts", "tufts(id, region={sphere|ring|faces|material}|mane=lion, count, length, width, curl, layers=2, tip=flame, seed, budget=8000) pointed flame tufts fused into one mass")
+def _leaf(scene, node, p, target, mane):
+    """style=leaf: layered leaf tufts (mane=lion on a head, or target=tail at a tip point)."""
+    mesh = scene.world_mesh(node)
+    if target == "tail":
+        at = p.get("at")
+        if not (isinstance(at, (list, tuple)) and len(at) == 3):
+            raise ValueError("target='tail' needs at=[x,y,z], the tail tip in world cm (e.g. the tail bone's tail point)")
+        lo, hi = mesh.bounds()
+        r = max(b - a for a, b in zip(lo, hi)) / 2 or 1.0
+        q = {"count": 14, "rows": 2, "face_ring": 0, "peak": 0, "beard": 0, "at": [float(v) for v in at]}
+        if p.get("dir") is not None:
+            q["dir"] = [float(v) for v in p["dir"]]
+        length = 0.18 * r
+    else:
+        if not mane:
+            raise ValueError("style='leaf' grows a mane: pass mane='lion' (or target='tail' with at=[x,y,z]; style='flame' takes a region)")
+        _, r = _regions(scene, mesh, None, mane)
+        q = {"count": 160, "rows": 6, "face_ring": 18, "peak": 7, "beard": 9}
+        length = 0.55 * r
+    for k in ("count", "rows", "face_ring", "peak", "beard"):
+        if k in p:
+            q[k] = int(p[k])
+    q.update(style="leaf", target=target, length=float(p.get("length", length)), curl=float(p.get("curl", 0.15)),
+             seed=int(p.get("seed", 1)))
+    if p.get("width") is not None:
+        q["width"] = float(p["width"])
+    fixed = q["face_ring"] + q["peak"] + q["beard"]
+    if min(q["face_ring"], q["peak"], q["beard"]) < 0 or q["rows"] < 2 or q["length"] <= 0 or q.get("width", 1) <= 0:
+        raise ValueError("face_ring, peak, beard >= 0; rows >= 2; length > 0 cm; width > 0 cm")
+    if q["count"] < fixed + (q["rows"] if target == "head" else 1):
+        raise ValueError("count %d is too small for face_ring+peak+beard=%d plus %d rows: raise count (default 160) or lower those"
+                         % (q["count"], fixed, q["rows"]))
+    result, changed = engine(scene, "tufts", [node["id"]], q)
+    return {**result, "ids": changed or [node["id"]]}
+
+
+@op("tufts", "tufts(id, mane=lion|target=tail+at, style=leaf, count=160, rows=6, length, face_ring=18, peak=7, beard=9) layered leaf tufts (default); style=flame + region|mane for fused flames (layers, tip, budget)")
 def tufts(scene, p):
     unknown = [k for k in p if k not in _KEYS]
     if unknown:
         raise ValueError("Unknown param %r for tufts. Params: %s" % (unknown[0], ", ".join(_KEYS)))
     node = _host(scene, p.get("id"))
+    target = p.get("target", "head")
+    if target not in TARGETS:
+        raise ValueError("No target %r. Targets: %s" % (target, ", ".join(TARGETS)))
+    style = p.get("style") or ("leaf" if p.get("mane") or target == "tail" else "flame")
+    if style not in STYLES:
+        raise ValueError("No style %r. Styles: %s" % (style, ", ".join(STYLES)))
+    if style == "leaf":
+        mane = p.get("mane")
+        if mane and mane not in MANES:
+            _regions(scene, scene.world_mesh(node), None, mane)  # raises with the did-you-mean
+        return _leaf(scene, node, p, target, mane)
     if p.get("tip", "flame") not in TIPS:
         raise ValueError("No tip %r. Tips: %s" % (p.get("tip"), ", ".join(TIPS)))
     specs, r = _regions(scene, scene.world_mesh(node), p.get("region"), p.get("mane"))
