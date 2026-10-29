@@ -423,7 +423,7 @@ export function createPresence(ctx) {
       target?.dispose();
       target = new THREE.WebGLRenderTarget(width, height, { samples: 4, type: half ? THREE.HalfFloatType : THREE.UnsignedByteType });
     }
-    const cam = new THREE.PerspectiveCamera(pose.fov || 45, width / height, 0.1, 200000);
+    const cam = new THREE.PerspectiveCamera(pose.fov || 45, width / height, 1, 200000);
     cam.up.set(0, 0, 1);
     cam.position.fromArray(pose.pos);
     cam.lookAt(new THREE.Vector3().fromArray(pose.target));

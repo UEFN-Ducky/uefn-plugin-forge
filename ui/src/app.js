@@ -144,12 +144,14 @@ const geoCache = new Map();
 const matCache = new Map();
 
 const host = document.getElementById("view");
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+// Oct 28 2026: near 0.1 / far 200000 left no depth precision, so stacked floors z-fought when
+// zoomed out. A logarithmic depth buffer keeps precision at every distance.
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
 renderer.setPixelRatio(1);
 host.appendChild(renderer.domElement);
 const scene3 = new THREE.Scene();
 scene3.background = new THREE.Color();
-const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 200000);
+const camera = new THREE.PerspectiveCamera(45, 1, 1, 200000);
 camera.up.set(0, 0, 1);
 camera.position.set(1200, -1600, 900);
 const orbit = new OrbitControls(camera, renderer.domElement);
