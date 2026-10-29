@@ -223,6 +223,29 @@ class PaintArt(unittest.TestCase):
         run = max(max(int(r.sum()) for r in occ), max(int(c.sum()) for c in occ.T))  # strip length in texture pixels
         self.assertLess(_corr_len(lum, occ), 0.2 * run)
 
+    def test_bake_mane_roots_darker_from_tuft_colour(self):
+        name = "PaintBakeT"
+        self.addCleanup(forget, name)
+        self.t["forge_scene_new"](name=name)
+        nid = self.t["forge_batch"](name=name, steps=[{"tool": "forge_add", "kind": "box", "object_name": "Strip", "params": {"w": 8, "d": 2, "h": 70}}])["ids"][0]
+        self.t["forge_hq"](name=name, op="material", params={"material": "Part0", "overrides": {"color": [0.5, 0.5, 0.5]}, "id": nid})
+        scene = load(name)
+        node = scene.node(nid)
+        mesh = scene._bake(node)
+        zs = [v[2] for v in mesh.verts]
+        lo, hi = min(zs), max(zs)
+        mesh.attrs["col:tuft"] = [[(z - lo) / (hi - lo)] * 3 + [1.0] for z in zs]  # root=0 at the bottom, tip=1 at the top
+        scene.write_mesh(node, mesh)
+        res = self.t["forge_hq"](name=name, op="paint_bake", params={"ids": [nid], "presets": "mane", "size": 256, "wait": True, "debug": True})
+        self.assertTrue(res.get("ok"), res)
+        self.assertLessEqual(len(str(res)), 300, res)
+        self.assertIn("mane roots from tuft colour", res["summary"])
+        tex = next((load(name).folder / "textures").glob("T_*_D.png"))
+        lum = (np.asarray(Image.open(tex).convert("RGB"), np.float32)[::-1] / 255.0) @ np.array([0.299, 0.587, 0.114], np.float32)
+        tmap = np.load(str(tex)[:-4] + "_dbg_tuft.npy")
+        root, tip = lum[(tmap >= 0) & (tmap < 0.2)].mean(), lum[tmap > 0.8].mean()
+        self.assertGreater(tip - root, 0.1, "root %.3f tip %.3f" % (root, tip))
+
     def test_bake_bad_preset_says_the_fix(self):
         nid = self.shape("PaintBakeC", "sphere", radius=10)
         with self.assertRaisesRegex(ValueError, "Use one of: fur_warm"):

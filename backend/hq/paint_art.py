@@ -118,5 +118,5 @@ def paint_bake(scene, p):
     _op_material_assign(scene, {"id": node["id"], "material": mat["id"]})
     scene.materials()[mat["id"]].setdefault("textures", {}).update(result["textures"][mat["id"]])
     scene.touch_geom()
-    return {"summary": "ok paint_bake %d %s, %d presets, 1 material" % (result["size"], result["texture"], len(result["presets"])),
+    return {"summary": "ok paint_bake %d %s, %d presets, 1 material%s" % (result["size"], result["texture"], len(result["presets"]), ", mane roots from tuft colour" if result.get("tuft") else ""),
             "ids": [node["id"]], "stats": {"strokes": result["strokes"], "stroke": stroke}}

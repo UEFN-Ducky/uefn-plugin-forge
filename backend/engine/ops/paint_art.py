@@ -210,6 +210,20 @@ def _prepare(p):
     S.g12 = np.einsum("tj,tj->t", S.e1, S.e2)
     S.g22 = np.einsum("tj,tj->t", S.e2, S.e2)
     S.det = S.g11 * S.g22 - S.g12 ** 2
+    S.tuft, S.tgrad = None, None
+    attr = me.color_attributes.get("tuft")  # the Mane step's root(0)-to-tip(1) value, red channel
+    if attr is not None and attr.domain == "POINT":
+        tc = np.empty(nv * 4, np.float32)
+        attr.data.foreach_get("color", tc)
+        tc = tc.reshape(-1, 4)[:, 0]
+        if tc.max() > 0.0:
+            S.tuft = _gather(tc[tv][..., None], S.tid, bw)[:, 0]
+            d1, d2 = tc[tv][:, 1] - tc[tv][:, 0], tc[tv][:, 2] - tc[tv][:, 0]
+            det = np.where(np.abs(S.det) > 1e-12, S.det, 1.0)
+            a, b = (S.g22 * d1 - S.g12 * d2) / det, (S.g11 * d2 - S.g12 * d1) / det
+            g = a[:, None] * S.e1 + b[:, None] * S.e2  # uphill direction of the tuft value on each triangle
+            S.tgrad = g / np.maximum(np.linalg.norm(g, axis=1, keepdims=True), 1e-12)
+            S.tgrad[np.abs(d1) + np.abs(d2) < 1e-6] = 0.0
     S.center = (P.min(0) + P.max(0)) / 2.0
     S.bounds = (P.min(0), P.max(0))
     S.diag = float(np.linalg.norm(P.max(0) - P.min(0))) or 1.0
@@ -231,6 +245,9 @@ def _flow(S, kind):
     else:  # tufts: out from the centre and sagging down, the sag swelling and fading across the surface
         sway = 0.5 + 0.4 * np.sin(6.0 * (S.pos @ np.array([1.0, 1.3, 0.7], np.float32)) / S.diag)
         v = r + down * sway[:, None]
+    if kind == "tufts" and S.tgrad is not None:  # tuft pixels follow root to tip
+        g = S.tgrad[tid]
+        v = np.where((np.abs(g).sum(1) > 0)[:, None], g, v)
     v = v - np.einsum("nj,nj->n", v, n)[:, None] * n
     ln = np.linalg.norm(v, axis=1)
     strength = np.clip(ln / 0.35, 0.0, 1.0)
@@ -604,7 +621,7 @@ def op_paint_bake(p):
     S.pslot = S.tslot[S.tid]
     n = len(S.ys)
     base, dk, lt = (np.zeros((n, 3), np.float32) for _ in range(3))
-    used, nth = {}, 0
+    used, nth, tuft_used = {}, 0, False
     for slot in np.unique(S.pslot):
         mat = S.slots[slot] if slot < len(S.slots) else None
         name = _preset_for(p.get("presets"), mat, nth)
@@ -616,10 +633,16 @@ def op_paint_bake(p):
         t = (z - z.min()) / max(float(np.ptp(z)), 1e-6)
         d = np.linalg.norm(pos - pos.mean(0), axis=1)
         d = d / max(float(d.max()), 1e-6)
+        tf = S.tuft[sel] if S.tuft is not None else None
+        if tf is not None and tf.max() > 0.0:
+            d, tuft_used = np.clip(tf, 0.0, 1.0), True  # root=0 is dark, tip=1 is light
+            fall, amt = 1.0, min(1.0, k["root"] * 1.3)  # a real signal: broader, deeper root shade
+        else:
+            fall, amt = 1.5, k["root"]
         wave = 0.5 + 0.5 * np.sin(t * k["bands"] * 2.0 * math.pi + 0.7)
         band = np.clip((wave - 0.35) / 0.3, 0.0, 1.0)[:, None] * k["amt"]
         c = np.array(k["base"], np.float32) * (1.0 - band) + np.array(k["band"], np.float32) * band
-        c = c + (np.array(k["dark"], np.float32) - c) * (k["root"] * (1.0 - d) ** 1.5)[:, None]
+        c = c + (np.array(k["dark"], np.float32) - c) * (amt * (1.0 - d) ** fall)[:, None]
         base[sel] = c * (0.97 + 0.06 * rng.random((len(c), 1))).astype(np.float32)  # fine grain so flat areas never band
         dk[sel], lt[sel] = k["dark"], k["light"]
     size = S.size
@@ -639,4 +662,8 @@ def op_paint_bake(p):
     _save(out_dir / fname, np.concatenate([color.reshape(-1, 3), np.ones((size * size, 1), np.float32)], 1), True)
     if p.get("debug"):
         np.save(out_dir / (fname[:-4] + "_dbg_occ.npy"), S.occ)
-    return _finish(S, p, {p["out_mat"]: {"base_color": fname}}, {"strokes": count, "stroke": stroke, "presets": used, "texture": fname[:-4]})
+        if S.tuft is not None:
+            tmap = np.full((size, size), -1.0, np.float32)
+            tmap[S.ys, S.xs] = S.tuft
+            np.save(out_dir / (fname[:-4] + "_dbg_tuft.npy"), tmap)
+    return _finish(S, p, {p["out_mat"]: {"base_color": fname}}, {"strokes": count, "stroke": stroke, "presets": used, "texture": fname[:-4], "tuft": tuft_used})
