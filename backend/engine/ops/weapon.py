@@ -172,9 +172,11 @@ def _sight(k, kind, sx, top, sc=1.0, front=None, ftop=None):
         for i, dx in enumerate((-5, 5)):
             k.box("scope_ring%d" % i, (1.4, 3.2, 3.4), (sx + dx, 0, top + 1.6), "metal")
         k.cyl("scope", (sx - 10, 0, zc), (sx + 10, 0, zc), 1.3, "metal")
-        k.cyl("scope_bell", (sx + 9.5, 0, zc), (sx + 17, 0, zc), 1.3, "metal", r2=2.5)  # pieces overlap: no flush caps
+        # bells start inside the tube and end inside the lens housing: equal radii would put their cap rings
+        # on the neighbour within qa's 0.05 cm weld and read as non-manifold
+        k.cyl("scope_bell", (sx + 9.5, 0, zc), (sx + 17.6, 0, zc), 1.15, "metal", r2=2.15)
         k.cyl("scope_objective", (sx + 16.5, 0, zc), (sx + 20, 0, zc), 2.5, "metal")
-        k.cyl("scope_eye_bell", (sx - 9.5, 0, zc), (sx - 15, 0, zc), 1.3, "metal", r2=2.0)
+        k.cyl("scope_eye_bell", (sx - 9.5, 0, zc), (sx - 15.6, 0, zc), 1.15, "metal", r2=1.65)
         k.cyl("scope_ocular", (sx - 14.5, 0, zc), (sx - 19, 0, zc), 2.0, "metal")
         k.cyl("turret_up", (sx, 0, zc), (sx, 0, zc + 2.6), 1.0, "metal", seg=12)
         k.cyl("turret_side", (sx, 0, zc), (sx, -2.6, zc), 1.0, "metal", seg=12)
@@ -334,10 +336,11 @@ def _pistol(k, kind, parts, j):
     k.box("trigger", (0.5, 0.6, 1.8), (2.4, 0, -1.2), "metal", rot=(0, -10, 0))
     k.box("rail", (5.5, sw, 0.8), (front - 6.5, 0, -0.6), "polymer")
     k.cut("rail", [("box", (0.5, sw + 1, 0.5), (front - 8.5 + i * 2.0, 0, -1.0), (0, 0, 0)) for i in range(3)])
-    bore = ("cylinder", (0.9, 0.9, 3.0), (front + 0.3, 0, bz), (0, 90, 0))
+    # 9 mm bore r 0.35: clear of the barrel's 0.47 cap chamfer ring, which qa's weld would merge into it
+    bore = ("cylinder", (0.7, 0.7, 3.0), (front + 0.3, 0, bz), (0, 90, 0))
     k.cyl("barrel", (front - 1.0, 0, bz), (front + 0.3, 0, bz), 0.62, "metal")
     k.cut("barrel", [bore])
-    k.cut("slide", [bore, ("box", (3.6, 1.6, 1.4), (sx0 + sl * 0.5, -sw / 2 + 0.3, sz0 + sh), (0, 0, 0))]
+    k.cut("slide", [("box", (3.6, 1.6, 1.4), (sx0 + sl * 0.5, -sw / 2 + 0.3, sz0 + sh), (0, 0, 0))]
           + [("box", (0.35, 0.5, sh * 0.8), (sx0 + 0.8 + i * 0.6, s * sw / 2, sz0 + sh / 2), (0, 0, 0))
              for i in range(6) for s in (-1, 1)])  # rear serrations
     k.box("rear_sight", (0.9, 2.0, 0.7), (sx0 + 0.8, 0, sz0 + sh + 0.25), "metal")

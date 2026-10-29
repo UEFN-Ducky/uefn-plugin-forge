@@ -47,7 +47,17 @@ Change any of these through `length_cm`: a "compact rifle" is `length_cm: 78`, a
 - **Origin at the grip** (pistol grip top / where the main hand holds a melee weapon), **+X = muzzle / tip**, Z up. The ue5 export maps Forge +X to UE +X, so the mesh attaches to a hand socket without re-orienting.
 - **Sockets** are stored on the node (`node.hq.weapon.sockets`, cm): guns get `Muzzle` (barrel exit: muzzle flash, tracer, projectile spawn), `Grip` (0,0,0), `Magazine` (mag well: reload VFX), `Sight` (eye line: ADS camera). Melee gets `Grip`, `TrailBase` and `TrailTip` (the two points of a swing trail). In UE, add them in the Static Mesh editor (Socket Manager) or as `SOCKET_<Name>` empties in a .blend export.
 - **Budgets:** FPS hero 8-20k tris, third person 3-6k, pickups / mobile 1-3k. Forge weapons come out at 0.3-6k, already third-person ready. Use `qa budget=weapon` (15k, 3 materials).
-- **Materials:** 3 slots or fewer: metal + polymer + grip (rifle), metal + wood + grip (shotgun, axe), metal + polymer + glow (sci-fi). Wear goes on the edges in the material (`material` layers `edge_wear`, `scratches`), not in geometry.
+- **Materials:** 3 slots or fewer: metal + polymer + grip (rifle), metal + wood + grip (shotgun, axe), metal + polymer + glow (sci-fi). Slots are named `Weapon_<Slot>_<Style>` (`Weapon_Metal_Realistic`, `Weapon_Polymer_Realistic`, `Weapon_Grip_Realistic`, `Weapon_Wood_*`, `Weapon_Steel_*`, `Weapon_Glow_*`). Wear goes on the edges in the material, not in geometry.
+
+**Wear:** edit each slot by name, **without `id`** (`id` assigns that one material to the whole weapon and the 3 slots become 1). Pass the slot's base values so the layers sit on its colour:
+
+```json
+[
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Weapon_Metal_Realistic", "overrides": {"color": [0.045, 0.047, 0.05], "metallic": 1.0, "roughness": 0.38}, "layers": [{"type": "edge_wear", "metal": true}, {"type": "scratches"}]}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Weapon_Polymer_Realistic", "overrides": {"color": [0.035, 0.035, 0.032], "metallic": 0.0, "roughness": 0.62}, "layers": [{"type": "dirt", "amount": 0.3}]}}
+]
+```
+→ rifle keeps 3 slots (metal, polymer, grip).
 - **Hard surface:** the chamfer (bevel) and weighted normals are what make a gun read as metal; panel lines and vents are `hardsurface` cuts; n-gons stay only on flat caps (UE triangulates on import). Keep details at 2 mm or more: anything finer is texture.
 
 ## Recipe: rifle to game, one batch

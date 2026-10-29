@@ -2,6 +2,7 @@
 
 Needs the Blender engine (runtime.install()); the param checks run without it. Run: py -3 -m backend.test_hq_weapon
 """
+import itertools
 import json
 import os
 import tempfile
@@ -17,6 +18,7 @@ from .scene import forget, load
 from .test_hq_e2e import _Api
 
 _READY = runtime.engine_status()["state"] == "ready"
+_N = itertools.count()  # unique scene names: forget() keeps the folder, so a reused name fails scene_new
 
 
 class Params(unittest.TestCase):
@@ -57,7 +59,7 @@ class Build(unittest.TestCase):
         cls.tmp.cleanup()
 
     def build(self, params):
-        name = "Weapon_%s_%d" % (params["kind"], len(json.dumps(params)))
+        name = "Weapon_%s_%d" % (params["kind"], next(_N))
         self.addCleanup(forget, name)
         self.t["forge_scene_new"](name=name)
         out = self.t["forge_batch"](name=name, steps=[{"tool": "forge_hq", "op": "weapon", "params": params}])
@@ -98,6 +100,21 @@ class Build(unittest.TestCase):
         self.check({"kind": "smg", "parts": {"sight": "holo", "muzzle": "brake", "mag": "extended", "stock": "ar"}}, 68)
         self.check({"kind": "pistol", "parts": {"sight": "red_dot", "muzzle": "suppressor"}}, 20.2)
         self.check({"kind": "sword", "style": "stylized", "seed": 2}, 100)
+
+    def test_doc_wear_keeps_slots(self):
+        """The weapons.md wear block (edit slots by name, no id) leaves the rifle's 3 slots and the metal colour alone."""
+        import re
+        text = (Path(__file__).resolve().parent.parent / "skills" / "forge" / "references" / "weapons.md").read_text(encoding="utf-8")
+        wear = next(json.loads(b) for b in re.findall(r"```json\n(.*?)```", text, re.S) if "edge_wear" in b)
+        out, scene, node = self.build({"kind": "rifle"})
+        before = set(scene.world_mesh(node).face_mat)
+        got = self.t["forge_batch"](name=scene.name, steps=wear)
+        self.assertTrue(got.get("ok", True), got)
+        scene = load(scene.name)
+        after = set(scene.world_mesh(scene.node(node["id"])).face_mat)
+        self.assertEqual((len(before), after), (3, before))
+        metal = next(m for m in scene.data["materials"] if m["name"] == "Weapon_Metal_Realistic")
+        self.assertLess(metal["base_color"][0], 0.1, metal)
 
 
 class DocCalls(unittest.TestCase):
