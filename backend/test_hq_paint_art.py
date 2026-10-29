@@ -52,6 +52,23 @@ def _hf_ratio(lum, occ):
     hp = lum - _box(lum, 2)
     return float(hp[inner].std() / max(lum[inner].std(), 1e-6))
 
+def _corr_len(lum, occ):
+    """Longest decorrelation distance (px, acf below 1/e) of the brush-stroke residual over four directions."""
+    res = (lum - _box(lum, 4)) * occ
+    var = float((res[occ] ** 2).mean()) or 1e-9
+    best = 0.0
+    for dx, dy in ((1, 0), (0, 1), (1, 1), (1, -1)):
+        length = 40.0
+        for lag in range(1, 40):
+            sh = lambda a: np.roll(np.roll(a, -lag * dy, 0), -lag * dx, 1)
+            both = occ & sh(occ)
+            if both.sum() < 20 or float((res * sh(res))[both].mean()) / var < 1.0 / np.e:
+                length = lag * float(np.hypot(dx, dy))
+                break
+        best = max(best, length)
+    return best
+
+
 
 @unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
 class PaintArt(unittest.TestCase):
@@ -166,6 +183,50 @@ class PaintArt(unittest.TestCase):
         self.assertGreater(red + blue, 0.85, "front art must reach the surface unmuddied (%.2f)" % (red + blue))
         both = self.hq("ProjBox", "project_ref", nid, images={"front": str(art)}, size=128)  # strokes fill: still runs
         self.assertIn("projected", both["summary"])
+
+    def bake(self, name, parts, presets, **extra):
+        """parts: [(kind, object_name, params)], one material each. Returns (result, texture rgb, occupancy, scene)."""
+        self.addCleanup(forget, name)
+        self.t["forge_scene_new"](name=name)
+        ids = [self.t["forge_batch"](name=name, steps=[{"tool": "forge_add", "kind": k, "object_name": n, "params": prm}])["ids"][0] for k, n, prm in parts]
+        for i, oid in enumerate(ids):
+            self.t["forge_hq"](name=name, op="material", params={"material": "Part%d" % i, "overrides": {"color": [0.5, 0.5, 0.5]}, "id": oid})
+        res = self.t["forge_hq"](name=name, op="paint_bake", params={"ids": ids, "presets": presets, "size": 256, "wait": True, "debug": True, **extra})
+        self.assertTrue(res.get("ok"), res)
+        self.assertLessEqual(len(str(res)), 300, res)
+        scene = load(name)
+        tex = next((scene.folder / "textures").glob("T_*_D.png"))
+        rgb = np.asarray(Image.open(tex).convert("RGB"), np.float32)[::-1] / 255.0  # bottom-up like the engine
+        return res, rgb, np.load(str(tex)[:-4] + "_dbg_occ.npy"), scene
+
+    def test_bake_sphere_and_strip(self):
+        res, img, occ, scene = self.bake("PaintBakeA", [("sphere", "Ball", {"radius": 30}), ("box", "Strip", {"w": 8, "d": 2, "h": 70})],
+                                          ["fur_warm", "mane"])
+        self.assertIn("paint_bake 256 T_Ball_D", res["summary"])
+        node = next(n for n in scene.data["nodes"] if n.get("type") == "object")
+        self.assertTrue(scene.materials()[node["material"]]["textures"]["base_color"].endswith("_D.png"))
+        self.assertGreater(float(img[occ].std()), 0.03, "texture is flat")
+        n = img.shape[0] // 8  # no 8x8 tile with zero variance sitting next to a different tile
+        tiles = img.reshape(n, 8, n, 8, 3).transpose(0, 2, 1, 3, 4).reshape(n, n, 64, 3)
+        full, flat, mean = occ.reshape(n, 8, n, 8).all(axis=(1, 3)), tiles.var(2).sum(-1) < 1e-8, tiles.mean(2)
+        for y in range(n):
+            for x in range(n):
+                if full[y, x] and flat[y, x]:
+                    for dy, dx in ((0, 1), (1, 0), (0, -1), (-1, 0)):
+                        yy, xx = y + dy, x + dx
+                        if 0 <= yy < n and 0 <= xx < n and full[yy, xx]:
+                            self.assertLess(float(np.abs(mean[y, x] - mean[yy, xx]).max()), 1e-3, "block at tile %d,%d" % (y, x))
+
+    def test_bake_dashes_are_short(self):
+        res, img, occ, _ = self.bake("PaintBakeB", [("box", "Strip", {"w": 8, "d": 2, "h": 70})], "mane")
+        lum = img @ np.array([0.299, 0.587, 0.114], np.float32)
+        run = max(max(int(r.sum()) for r in occ), max(int(c.sum()) for c in occ.T))  # strip length in texture pixels
+        self.assertLess(_corr_len(lum, occ), 0.2 * run)
+
+    def test_bake_bad_preset_says_the_fix(self):
+        nid = self.shape("PaintBakeC", "sphere", radius=10)
+        with self.assertRaisesRegex(ValueError, "Use one of: fur_warm"):
+            self.t["forge_hq"](name="PaintBakeC", op="paint_bake", id=nid, params={"presets": "lava", "size": 64, "wait": True})
 
     def test_errors_say_the_fix(self):
         nid = self.shape("PaintErr", "box", w=10, d=10, h=10)

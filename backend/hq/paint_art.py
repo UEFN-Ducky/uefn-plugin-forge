@@ -80,3 +80,43 @@ def project_ref(scene, p):
     node, r, textures = _run(scene, "project_ref", p, params)
     return {"summary": "projected %s onto %s %dpx; %d%% seen, %d strokes fill the rest" % (", ".join(r["views"]), node.get("name") or node["id"], r["size"], r["seen"] * 100, r["strokes"]),
             "ids": [node["id"]], "path": str(textures), "stats": {"seen": r["seen"], "strokes": r["strokes"], "size": r["size"]}}
+
+
+_PRESETS = ("fur_warm", "mane", "cream", "pink")
+
+
+@op("paint_bake", "paint_bake(ids|id, presets=fur_warm|mane|cream|pink or [per slot] or {material: preset}, stroke=dash|grain, flow=tufts, name?, size=2048) paint every material slot (bands, crevices, dashes), join parts, bake ONE texture + ONE material; see skill forge/hq", long=True)
+def paint_bake(scene, p):
+    ids = [str(i) for i in (p.get("ids") or [p.get("id") or scene.data["selection"].get("object") or ""])]
+    stroke = p.get("stroke", "dash")
+    if stroke not in ("dash", "grain"):
+        raise ValueError("stroke %r unknown. Use dash (short tapered dashes) or grain (long streaks)" % stroke)
+    given = p.get("presets")
+    for name in ([given] if isinstance(given, str) else list(given.values()) if isinstance(given, dict) else given or []):
+        if name not in _PRESETS:
+            raise ValueError("preset %r unknown. Use one of: %s" % (name, ", ".join(_PRESETS)))
+    size = _size(p)
+    if len(ids) > 1:
+        from ..scene import _op_join
+        ids = [_op_join(scene, {"ids": ids})["id"]]
+    node = _object(scene, {"id": ids[0]})
+    name = str(p.get("name") or node.get("name") or "Paint")
+    from .materials import _material, expand
+    mat = _material(scene, "M_%s_Paint" % name, expand(None, None, [{"type": "base", "color": [1.0, 1.0, 1.0]}]))
+    textures = scene.folder / "textures"
+    textures.mkdir(parents=True, exist_ok=True)
+    params = {"id": node["id"], "out_mat": mat["id"], "name": name, "size": size, "out_dir": str(textures),
+              "seed": int(p.get("seed", 1)), "debug": bool(p.get("debug")), "stroke": stroke, "presets": given}
+    for key in ("flow", "width", "length", "density", "ao", "rim"):
+        if p.get(key) is not None:
+            params[key] = p[key]
+    result, _ = engine(scene, "paint_bake", [node["id"]], params)
+    mesh = scene._bake(node)
+    mesh.face_mat = [mat["id"]] * len(mesh.face_mat)  # one material for the whole object
+    scene.write_mesh(node, mesh)
+    from ..scene import _op_material_assign
+    _op_material_assign(scene, {"id": node["id"], "material": mat["id"]})
+    scene.materials()[mat["id"]].setdefault("textures", {}).update(result["textures"][mat["id"]])
+    scene.touch_geom()
+    return {"summary": "ok paint_bake %d %s, %d presets, 1 material" % (result["size"], result["texture"], len(result["presets"])),
+            "ids": [node["id"]], "stats": {"strokes": result["strokes"], "stroke": stroke}}

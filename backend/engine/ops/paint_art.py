@@ -134,8 +134,9 @@ def _prepare(p):
     me = ob.data
     mats = [m for m in me.materials if m is not None]
     want = p.get("material")
+    whole = bool(p.get("all"))  # paint_bake: every slot goes into one texture
     pick = next((i for i, m in enumerate(me.materials)
-                 if m is not None and (not want or json.loads(m.get("forge") or "{}").get("id") == want)), None)
+                 if m is not None and (whole or not want or json.loads(m.get("forge") or "{}").get("id") == want)), None)
     if pick is None:
         raise ValueError("%s has no material; run material first" % ob.name)
     size = int(p["size"])
@@ -154,7 +155,8 @@ def _prepare(p):
     me.loop_triangles.foreach_get("polygon_index", tp)
     pm = np.empty(len(me.polygons), np.int32)
     me.polygons.foreach_get("material_index", pm)
-    keep = pm[tp] == pick
+    keep = np.ones(len(tp), bool) if whole else pm[tp] == pick
+    S.slots, S.tslot = list(me.materials), pm[tp][keep]
     if not keep.any():
         raise ValueError("No faces use that material on %s" % ob.name)
     tv, tl = tv.reshape(-1, 3)[keep], tl.reshape(-1, 3)[keep]
@@ -539,3 +541,102 @@ def op_project_ref(p):
     final[S.ys, S.xs] = seen_px * keep + painted_px * (1.0 - keep)
     textures, _ = _save_maps(S, p, final, hgt)
     return _finish(S, p, textures, {"views": used, "seen": round(float(seen.mean()), 3), "strokes": count})
+
+
+# ---- paint_bake: procedural presets baked to one texture ------------------------
+
+# base/dark/light/band colours; bands = colour bands up the height; root = darkening toward each slot's centre (tuft roots)
+_PRESETS = {
+    "fur_warm": dict(base=(0.86, 0.52, 0.17), dark=(0.50, 0.24, 0.08), light=(1.0, 0.78, 0.38), band=(0.95, 0.62, 0.22), bands=3, amt=0.5, root=0.0),
+    "mane": dict(base=(0.58, 0.27, 0.08), dark=(0.26, 0.10, 0.04), light=(0.90, 0.50, 0.14), band=(0.72, 0.36, 0.10), bands=5, amt=0.5, root=0.7),
+    "cream": dict(base=(0.96, 0.86, 0.66), dark=(0.72, 0.57, 0.40), light=(1.0, 0.97, 0.86), band=(0.90, 0.78, 0.58), bands=2, amt=0.3, root=0.0),
+    "pink": dict(base=(0.93, 0.56, 0.56), dark=(0.64, 0.28, 0.32), light=(1.0, 0.80, 0.76), band=(0.86, 0.46, 0.48), bands=2, amt=0.25, root=0.0),
+}
+_STROKES = ("dash", "grain")
+
+
+def _preset_for(spec, mat, nth):
+    if isinstance(spec, str):
+        name = spec
+    elif isinstance(spec, dict):
+        fid = json.loads(mat.get("forge") or "{}").get("id") if mat is not None else None
+        name = spec.get(fid) or (spec.get(mat.name) if mat is not None else None) or spec.get("*") or list(_PRESETS)[nth % len(_PRESETS)]
+    elif isinstance(spec, (list, tuple)) and spec:
+        name = spec[nth % len(spec)]
+    else:
+        name = list(_PRESETS)[nth % len(_PRESETS)]
+    if name not in _PRESETS:
+        raise ValueError("preset %r unknown. Use one of: %s" % (name, ", ".join(_PRESETS)))
+    return name
+
+
+def _ao_all(S):
+    """Baked AO for every material slot in one pass, per covered pixel."""
+    import bpy
+    from .bake import _bake, _device
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    scene.cycles.samples = 16
+    scene.cycles.use_denoising = False
+    scene.cycles.use_adaptive_sampling = False
+    S.device = _device(S.size)
+    res = _bake(S.ob, S.mats, S.size, "AO", True)
+    ao = np.ones(len(S.ys), np.float32)
+    for i, m in enumerate(S.slots):
+        if m is None or m.name not in res:
+            continue
+        sel = S.pslot == i
+        if sel.any():
+            full = _blur(res[m.name][:, 0].reshape(S.size, S.size), 1)
+            ao[sel] = full[S.ys[sel], S.xs[sel]]
+    return ao
+
+
+def op_paint_bake(p):
+    stroke = p.get("stroke", "dash")
+    if stroke not in _STROKES:
+        raise ValueError("stroke %r unknown. Use dash (short tapered dashes) or grain (long streaks)" % stroke)
+    flow = p.get("flow", "tufts")
+    if flow not in _FLOWS:
+        raise ValueError("flow %r unknown. Use one of: %s" % (flow, ", ".join(_FLOWS)))
+    S = _prepare({**p, "all": True})
+    rng = np.random.default_rng(int(p.get("seed", 1)))
+    S.pslot = S.tslot[S.tid]
+    n = len(S.ys)
+    base, dk, lt = (np.zeros((n, 3), np.float32) for _ in range(3))
+    used, nth = {}, 0
+    for slot in np.unique(S.pslot):
+        mat = S.slots[slot] if slot < len(S.slots) else None
+        name = _preset_for(p.get("presets"), mat, nth)
+        nth += 1
+        used[name] = used.get(name, 0) + 1
+        k, sel = _PRESETS[name], S.pslot == slot
+        pos = S.pos[sel]
+        z = pos[:, 2]
+        t = (z - z.min()) / max(float(np.ptp(z)), 1e-6)
+        d = np.linalg.norm(pos - pos.mean(0), axis=1)
+        d = d / max(float(d.max()), 1e-6)
+        wave = 0.5 + 0.5 * np.sin(t * k["bands"] * 2.0 * math.pi + 0.7)
+        band = np.clip((wave - 0.35) / 0.3, 0.0, 1.0)[:, None] * k["amt"]
+        c = np.array(k["base"], np.float32) * (1.0 - band) + np.array(k["band"], np.float32) * band
+        c = c + (np.array(k["dark"], np.float32) - c) * (k["root"] * (1.0 - d) ** 1.5)[:, None]
+        base[sel] = c * (0.97 + 0.06 * rng.random((len(c), 1))).astype(np.float32)  # fine grain so flat areas never band
+        dk[sel], lt[sel] = k["dark"], k["light"]
+    size = S.size
+    q = dict(p)
+    if stroke == "dash":
+        q.setdefault("length", max(6, size // 96))
+        q.setdefault("width", max(3.0, size / 256.0))
+        q["density"] = float(p.get("density", 1.2))
+    F, _ = _flow(S, flow)
+    ao_px = _ao_all(S)
+    img, hgt, cov, count = _compose(S, base, dk, lt, ao_px, F, q, rng, float(p.get("ao", 0.6)), float(p.get("rim", 0.3)), dk)
+    from .bake import _safe, _save
+    out_dir = Path(p["out_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fname = "T_%s_D.png" % _safe(p.get("name") or "Paint")
+    color = _bleed(np.clip(img, 0.0, 1.0), S.occ)
+    _save(out_dir / fname, np.concatenate([color.reshape(-1, 3), np.ones((size * size, 1), np.float32)], 1), True)
+    if p.get("debug"):
+        np.save(out_dir / (fname[:-4] + "_dbg_occ.npy"), S.occ)
+    return _finish(S, p, {p["out_mat"]: {"base_color": fname}}, {"strokes": count, "stroke": stroke, "presets": used, "texture": fname[:-4]})
