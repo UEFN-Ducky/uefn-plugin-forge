@@ -58,7 +58,7 @@ def shape(p):
     eye = sx["eye"] * ag["eye"] * (1 + 0.15 * s["eye_size"])
     return dict(
         width=1 + 0.06 * s["face_width"] + 0.03 * b, depth=1 + 0.08 * s["skull_depth"], taper=0.3 * (2 - jaw),
-        jaw_fwd=0.11 * (1 + 0.15 * s["chin"]), f=ag["face"], brow=sx["brow"] * ag["brow"] * (1 + 0.4 * s["brow"]),
+        jaw_fwd=0.13 * (1 + 0.15 * s["chin"]), f=ag["face"], brow=sx["brow"] * ag["brow"] * (1 + 0.4 * s["brow"]),
         nose=nose, nose_w=nose * (1 + 0.25 * s["nose_width"]), nose_l=nose * (1 + 0.2 * s["nose_length"]),
         bridge=1 + 0.4 * s["nose_bridge"], lips=sx["lips"] * ag["lips"] * (1 + 0.35 * s["lip_full"]),
         chin=sx["chin"] * (1 + 0.4 * s["chin"]), cheek=sx["cheek"] * (1 + 0.5 * s["cheekbone"]),
@@ -79,14 +79,15 @@ def _raw(p, k):
     d = d / np.linalg.norm(d, axis=1, keepdims=True)
     dx, dy, dz = d.T
     front, back, low, up = (np.clip(v, 0, 1) for v in (-dy, dy, -dz, dz))
-    gonial = 0.07 * np.exp(-((dz + 0.6) / 0.18) ** 2) * (1 - back)              # jaw angle
-    rx = 0.31 * k["width"] * (1 - k["taper"] * low ** 2 + 0.09 * up + gonial)
+    gonial = 0.13 * np.exp(-((dz + 0.62) / 0.13) ** 2) * (1 - back)              # jaw angle
+    rx = 0.31 * k["width"] * (1 - k["taper"] * low ** 3 + 0.09 * up + gonial)    # cubic taper: square jaw, not an egg
     x = np.sign(dx) * np.abs(dx) ** (0.9 - 0.3 * up) * rx                      # upper skull: round crown, not an egg
     y = np.sign(dy) * np.abs(dy) ** 0.85 * np.where(dy < 0, 0.35, 0.385 * k["depth"])
     z = np.sign(dz) * np.abs(dz) ** (0.95 + 0.3 * up) * np.where(dz > 0, 0.53, 0.47)  # exponent blends: no squashed band
     y = y - k["jaw_fwd"] * low ** 1.5 * front                                   # mandible and chin come forward
-    z = z + low ** 1.5 * (0.16 * _smooth(-0.55, 0.3, dy) + 0.30 * back)       # under-jaw rises to the skull base
+    z = z + low ** 1.5 * (0.2 * _smooth(-0.55, 0.3, dy) + 0.5 * back)         # under-jaw rises to the skull base
     y = y + 0.03 * up ** 3 * front                                             # forehead slopes to the crown
+    y = y - 0.05 * front * up * (1 - up) * 4 * 0.5                             # but stays full: upright forehead
     y = y + 0.035 * np.exp(-((dz - 0.25) / 0.3) ** 2) * back                    # occiput
     return np.stack([x, y, z + 0.47], 1)
 
@@ -101,7 +102,9 @@ def _norm(k):
 
 
 def _skull(p, k, n):
-    q = _raw(p, k)
+    # each cube axis t -> t(0.5 + 0.5 t^2): the grid lines crowd 2x toward the face centre (same quads, the
+    # surface is unchanged), so nose, philtrum and lips get the resolution and the back of the skull pays
+    q = _raw(p * (0.5 + 0.5 * p * p), k)
     q[:, 2] -= n[0]
     return q * n[1]
 
@@ -136,25 +139,35 @@ def _relief(x, z, k, socket=True):
     """Y offset (+ = back) of every facial form at (x, z)."""
     ax, f = np.abs(x), k["f"]
     d = 0.035 * _g(ax, z, k["ex"], 0.5 * f, 0.055, 0.042) if socket else np.zeros_like(x)
-    d = d - 0.02 * k["brow"] * _g(ax, z, 0.115, 0.585 * f, 0.07, 0.022)         # brow ridge
-    d = d - 0.012 * k["brow"] * _g(x, z, 0, 0.57 * f, 0.03, 0.03)               # glabella
-    zt, zr = 0.322 * f, 0.56 * f                                                # nose tip, root (nasion)
+    # brow ridge: sharp lower edge over the eye, soft slope up the forehead
+    ridge = np.where(z < 0.585 * f, 0.014, 0.03)
+    d = d - 0.024 * k["brow"] * np.exp(-0.5 * (((ax - 0.115) / 0.075) ** 2 + ((z - 0.585 * f) / ridge) ** 2))
+    d = d - 0.012 * k["brow"] * _g(x, z, 0, 0.575 * f, 0.03, 0.03)              # glabella
+    d = d + 0.006 * _g(x, z, 0, 0.545 * f, 0.022, 0.014)                        # nasion dip
+    zt, zr = 0.322 * f, 0.55 * f                                                # nose tip, root (nasion)
     t = np.clip((zr - z) / (zr - zt), 0, 1)
-    reach = 0.085 * k["nose_l"] * (0.15 * k["bridge"] + 0.85 * t ** 1.15)
-    wid = (0.018 + 0.022 * t) * k["nose_w"]
-    below = np.where(z < zt, np.exp(-0.5 * ((z - zt) / (0.016 * f)) ** 2), 1.0)
+    reach = 0.085 * k["nose_l"] * (0.12 * k["bridge"] + 0.88 * t ** 1.1)
+    wid = (0.014 + 0.016 * t) * k["nose_w"]
+    below = np.where(z < zt, np.exp(-0.5 * ((z - zt) / (0.013 * f)) ** 2), 1.0)
     above = np.where(z > zr, np.exp(-0.5 * ((z - zr) / 0.02) ** 2), 1.0)
-    d = d - reach * np.exp(-0.5 * (x / wid) ** 2) * below * above
-    d = d - 0.02 * k["nose_l"] * _g(x, z, 0, zt, 0.02 * k["nose_w"], 0.02)       # tip lobule
-    d = d - 0.035 * k["nose"] * _g(ax, z, 0.045 * k["nose_w"], 0.312 * f, 0.018 * k["nose_w"], 0.018)  # alae
-    d = d + 0.006 * _g(ax, z, 0.024 * k["nose_w"], 0.298 * f, 0.009, 0.006)    # nostril shadow
+    d = d - reach * np.exp(-(np.abs(x) / wid) ** 3) * below * above             # bridge: flat sides, defined edges
+    d = d + 0.004 * _g(x, z, 0, 0.36 * f, 0.02, 0.012) * k["nose_l"]            # supratip break
+    d = d - 0.022 * k["nose_l"] * _g(x, z, 0, zt, 0.017 * k["nose_w"], 0.016)   # tip lobule
+    ala = (0.047 * k["nose_w"], 0.31 * f)
+    d = d - 0.045 * k["nose"] * _g(ax, z, ala[0], ala[1], 0.016 * k["nose_w"], 0.015)  # alar wings
+    r_ala = np.hypot((ax - ala[0]) / k["nose_w"], z - ala[1])
+    d = d + 0.006 * np.exp(-0.5 * ((r_ala - 0.02) / 0.004) ** 2) * (z > 0.29 * f)   # alar groove round each wing
     d = d - 0.03 * _g(x, z, 0, 0.215 * f, 0.11 * k["mw"], 0.065)                 # maxilla / dental arch
-    d = d - 0.003 * _g(ax, z, 0.009, 0.25 * f, 0.003, 0.018)                     # philtrum ridges
+    d = d - 0.005 * _g(ax, z, 0.009, 0.255 * f, 0.004, 0.02)                     # philtrum columns
+    d = d + 0.002 * _g(x, z, 0, 0.255 * f, 0.004, 0.02)                         # philtrum groove
+    d = d + 0.008 * _g(ax, z, 0.104 * k["mw"], 0.205 * f, 0.01, 0.01)           # mouth-corner pits
     d = d - 0.012 * k["lips"] * _g(x, z, 0, 0.217 * f, 0.07 * k["mw"], 0.011)   # upper lip
     d = d - 0.015 * k["lips"] * _g(x, z, 0, 0.19 * f, 0.06 * k["mw"], 0.013)    # lower lip
     d = d + 0.008 * _g(x, z, 0, 0.152 * f, 0.05, 0.012)                         # mentolabial sulcus
     d = d - 0.022 * k["chin"] * _g(x, z, 0, 0.065 * f, 0.05, 0.035)             # chin
-    d = d - 0.02 * k["cheek"] * _g(ax, z, 0.19, 0.43 * f, 0.05, 0.035)          # cheekbones
+    d = d - 0.006 * k["chin"] * _g(x, z, 0, 0.08 * f, 0.025, 0.02)              # chin pad
+    d = d - 0.026 * k["cheek"] * _g(ax, z, 0.2, 0.44 * f, 0.045, 0.028)         # zygoma
+    d = d + 0.008 * max(0.4 - k["fat"], 0) * _g(ax, z, 0.17, 0.33 * f, 0.035, 0.035)  # submalar hollow
     d = d - 0.01 * k["fat"] * _g(ax, z, 0.15, 0.30 * f, 0.06, 0.06)             # cheek fat (build)
     a, b = np.array([0.06 * k["nose_w"], 0.31 * f]), np.array([0.125 * k["mw"], 0.17 * f])
     pq = np.stack([ax, z], -1) - a
@@ -293,7 +306,7 @@ def build_shell(k):
     for name, s in (("eye_L", 1), ("eye_R", -1)):
         cyc = cycles[name]
         cx = s * ex
-        a = 0.0625 * k["eye"]
+        a = min(0.0625 * k["eye"], ex - 0.06)  # big, close-set eyes: the inner corner keeps 0.06 H from the mid-line
 
         def almond(th, d=0.0, cx=cx, s=s, a=a):
             """Lid outline grown by d (H) all round: rings are offset almonds, so they never cross."""
@@ -307,8 +320,10 @@ def build_shell(k):
         xz[1] = (xz[0] + xz[2]) / 2  # ring 1 bridges to the grid patch, whose edge may sit inside the nominal box
         prev, rings = cyc, []
         for r in range(1, EYE_RINGS + 1):
-            lid = 0.0012 if r == EYE_RINGS else 0.003 if r == EYE_RINGS - 1 else 0.004
+            lid = 0.0018 if r == EYE_RINGS else 0.004 if r == EYE_RINGS - 1 else 0.004
             pts = _surface(xz[r], k, n, lid)
+            if r == 2:  # upper-lid crease: this ring sinks a little above the eye
+                pts[:, 1] += 0.004 * np.clip(np.sin(th), 0, 1)
             prev = _ring(bm, prev, pts, 0, [])
             rings.append(prev)
         centre = np.array([cx, k["ey"], ez])
@@ -370,10 +385,27 @@ def build_shell(k):
     _cap(bm, prev, (0, ys + 0.21, mz), 2)  # deep pointed cap: a flat fan's coplanar tris z-fight in qa
     info["rings"]["mouth"] = rings
     info["bag"]["mouth"] = bag
+    # nostrils: on each side the grid face nearest the nostril on the nose's underside becomes a hole with a short
+    # tunnel up into the nose, left open at its far end (2 boundary loops, deep inside where nothing sees them)
+    info["nostrils"] = []
+    bm.normal_update()
+    loops = {v for r in rings for v in r} | {v for r in bag for v in r}
+    for s in (1, -1):
+        want = Vector((s * 0.021 * k["nose_w"], 0, 0.3 * f))
+        cand = [fc for fc in bm.faces if fc.material_index == 0 and fc.normal.z < -0.2 and len(fc.verts) == 4
+                and not any(v in loops for v in fc.verts)]
+        best = min(cand, key=lambda fc: (fc.calc_center_median() - want).xz.length + 0.3 * fc.calc_center_median().y)
+        cyc = _hole(bm, [best])
+        c = np.mean([tuple(v.co) for v in cyc], axis=0)
+        prev = cyc
+        for scale, back, up in ((0.75, 0.008, 0.008), (0.5, 0.016, 0.018)):
+            prev = _ring(bm, prev, [c + (np.array(tuple(v.co)) - c) * scale + [0, back, up] for v in prev], 3, [])
+        info["nostrils"].append(prev)
     info.update(ys=ys, mz=mz, ez=ez, n=n)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.verts.index_update()
     info["rings"] = {name: [[v.index for v in r] for r in rs] for name, rs in info["rings"].items()}
+    info["nostrils"] = [[v.index for v in r] for r in info["nostrils"]]
     info["bag"] = {name: ([[v.index for v in r] for r in b] if name == "mouth" else [v.index for v in b])
                    for name, b in info["bag"].items()}
     return bm, info
@@ -528,9 +560,11 @@ def _ear(side, centre, k):
 
     def front_h(r, th):
         lobe = np.clip(-np.sin(th), 0, 1) ** 2
-        rim = 0.026 * np.exp(-0.5 * ((r - 0.93) / 0.06) ** 2) + 0.018 * np.exp(-0.5 * ((r - 0.62) / 0.08) ** 2)
-        bowl = -0.012 * (1 - _smooth(0.35, 0.5, r))
-        return 0.012 + (rim + bowl) * (1 - lobe) + 0.004 * lobe
+        rim = 0.034 * np.exp(-0.5 * ((r - 0.92) / 0.06) ** 2) + 0.022 * np.exp(-0.5 * ((r - 0.62) / 0.07) ** 2)  # helix, antihelix
+        bowl = -0.016 * (1 - _smooth(0.35, 0.5, r))                                    # concha
+        front = np.exp(-0.5 * (((th - math.pi) % (2 * math.pi) - math.pi) / 0.35) ** 2)  # toward the face (-Y)
+        tragus = 0.02 * front * np.exp(-0.5 * ((r - 0.48) / 0.09) ** 2)
+        return 0.018 + (rim + bowl) * (1 - lobe) + 0.008 * lobe + tragus
 
     th = np.linspace(0, 2 * math.pi, S, endpoint=False)
     bx, bz = outline(th)
@@ -538,7 +572,7 @@ def _ear(side, centre, k):
     rows = {"f": [], "b": []}
     for kind in ("f", "b"):
         rows[kind].append([len(verts)])
-        verts.append((0.012 if kind == "f" else -0.03, 0.0, 0.0))  # both centres are cones, not flat fans (the back one is inside the head)
+        verts.append((-0.008 if kind == "f" else -0.03, 0.0, 0.0))  # both centres are cones, not flat fans (the back one is inside the head)
         for j in range(1, J):
             r = (j / J) ** 0.6  # first ring at 0.34: tiny centre fans z-fight in qa
             hf = front_h(r, th)
@@ -610,8 +644,102 @@ def materials(prefix, tone, iris):
         "Caruncle": [{"type": "base", "color": [0.7, 0.3, 0.3], "roughness": 0.15}, sss],
         "TearLine": [{"type": "base", "color": [1.0, 1.0, 1.0], "roughness": 0.0, "opacity": 0.3},
                      {"type": "clearcoat", "weight": 1.0, "roughness": 0.0}],
+        "Brow": [{"type": "base", "color": [0.035, 0.022, 0.014], "roughness": 0.55},
+                 {"type": "noise", "target": "color", "scale": 300.0, "detail": 4.0, "amount": 0.3, "color": [0.09, 0.06, 0.04]}],
+        "Lash": [{"type": "base", "color": [0.012, 0.009, 0.007], "roughness": 0.5}],
+        "Ears": [{"type": "base", "color": (np.array(skin) * [1.0, 0.88, 0.86]).tolist(), "roughness": 0.5},
+                 {"type": "noise", "target": "bump", "scale": 900.0, "detail": 2.0, "amount": 0.2}, sss],
     }
     return {k: _material("%s_%s" % (prefix, k), v) for k, v in spec.items()}
+
+
+# ---- hair cards: brows and lashes --------------------------------------------------------------------------
+# Cards are 2-3 segment strips. Neighbours alternate a +-0.45 rad twist so qa never sees coplanar neighbours, and
+# every card stays wider than 0.05 cm so nothing welds.
+
+
+def _strip(pts, side, width):
+    pts, side = np.asarray(pts, float), np.asarray(side, float)
+    m = len(pts)
+    verts = np.concatenate([pts - side * width / 2, pts + side * width / 2]).tolist()
+    return verts, [[i, i + 1, m + i + 1, m + i] for i in range(m - 1)]
+
+
+def _spread(co, min_d, rounds=8):
+    """Push the later point of any pair closer than min_d (H units) 1.5 min_d off the skin (-Y): overlapping
+    hair cards would otherwise weld in qa."""
+    co = co.copy()
+    for _ in range(rounds):
+        d = np.linalg.norm(co[:, None] - co[None], axis=2)
+        d[np.tril_indices(len(co))] = 9
+        close = np.unique(np.nonzero(d < min_d)[1])
+        if not len(close):
+            break
+        co[close, 1] -= 1.5 * min_d
+    return co.tolist()
+
+
+def _brows(k, info):
+    """Two staggered rows of 18 cards per brow along the arch: hairs rise at the head, sweep out to the tail."""
+    out, f, n = [], k["f"], info["n"]
+    thick = 1.0 + 0.3 * (k["brow"] - 1)
+    for s in (1, -1):
+        for row in range(3):
+            for i in range(18):
+                u = (i + 0.33 * row) / 18
+                if row == 2 and u > 0.55:
+                    continue  # the tail thins to two rows
+                x = 0.052 + 0.17 * u
+                z = 0.583 * f + 0.022 * math.sin(math.pi * min(u / 0.65, 1.0) * 0.5) - 0.012 * max(u - 0.65, 0) / 0.35 \
+                    + (row - 1) * 0.006 * thick * (1.2 - 0.5 * u)
+                ang = math.radians(75 - 70 * min(u / 0.6, 1.0) - 10 * max(u - 0.6, 0) / 0.4)  # up at the head, out at the tail
+                d = np.array([s * math.cos(ang), math.sin(ang)])
+                L = 0.03 * (0.8 + 0.2 * math.sin(math.pi * u))
+                xz = np.array([[s * x, z]]) + np.outer(np.arange(3) / 2, d * L)
+                pts = _surface(xz, k, n)
+                # neighbours along a row and across rows sit on different depth levels: overlapping cards never weld
+                pts[:, 1] -= 0.0012 + 0.003 * (i % 2 + 2 * row) + 0.0018 * np.arange(3) / 2
+                tw = (0.45, -0.45, 0.9)[(i + row) % 3]
+                perp = np.array([-d[1], 0.0, d[0]])
+                side = perp * math.cos(tw) + np.array([0, -1.0, 0]) * math.sin(tw)
+                v, fc = _strip(pts, np.tile(side, (3, 1)), 0.006 * thick)
+                out.append((v, fc, 2))
+    return out
+
+
+def _lashes(me, k, info):
+    """One card per lid-margin vertex: upper lashes 0.035 H curling up, lower 0.02 H pointing down."""
+    out, ez = [], info["ez"]
+    for name, s in (("eye_L", 1), ("eye_R", -1)):
+        ring = np.array([tuple(me.vertices[i].co) for i in info["rings"][name][-1]])
+        centre = np.array([s * k["ex"], 0.0, ez])
+        inner_x = ring[np.argmin(np.abs(ring[:, 0])), 0]
+        m = len(ring)
+        made = 0
+        for i, p in enumerate(ring):
+            if abs(p[0] - inner_x) < 0.012:
+                continue  # caruncle corner
+            upper = p[2] > ez + k["tilt"] * (p[0] - centre[0]) * s / 0.0625
+            outward = p - centre
+            outward[1] = 0
+            outward /= max(np.linalg.norm(outward), 1e-9)
+            if upper:
+                d, L, curl, root = outward * 0.2 + [0, -0.85, 0.45], 0.024, 0.35, p + [0, -0.002, 0.001]
+            else:
+                if i % 2:
+                    continue  # lower lashes: sparser and shorter
+                d, L, curl, root = outward * 0.2 + [0, -0.85, -0.4], 0.011, -0.1, p + [0, -0.004, -0.002]
+            d = d / np.linalg.norm(d)
+            t = np.arange(4) / 3 if upper else np.arange(2.0)  # short lower lashes: one quad (straight segments z-fight)
+            pts = root + np.outer(t, d * L) + np.outer(t ** 2, [0, 0, curl * L])
+            tan = ring[(i + 1) % m] - ring[i - 1]
+            tan /= max(np.linalg.norm(tan), 1e-9)
+            tw = 0.5 if made % 2 else -0.5  # alternate per card made (lower lashes skip vertices)
+            made += 1
+            side = tan * math.cos(tw) + np.cross(d, tan) * math.sin(tw)
+            v, fc = _strip(pts, np.tile(side, (len(t), 1)), 0.0035)
+            out.append((v, fc, 3))
+    return out
 
 
 # ---- assembly ----------------------------------------------------------------------------------------------
@@ -703,7 +831,13 @@ def build_head(p):
             m = len(low)
             wf += [[n0 + i, n0 + i + 1, n0 + m + i + 1, n0 + m + i] for i in range(m - 1)]
             wm += [1] * (m - 1)
-    parts["eyewet"] = _object(prefix + "_eyewet", wv, wf, [mats["Caruncle"], mats["TearLine"]], wm)
+    for verts, faces, mat in _brows(k, info) + _lashes(me, k, info):
+        n0 = len(wv)
+        wv += verts
+        wf += [[i + n0 for i in q] for q in faces]
+        wm += [mat] * len(faces)
+    wv = _spread(np.array(wv), 0.0006 / H)
+    parts["details"] = _object(prefix + "_details", wv, wf, [mats[m] for m in ("Caruncle", "TearLine", "Brow", "Lash")], wm)
     # teeth, gums, tongue
     ys, mz = info["ys"], info["mz"]
     tv, tf, nt = _arch(ys + 0.012, mz + 0.038, mz - 0.004, k, mz + 0.038, True)  # roots end mid-gum
@@ -724,8 +858,8 @@ def build_head(p):
         n0 = len(ev)
         ev += v
         ef += [[i + n0 for i in q] for q in fc]
-    parts["ears"] = _object(prefix + "_ears", ev, ef, [mats["Skin"]])
-    for name in ("eyewet", "teeth_U", "teeth_L", "tongue", "ears"):  # pivot on the part's base (qa); eyes keep a centre pivot to aim
+    parts["ears"] = _object(prefix + "_ears", ev, ef, [mats["Ears"]])
+    for name in ("details", "teeth_U", "teeth_L", "tongue", "ears"):  # pivot on the part's base (qa); eyes keep a centre pivot to aim
         ob = parts[name]
         co = np.array([tuple(v.co) for v in ob.data.vertices])
         base = Vector(((co[:, 0].min() + co[:, 0].max()) / 2, (co[:, 1].min() + co[:, 1].max()) / 2, co[:, 2].min()))

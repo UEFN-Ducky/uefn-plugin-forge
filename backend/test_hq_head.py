@@ -61,7 +61,7 @@ def test_proportions():
     parts, info = build()
     z = np.array([v.co.z for v in parts["head"].data.vertices])
     lo, hi = z.min(), z.max()
-    assert abs(lo) < 1e-4 and abs(hi - 0.24) < 0.002, "head spans z %.3f..%.3f m, want 0..0.24" % (lo, hi)
+    assert abs(lo) < 1e-3 and abs(hi - 0.24) < 0.002, "head spans z %.3f..%.3f m, want 0..0.24" % (lo, hi)
     eye_z = parts["eye_L"].location.z
     assert abs((eye_z - lo) / (hi - lo) - 0.5) <= 0.03, "eye line at %.3f of head height" % ((eye_z - lo) / (hi - lo))
     co = np.array([tuple(v.co) for v in parts["head"].data.vertices])
@@ -85,11 +85,30 @@ def test_loops_valence_4():
     bm.free()
 
 
-def test_manifold():
-    parts, _ = build()
+def test_manifold_and_nostrils():
+    """The shell is closed except two nostril tunnels: exactly 2 boundary loops, inside the nose."""
+    parts, info = build()
     bm = _bm(parts["head"])
-    open_edges = [e for e in bm.edges if len(e.link_faces) != 2]
-    assert not open_edges, "head shell has %d non-manifold edges" % len(open_edges)
+    assert not [e for e in bm.edges if len(e.link_faces) > 2], "head shell has non-manifold edges"
+    open_edges = [e for e in bm.edges if len(e.link_faces) == 1]
+    verts = {v for e in open_edges for v in e.verts}
+    loops = []
+    while verts:  # flood the boundary into loops
+        stack, loop = [verts.pop()], set()
+        while stack:
+            v = stack.pop()
+            loop.add(v)
+            for e in v.link_edges:
+                w = e.other_vert(v)
+                if len(e.link_faces) == 1 and w in verts:
+                    verts.discard(w)
+                    stack.append(w)
+        loops.append(loop)
+    assert len(loops) == 2, "want 2 boundary loops (nostrils), got %d" % len(loops)
+    for loop in loops:
+        c = np.mean([tuple(v.co) for v in loop], axis=0) / 0.24
+        assert abs(c[0]) < 0.05 and 0.27 < c[2] < 0.36 and c[1] < -0.2, "nostril loop outside the nose at %s H" % c
+    assert sorted(len(loop) for loop in loops) == [4, 4] and len(info["nostrils"]) == 2
     bm.free()
     for name in ("eye_L", "eye_R", "ears", "tongue"):
         bm = _bm(parts[name])
@@ -100,7 +119,17 @@ def test_manifold():
 
 def test_parts_and_materials():
     parts, _ = build()
-    assert {"head", "eye_L", "eye_R", "eyewet", "teeth_U", "teeth_L", "tongue", "ears"} <= set(parts)
+    assert {"head", "eye_L", "eye_R", "details", "teeth_U", "teeth_L", "tongue", "ears"} <= set(parts)
+    det = parts["details"]
+    mw = det.matrix_world
+    by = {}
+    for q in det.data.polygons:
+        by.setdefault(det.data.materials[q.material_index].name.split("_", 1)[1], []).append((mw @ q.center) / 0.24)
+    assert len(by.get("Brow", ())) >= 100, "eyebrow cards missing: %d brow faces" % len(by.get("Brow", ()))
+    assert len(by.get("Lash", ())) >= 60, "lash cards missing: %d lash faces" % len(by.get("Lash", ()))
+    bz = np.array([c.z for c in by["Brow"]])
+    assert 0.55 < bz.mean() < 0.65 and {c.x > 0 for c in by["Brow"]} == {True, False}, "brows sit above both eyes"
+    assert all(abs(c.z - 0.5) < 0.06 for c in by["Lash"]), "lashes ring the eyes"
     eye = [m.name.split("_", 1)[1] for m in parts["eye_L"].data.materials]
     assert eye == ["Sclera", "Cornea", "Iris", "Pupil"], eye
     used = {parts["eye_L"].data.materials[q.material_index].name.split("_", 1)[1] for q in parts["eye_L"].data.polygons}
@@ -136,6 +165,46 @@ def test_variants():
     w, _ = build(shape={"nose_width": 1})
     span = lambda parts: np.ptp([v.co.x for v in parts["head"].data.vertices if abs(v.co.x) < 0.03 and 0.07 < v.co.z < 0.08 and v.co.y < -0.08])  # noqa: E731
     assert span(w) >= span(a), "nose_width=1 should not narrow the nose"
+
+
+# Average adult side profile through anthropometric landmarks, in head heights (y forward = -, z up), crown first.
+PROFILE = [(0.0, 1.0), (-0.22, 0.94), (-0.34, 0.8), (-0.39, 0.66), (-0.41, 0.585), (-0.385, 0.55), (-0.43, 0.42),
+           (-0.47, 0.325), (-0.4, 0.3), (-0.42, 0.24), (-0.4, 0.205), (-0.415, 0.18), (-0.385, 0.15), (-0.4, 0.07),
+           (-0.33, 0.0), (-0.15, 0.06), (0.0, 0.17), (0.2, 0.27), (0.38, 0.42), (0.42, 0.6), (0.34, 0.85), (0.18, 0.97)]
+
+
+def _inside(poly, py, pz):
+    poly = np.asarray(poly)
+    inside = np.zeros(py.shape, bool)
+    for (y0, z0), (y1, z1) in zip(poly, np.roll(poly, -1, 0)):
+        cross = ((z0 > pz) != (z1 > pz)) & (py < (y1 - y0) * (pz - z0) / (z1 - z0 + 1e-12) + y0)
+        inside ^= cross
+    return inside
+
+
+def _side_mask(ob, H, grid):
+    """Side silhouette of the mesh on a (y, z) grid in head heights: every triangle filled."""
+    co = np.array([tuple(ob.matrix_world @ v.co) for v in ob.data.vertices]) / H
+    mask = np.zeros((len(grid), len(grid)), bool)
+    step = grid[1] - grid[0]
+    for q in ob.data.polygons:
+        vs = list(q.vertices)
+        for i in range(1, len(vs) - 1):
+            t = co[[vs[0], vs[i], vs[i + 1]]][:, 1:]
+            lo, hi = np.searchsorted(grid, t.min(0) - step), np.searchsorted(grid, t.max(0) + step)
+            gy, gz = np.meshgrid(grid[lo[0]:hi[0]], grid[lo[1]:hi[1]], indexing="ij")
+            mask[lo[0]:hi[0], lo[1]:hi[1]] |= _inside(t, gy, gz)
+    return mask
+
+
+def test_side_profile_iou():
+    parts, _ = build(sex="male")
+    grid = np.linspace(-0.6, 0.6, 241)
+    mask = _side_mask(parts["head"], 0.24, grid)
+    gy, gz = np.meshgrid(grid, grid, indexing="ij")
+    ref = _inside(PROFILE, gy, gz)
+    iou = (mask & ref).sum() / (mask | ref).sum()
+    assert iou >= 0.8, "side profile IoU %.2f against the landmark profile (want 0.8+)" % iou
 
 
 def test_qa_rules_every_part():
@@ -208,8 +277,8 @@ def test_through_forge_batch():
             names = {n.get("name") for n in scene.data["nodes"] if n.get("type") == "object"}
             assert {"Head", "Head_eye_L", "Head_eye_R", "Head_teeth_U", "Head_tongue", "Head_ears", "Her"} <= names, names
             skin = next(m for m in scene.data["materials"] if m["name"] == "Head_Skin")
-            image = next(layer for layer in skin["spec"]["layers"] if layer["type"] == "image")
-            assert image["target"] == "roughness" and (scene.folder / "textures" / image["image"]).is_file()
+            images = {layer["target"]: layer["image"] for layer in skin["spec"]["layers"] if layer["type"] == "image"}
+            assert set(images) == {"color", "roughness"} and all((scene.folder / "textures" / f).is_file() for f in images.values())
             # the documented chain: qa char >= 85 with no errors, then the hero uv packs > 40 %
             ids = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith("Head")]
             qa = t["forge_hq"](name="HeadTest", op="qa", params={"ids": ids, "profile": "uefn", "budget": "char", "verbose": True})

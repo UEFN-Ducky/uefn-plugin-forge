@@ -19,7 +19,7 @@ One call builds a game-ready human head: a quad shell with real edge loops, eyeb
 ]}
 ```
 
-Result: `head adult male 11.0k tris 98% quads, eyes 2, teeth, mouth bag, 6 groups` (all parts; the head shell is about 7k).
+Result: `head adult male 11.7k tris 97% quads, eyes 2, teeth, mouth bag, 6 groups` (all parts; the head shell is about 7k).
 
 | Param | Values |
 |---|---|
@@ -34,11 +34,28 @@ Mix sliders for any face. Never encode ethnicity as a preset. Build the look fro
 
 ## What you get
 
-- **Head**: about 7k tris, 90% quads or more, closed. Circular loops round each eye (4 rings, the last hugging the eyeball) and round the mouth (5 rings: nasolabial, cheek, vermilion border, lip middle, seam). 5-poles sit at the patch corners, outside the loops. There is an eye-socket bag and an inner mouth bag. Slots are `Skin Lips MouthBag EyeSocket`.
+- **Head**: about 7k tris, 90% quads or more. The grid crowds 2x toward the face, so the forms have resolution:
+  - Nose: bridge with flat sides, nasion dip, supratip break, alar wings with a groove round them.
+  - Brow ridge with a sharp lower edge; zygoma and submalar hollow; square jaw angle; chin pad.
+  - Mouth: philtrum columns and groove, mouth-corner pits.
+  - Loops: circular loops round each eye (4 lid rings, the last hugging the eyeball, an upper-lid crease) and round the mouth (5 rings: nasolabial, cheek, vermilion border, lip middle, seam). 5-poles sit at the patch corners, outside the loops.
+  - Bags and holes: an eye-socket bag, an inner mouth bag, and **2 nostril holes** with tunnels. The tunnels are open deep inside the nose; they are the only open edges.
+  - Slots: `Skin Lips MouthBag EyeSocket`.
 - **Groups** for `face_shapes`: `eyes lips brows jaw nose cheeks`.
 - **`_eye_L/_R`**: the pivot sits at the eyeball centre (rotate it to aim). The sclera and cornea dome are one shell. The iris and pupil disc sit 2 mm under the cornea, which gives real parallax.
-- **`_eyewet`**: caruncles plus lower-lid tear lines. **`_teeth_U/_L`**: teeth on a parabolic arch, plus gums. **`_tongue`** and **`_ears`** (helix, antihelix, concha, lobe).
-- **Skin**: SSS weight 1 with radius R 1.0 / G 0.35 / B 0.2 cm. A roughness map gives an oily T-zone (0.32) against cheeks (0.58), with noise breakup on top. The pore bump is procedural. The cornea is wet (opacity 0.06 + clear coat).
+- **`_details`**: caruncles and lower-lid tear lines, plus hair cards:
+  - Eyebrows: 3 staggered rows per brow. Hairs rise at the head and sweep out to the tail; the tail thins to 2 rows.
+  - Lashes: one card per lid-margin vertex. Upper lashes are 0.024 H and curl up; lower lashes are 0.011 H, every other vertex.
+  - For groomed hair on the scalp, use `hair` then `hair_cards`.
+- **`_teeth_U/_L`**: teeth on a parabolic arch, plus gums.
+- **`_tongue`**.
+- **`_ears`**: thick helix, antihelix, deep concha, tragus, lobe. They use their own redder `Ears` slot.
+- **Skin**:
+  - SSS weight 1 with radius R 1.0 / G 0.35 / B 0.2 cm.
+  - A colour map gives a redder nose and cheeks, plus a blue-grey beard shadow on adult males.
+  - A roughness map gives an oily T-zone (0.32) against cheeks (0.58), with noise breakup on top.
+  - The pore bump is procedural. For sculpted pores, run `sculpt_hd` with `pores` and bake (hero pass).
+- **Cornea**: wet (opacity 0.06 + clear coat).
 
 ## Proportions it holds (Loomis / Reilly)
 
@@ -55,9 +72,9 @@ Mix sliders for any face. Never encode ethnicity as a preset. Build the look fro
 
 Order matters: `head` → `face_shapes` → `lods`. LOD1 and later drop shape keys, so add blendshapes before building LODs.
 
-1. `{"op": "qa", "params": {"ids": ["<head ids>"], "profile": "uefn", "budget": "char"}}`: expect a score of 88 with 0 errors (head alone: 100). The warnings left are intended: the eye pivots sit at the eyeball centre so the eyes can aim, the tear lines are open strips, and the set uses 13 slots.
+1. `{"op": "qa", "params": {"ids": ["<head ids>"], "profile": "uefn", "budget": "char"}}`: expect a score of 85 with 0 errors (head alone: 97, the nostril tunnels). The warnings left are intended: the eye pivots sit at the eyeball centre so the eyes can aim, the cards and tear lines are open strips, the nostrils are open, and the set uses 16 slots.
 2. `{"op": "sculpt_hd", "id": "<head>", "params": {"levels": 3, "detail": "pores"}}` adds tertiary pores in a sidecar.
-3. `{"op": "uv", "id": "<head>", "params": {"method": "seams", "res": 2048, "texel": 0}}`: `texel: 0` fills the map (about 67% packed, 4.6k px/m). The default 512 px/m packs a 24 cm head into about 3% of the map.
+3. `{"op": "uv", "id": "<head>", "params": {"method": "seams", "res": 2048, "texel": 0}}`: `texel: 0` fills the map (about 47% packed, 3.9k px/m). The default 512 px/m packs a 24 cm head into about 3% of the map.
 4. `{"op": "bake", "id": "<head>", "params": {"from_high": true, "maps": ["normal"]}}` bakes a pore normal.
 5. `{"op": "hair", "id": "<head>", "params": {"style": "short"}}`, then `hair_cards`.
 6. `{"op": "face_shapes", "params": {"ids": ["<head>"], "set": "arkit52"}}` adds blendshapes on the named groups.

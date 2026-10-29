@@ -62,29 +62,54 @@ def roughness(u, v):
     return max(0.0, min(1.0, r))
 
 
-def _tzone(scene, name, size=256):
-    """8-bit grey PNG of roughness() (stdlib only: the engine Python has no PIL)."""
-    rows = b"".join(b"\0" + bytes(round(255 * roughness((i + 0.5) / size, 1 - (j + 0.5) / size)) for i in range(size))
-                    for j in range(size))
+_LIGHT, _DEEP = (0.68, 0.45, 0.36), (0.13, 0.065, 0.04)  # linear albedo at tone 0 and 1 (same as the engine's)
+
+
+def colour(u, v, tone, male):
+    """Linear skin albedo at head UV: redder nose, cheeks and lips' surround; blue-grey beard shadow on a male jaw."""
+    c = [a + (b - a) * tone for a, b in zip(_LIGHT, _DEEP)]
+    red = 0.9 * math.exp(-0.5 * ((u - 0.5) / 0.03) ** 2) * (0.29 <= v <= 0.5) \
+        + 0.7 * (_g(u, v, 0.41, 0.4, 0.04, 0.05) + _g(u, v, 0.59, 0.4, 0.04, 0.05)) \
+        + 0.3 * (_g(u, v, 0.5, 0.62, 0.05, 0.03) + _g(u, v, 0.5, 0.08, 0.04, 0.04))
+    c = [c[0] * (1 + 0.04 * red), c[1] * (1 - 0.12 * red), c[2] * (1 - 0.14 * red)]
+    if male:
+        beard = _g(u, v, 0.5, 0.12, 0.12, 0.1) * (1 - 0.8 * _g(u, v, 0.5, 0.21, 0.07, 0.035))  # jaw + upper lip, not the lips
+        c = [a * (1 - 0.35 * beard) + g * 0.35 * beard for a, g in zip(c, (0.2, 0.21, 0.24))]
+    return c
+
+
+def _png(scene, file, fn, rgb, size=256):
+    """8-bit grey or RGB PNG of fn(u, v) in 0..1 (stdlib only: the engine Python has no PIL)."""
+    def px(u, v):
+        val = fn(u, v)
+        vals = val if rgb else [val]
+        return bytes(round(255 * max(0.0, min(1.0, x))) for x in vals)
+    rows = b"".join(b"\0" + b"".join(px((i + 0.5) / size, 1 - (j + 0.5) / size) for i in range(size)) for j in range(size))
     chunk = lambda tag, data: struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))  # noqa: E731
-    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 0, 0, 0, 0)) \
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2 if rgb else 0, 0, 0, 0)) \
         + chunk(b"IDAT", zlib.compress(rows, 9)) + chunk(b"IEND", b"")
     folder = scene.folder / "textures"
     folder.mkdir(parents=True, exist_ok=True)
-    file = "T_%s_Skin_R.png" % name
     (folder / file).write_bytes(png)
     return file
 
 
+def _srgb(c):
+    return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
+
+
 @op("head", "head(sex=male|female|neutral, age=child|adult|elder, build=slim|average|heavy, shape={slider:-1..1}, height_cm=24, "
             "tone=0.3, eye_color=brown|hazel|green|blue|grey|amber, name=Head) realistic quad head: eye/mouth/nasolabial loops, "
-            "eyeballs (sclera, iris, cornea), tear lines, teeth, gums, tongue, mouth bag, ears, SSS skin; groups eyes lips brows jaw nose cheeks")
+            "eyeballs (sclera, iris, cornea), brow+lash cards, nostrils, teeth, tongue, mouth bag, ears, SSS skin with colour zones; groups eyes lips brows jaw nose cheeks")
 def head(scene, p):
     q = params({k: v for k, v in p.items() if k not in ("id", "wait")})
     result, changed = engine(scene, "head", [], q)
     skin = scene.materials().get("m" + hashlib.sha1(("%s_Skin" % q["name"]).encode()).hexdigest()[:6])
     if skin is not None and skin.get("spec"):
         layers = [layer for layer in skin["spec"]["layers"] if layer.get("type") != "image"]
-        layers.insert(1, {"type": "image", "image": _tzone(scene, q["name"]), "target": "roughness"})
+        male = q["sex"] == "male" and q["age"] != "child"
+        col = _png(scene, "T_%s_Skin_C.png" % q["name"], lambda u, v: [_srgb(c) for c in colour(u, v, q["tone"], male)], True)
+        rough = _png(scene, "T_%s_Skin_R.png" % q["name"], roughness, False)
+        layers[1:1] = [{"type": "image", "image": col, "target": "color"}, {"type": "image", "image": rough, "target": "roughness"}]
         skin["spec"]["layers"] = layers
     return {"summary": result["summary"], "ids": changed, "stats": {k: result[k] for k in ("tris", "quads", "groups") if k in result}}
