@@ -338,5 +338,25 @@ class ProjectStorage(unittest.TestCase):
             self.assertEqual([s["name"] for s in scene.list_scenes()], ["A"])
 
 
+class DockTexture(unittest.TestCase):
+    def test_big_texture_fits_one_dock_message_and_paint_keeps_full(self):
+        import base64, io, random
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as tmp, _env(tmp, FORGE_SCENES_DIR=tmp):
+            tex = Path(tmp) / "Lion" / "textures"
+            tex.mkdir(parents=True)
+            Image.new("RGB", (64, 64), (200, 120, 40)).save(tex / "small.png")
+            Image.frombytes("RGB", (2048, 2048), random.Random(1).randbytes(2048 * 2048 * 3)).save(tex / "T_Lion_D.png")
+            small = panel_rpc.forge_texture(name="Lion", file="small.png")
+            self.assertEqual(base64.b64decode(small["base64"]), (tex / "small.png").read_bytes())
+            big = panel_rpc.forge_texture(name="Lion", file="T_Lion_D.png")
+            self.assertEqual(big["mime"], "image/jpeg")
+            self.assertLess(len(big["base64"]), scene._GEOM_PART)
+            with Image.open(io.BytesIO(base64.b64decode(big["base64"]))) as img:
+                self.assertEqual(img.size, (scene.DOCK_TEX, scene.DOCK_TEX))
+            full = panel_rpc.forge_texture(name="Lion", file="T_Lion_D.png", full=True)
+            self.assertEqual(base64.b64decode(full["base64"]), (tex / "T_Lion_D.png").read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()

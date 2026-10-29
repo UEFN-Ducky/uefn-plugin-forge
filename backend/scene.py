@@ -224,6 +224,30 @@ def _indexed(mesh: Mesh, pid: str, uv: bool = False) -> dict[str, Any]:
     return out
 
 
+# Oct 29 2026: a 2048² baked T_Lion_D.png (2 MB as base64) never reached the dock, so the
+# lion drew untextured. The dock gets a copy no bigger than this; send and render keep the file.
+DOCK_TEX = 1024
+_DOCK_TEX_BYTES = 600 * 1024
+
+
+def dock_texture(path: Path) -> tuple[str, bytes]:
+    """(mime, bytes) for the dock: the file itself when small, else a <=1024 px copy that fits one message."""
+    raw = path.read_bytes()
+    if len(raw) <= _DOCK_TEX_BYTES:
+        return "image/png", raw
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(raw)) as img:
+        img.thumbnail((DOCK_TEX, DOCK_TEX))
+        alpha = img.mode in ("RGBA", "LA") or "transparency" in img.info
+        out = io.BytesIO()
+        if alpha:
+            img.convert("RGBA").save(out, "PNG", optimize=True)
+            return "image/png", out.getvalue()
+        img.convert("RGB").save(out, "JPEG", quality=90)
+        return "image/jpeg", out.getvalue()
+
+
 def _mat(mid: str, name: str, color: list[float] | None = None) -> dict[str, Any]:
     return {
         "id": mid,

@@ -19,7 +19,8 @@ def forge_call(op: str = "", name: str = "", params: dict | None = None, actor: 
         return {"ok": False, "error": str(exc)}
 
 
-def forge_texture(name: str = "", file: str = "", **_kwargs: Any) -> dict:
+def forge_texture(name: str = "", file: str = "", full: bool = False, **_kwargs: Any) -> dict:
+    """full=true for texture paint, which writes the image back and must never lose resolution."""
     fname = Path(str(file or "")).name
     if not fname or fname in {".", ".."}:
         return {"ok": False, "error": "file required"}
@@ -30,7 +31,9 @@ def forge_texture(name: str = "", file: str = "", **_kwargs: Any) -> dict:
         return {"ok": False, "error": "texture path outside scene"}
     if not path.is_file():
         return {"ok": False, "error": "texture not found"}
-    return {"ok": True, "mime": "image/png", "base64": base64.b64encode(path.read_bytes()).decode("ascii")}
+    from .scene import dock_texture
+    mime, data = ("image/png", path.read_bytes()) if full else dock_texture(path)
+    return {"ok": True, "mime": mime, "base64": base64.b64encode(data).decode("ascii")}
 
 
 def forge_projects(action: str = "list", name: str = "", new_name: str = "", scene: str = "", targets: Any = None,

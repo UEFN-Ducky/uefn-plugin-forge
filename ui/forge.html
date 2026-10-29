@@ -89,7 +89,25 @@
       </button>
     </nav>
     <div id="view">
-      <div class="hud" role="toolbar" aria-label="Viewport tools"><span class="view-label">Perspective · Lit</span>
+      <div class="hud" role="toolbar" aria-label="Viewport tools"><span class="view-label">Perspective · Rendered</span>
+        <span class="shading" role="group" aria-label="Viewport shading">
+          <button id="shade-wireframe" class="icon" type="button" title="Wireframe (Z 1, Shift+Z toggles)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/></svg>
+          </button>
+          <button id="shade-solid" class="icon" type="button" title="Solid: flat grey to read the form (Z 2)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
+          </button>
+          <button id="shade-material" class="icon" type="button" title="Material: base colours and textures (Z 3)">
+            <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
+          </button>
+          <button id="shade-rendered" class="icon" type="button" title="Rendered: lit with reflections, normal and ORM maps (Z 4)">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/><path d="M8.5 9.5a4 4 0 0 1 4-2.5" stroke-linecap="round"/></svg>
+          </button>
+        </span>
+        <span class="overlay-wrap">
+          <button id="overlay-btn" type="button" title="Overlays: wireframe on top, face orientation, normals, grid, stats" aria-haspopup="true">Overlays ▾</button>
+          <div id="overlay-menu" class="overlay-menu" hidden></div>
+        </span>
         <button id="sm-face" class="icon on" type="button" title="Faces">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 18L12 4l8 14z"/></svg>
         </button>
@@ -143,7 +161,8 @@
         <button id="brush-dec" type="button" title="Keep half the vertices, to get back under budget" hidden>Decimate</button>
         <button id="brush-done" type="button" title="Back to Object mode">Done</button>
       </div>
-      <div class="view-help">RMB + WASD fly · Q / E down / up · Scroll speed · F frame selection · Alt-click ping</div>
+      <div id="view-stats" class="view-stats" hidden></div>
+      <div class="view-help">RMB + WASD fly · Q / E down / up · Scroll speed · F frame selection · Z 1-4 shading · Alt-click ping</div>
     </div>
     <aside class="side" aria-label="Scene panels">
       <section id="outliner" aria-label="Outliner"></section>

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import * as Brush from "./brush.js";
-import { applyMaterialDisplay } from "./material-display.js";
+import { colorOf, materialFor as buildMaterial } from "./material-display.js";
+import { OVERLAYS, OVERLAY_LABEL, SHADING, SHADING_LABEL, loadView, saveView, shadingKey, shadingSettings, statsText } from "./viewport.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { runMeshTask as compatibleMeshTask, setSimplified, isSimplified } from "./mesh-engine.js";
 import { drawGroups, sceneTris, SIMPLIFY_TRIS } from "./project-browser.js";
@@ -144,6 +145,8 @@ const _inv = new THREE.Matrix4();
 const _ident = new THREE.Matrix4();
 const geoCache = new Map();
 const matCache = new Map();
+const view = loadView();
+let lastShading = view.shading === "wireframe" ? "rendered" : view.shading, shadingArmed = 0;
 
 const host = document.getElementById("view");
 // Oct 28 2026: near 0.1 / far 200000 left no depth precision, so stacked floors z-fought when
@@ -255,12 +258,6 @@ function resize() {
 }
 new ResizeObserver(() => resize()).observe(host);
 resize();
-
-function colorOf(matId, materials) {
-  const mat = (materials || []).find((m) => m.id === matId) || (materials || [])[0];
-  const c = (mat && mat.base_color) || [0.7, 0.7, 0.75];
-  return new THREE.Color(c[0], c[1], c[2]);
-}
 
 function composeRow(row, target) {
   _euler.set(
@@ -388,7 +385,7 @@ async function prepareProto(proto) {
   geo.boundingBox = new THREE.Box3(new THREE.Vector3(...packed.box[0]), new THREE.Vector3(...packed.box[1]));
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(...packed.sphere[0]), packed.sphere[1]);
   for (const [start, count, slot] of proto.groups || []) geo.addGroup(start, count, slot);
-  geo.userData = {source: proto, faceIds: packed.faces, workerKey: packed.key, materialSets: new Map()};
+  geo.userData = {source: proto, faceIds: packed.faces, workerKey: packed.key, materialSets: new Map(), verts: packed.positions.length / 3};
   geoCache.get(proto.id)?.dispose();
   geoCache.set(proto.id, geo);
 }
@@ -452,63 +449,20 @@ function textureFor(fname, colorSpace = THREE.SRGBColorSpace) {
   return tex;
 }
 
-// Blend materials: base plus three layers revealed by the blendMask attribute (vertex colour R, G, B
-// in UEFN). Same maths as M_Forge_Blend; roughness and metal stay the base's in the dock.
-function blendShader(mat, uniforms) {
-  mat.onBeforeCompile = shader => {
-    Object.assign(shader.uniforms, uniforms);
-    shader.vertexShader = shader.vertexShader
-      .replace("#include <common>", "#include <common>\nattribute vec3 blendMask;\nvarying vec3 vForgeBlend;")
-      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvForgeBlend = blendMask;");
-    shader.fragmentShader = shader.fragmentShader
-      .replace("#include <common>", "#include <common>\nvarying vec3 vForgeBlend;\nuniform vec3 forgeColor1;\nuniform vec3 forgeColor2;\nuniform vec3 forgeColor3;\nuniform sampler2D forgeMap1;\nuniform sampler2D forgeMap2;\nuniform sampler2D forgeMap3;")
-      .replace("#include <map_fragment>", `#include <map_fragment>
-{
-  vec3 forgeL1 = forgeColor1 * texture2D(forgeMap1, vMapUv).rgb;
-  vec3 forgeL2 = forgeColor2 * texture2D(forgeMap2, vMapUv).rgb;
-  vec3 forgeL3 = forgeColor3 * texture2D(forgeMap3, vMapUv).rgb;
-  diffuseColor.rgb = mix(mix(mix(diffuseColor.rgb, forgeL1, vForgeBlend.r), forgeL2, vForgeBlend.g), forgeL3, vForgeBlend.b);
-}`);
-  };
-  mat.customProgramCacheKey = () => "forge-blend";
-}
-
 function materialsForProto(proto, fallback, materials) {
-  if (!proto.material_slots?.length) return materialFor(fallback, materials, !!proto.smooth);
+  const opts = { smooth: !!proto.smooth, colored: !!proto.vcb };
+  if (!proto.material_slots?.length) return materialFor(fallback, materials, opts);
   const geo = geometryFor(proto);
-  const next = proto.material_slots.map(id => materialFor(id && id !== "default" ? id : fallback, materials, !!proto.smooth));
-  const previous = geo.userData.materialSets.get(fallback);
+  const next = proto.material_slots.map(id => materialFor(id && id !== "default" ? id : fallback, materials, opts));
+  const setKey = `${fallback}|${view.shading}`;
+  const previous = geo.userData.materialSets.get(setKey);
   if (previous && previous.length === next.length && previous.every((m, i) => m === next[i])) return previous;
-  geo.userData.materialSets.set(fallback, next);
+  geo.userData.materialSets.set(setKey, next);
   return next;
 }
 
-function materialFor(matId, materials, smooth) {
-  const authored = (materials || []).find(m => m.id === matId);
-  const tex = authored?.textures?.base_color || "";
-  const layers = (authored?.layers || []).map(id => (materials || []).find(m => m.id === id) || null);
-  const blended = layers.some(Boolean);
-  const key = [matId || "", smooth ? "s" : "", tex, authored?.textures?.normal || "", authored?.textures?.orm || "", (authored?.opacity ?? authored?.base_color?.[3] ?? 1) < 1 ? "transparent" : "opaque", blended ? layers.map(l => l ? `${l.id}:${l.textures?.base_color || ""}` : "").join(",") : ""].join("|");
-  let mat = matCache.get(key);
-  if (!mat) {
-    mat = new THREE.MeshStandardMaterial({ roughness: 0.55, metalness: 0.05, flatShading: !smooth, vertexColors: true });
-    if (tex || blended) mat.map = textureFor(tex);  // a white map still turns on UVs for the layers
-    if (blended) {
-      mat.userData.layers = [1, 2, 3].map(i => ({ [`forgeColor${i}`]: { value: new THREE.Color() }, [`forgeMap${i}`]: { value: textureFor(layers[i - 1]?.textures?.base_color || "") } }));
-      blendShader(mat, Object.assign({}, ...mat.userData.layers));
-    }
-    matCache.set(key, mat);
-  }
-  // A texture replaces the flat colour, as UseBaseColorTex does in UEFN.
-  mat.color.copy(tex ? WHITE : colorOf(matId, materials));
-  applyMaterialDisplay(mat, authored, textureFor);
-  if (blended) layers.forEach((layer, i) => {
-    const target = mat.userData.layers[i][`forgeColor${i + 1}`].value;
-    if (!layer) target.copy(colorOf(matId, materials));
-    else if (layer.textures?.base_color) target.copy(WHITE);
-    else target.setRGB(...(layer.base_color || [0.75, 0.75, 0.78]).slice(0, 3));
-  });
-  return mat;
+function materialFor(matId, materials, opts) {
+  return buildMaterial(matId, materials, { ...opts, mode: shadingSettings(view.shading).materials }, textureFor, matCache);
 }
 
 function clearView(retainBatches = false) {
@@ -643,9 +597,9 @@ function buildRigView(data, key) {
       geo.setAttribute("position", new THREE.BufferAttribute(rest.slice(), 3));
       geo.setIndex(new THREE.BufferAttribute(index, 1));
     }
-    const mesh = new THREE.Mesh(geo, materialFor(o.material, state.payload.materials, o.smooth));
+    const mesh = new THREE.Mesh(geo, materialFor(o.material, state.payload.materials, { smooth: !!o.smooth }));
     mesh.userData = { id: o.id, rest, index, corners: !!o.ub, posed: new Float32Array(rest.length),
-      joints: new Uint16Array(b64buf(o.jb)), weights: new Float32Array(b64buf(o.wb)), smooth: o.smooth,
+      joints: new Uint16Array(b64buf(o.jb)), weights: new Float32Array(b64buf(o.wb)), smooth: o.smooth, matId: o.material,
       morphs: o.mb ? new Float32Array(b64buf(o.mb)) : new Float32Array() };
     mesh.frustumCulled = false;
     content.add(mesh);
@@ -977,7 +931,7 @@ async function buildWork(data, key, attr, mat) {
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(index.length * 3), 3));
     geo.setAttribute("uv", new THREE.BufferAttribute(uv, 2));
     work.tris = Brush.paintTriangles(positions, index, uv);
-    const res = await rpc("forge_texture", { name: state.name, file: mat.textures.base_color });
+    const res = await rpc("forge_texture", { name: state.name, file: mat.textures.base_color, full: true });
     const img = await new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = `data:${res.mime || "image/png"};base64,${res.base64}`; });
     work.canvas = Object.assign(document.createElement("canvas"), { width: img.width, height: img.height });
     work.ctx = work.canvas.getContext("2d", { willReadFrequently: true });
@@ -1322,6 +1276,114 @@ function buildBatches() {
   state.tinted = new Set();
   markSelection(true);
   paintFaceLines();
+  let tris = 0, verts = 0;
+  const objects = new Set();
+  for (const row of pulled ? [...drawn, pulled] : drawn) {
+    const proto = protos.get(row[1]);
+    tris += proto?.tris || 0;
+    verts += geoCache.get(row[1])?.userData.verts || 0;
+    objects.add(row[0]);
+  }
+  state.stats = { tris, verts, objects: objects.size };
+  paintOverlays();
+}
+
+// Viewport header: shading modes and overlays. Face orientation and wire-on-top redraw the
+// content group in a second pass, so grids and gizmos keep their own look.
+const overlayScene = new THREE.Scene();
+const wireOnTop = new THREE.MeshBasicMaterial({ color: 0x000000, wireframe: true, transparent: true, opacity: 0.35, depthFunc: THREE.LessEqualDepth });
+const faceOrientation = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+faceOrientation.onBeforeCompile = shader => {
+  shader.fragmentShader = shader.fragmentShader.replace("vec4 diffuseColor = vec4( diffuse, opacity );",
+    "vec4 diffuseColor = vec4( gl_FrontFacing ? vec3( 0.16, 0.38, 1.0 ) : vec3( 1.0, 0.18, 0.18 ), opacity );");
+};
+faceOrientation.customProgramCacheKey = () => "forge-face-orientation";
+let normalLines = null, themeBackground = new THREE.Color();
+const NORMAL_CAP = 40000;
+
+const isHull = batch => [].concat(batch.material).every(m => m.userData?.outline || m.visible === false);
+
+function buildNormals() {
+  if (normalLines) { normalLines.geometry.dispose(); normalLines.removeFromParent(); normalLines = null; }
+  if (!view.normals) return;
+  const meshes = state.batches.filter(b => !isHull(b));
+  const faces = meshes.reduce((n, b) => n + b.count * ((b.geometry.index || b.geometry.attributes.position).count / 3), 0);
+  const step = Math.max(1, Math.ceil(faces / NORMAL_CAP));  // ponytail: strided over the cap; a GPU pass if every normal must show
+  const out = [], a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3(), n = new THREE.Vector3(), m = new THREE.Matrix4();
+  for (const batch of meshes) {
+    const geo = batch.geometry, pos = geo.attributes.position, idx = geo.index;
+    const tris = (idx || pos).count / 3, len = (geo.boundingSphere?.radius || 100) * 0.04;
+    for (let i = 0; i < batch.count; i++) {
+      batch.getMatrixAt(i, m);
+      for (let t = 0; t < tris; t += step) {
+        const at = k => idx ? idx.getX(t * 3 + k) : t * 3 + k;
+        a.fromBufferAttribute(pos, at(0)).applyMatrix4(m);
+        b.fromBufferAttribute(pos, at(1)).applyMatrix4(m);
+        c.fromBufferAttribute(pos, at(2)).applyMatrix4(m);
+        n.subVectors(c, b).cross(a.clone().sub(b)).normalize();
+        a.add(b).add(c).divideScalar(3);
+        out.push(a.x, a.y, a.z, a.x + n.x * len, a.y + n.y * len, a.z + n.z * len);
+      }
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(out, 3));
+  normalLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x33d6ff }));
+  normalLines.frustumCulled = false;
+  scene3.add(normalLines);
+}
+
+function paintOverlays() {
+  minorGrid.visible = majorGrid.visible = view.grid;
+  const stats = document.getElementById("view-stats");
+  if (stats) { stats.hidden = !view.stats; stats.textContent = statsText(state.stats); }
+  buildNormals();
+}
+
+function applyShadingLook() {
+  const look = shadingSettings(view.shading);
+  if (look.background === "black") scene3.background.setRGB(0, 0, 0);
+  else scene3.background.copy(themeBackground);
+  const label = document.querySelector(".view-label");
+  if (label) label.textContent = `Perspective · ${SHADING_LABEL[view.shading]}`;
+  for (const mode of SHADING) document.getElementById(`shade-${mode}`)?.classList.toggle("on", view.shading === mode);
+  for (const key of OVERLAYS) { const box = document.getElementById(`ov-${key}`); if (box) box.checked = view[key]; }
+}
+
+function setShading(mode) {
+  if (!SHADING.includes(mode) || mode === view.shading) return;
+  if (view.shading !== "wireframe") lastShading = view.shading;
+  view.shading = mode;
+  saveView(view);
+  applyShadingLook();
+  if (state.payload) buildBatches();
+  if (state.rigView) for (const mesh of state.rigView.meshes) mesh.material = materialFor(mesh.userData.matId, state.payload.materials, { smooth: !!mesh.userData.smooth });
+}
+
+function setOverlay(key, on) {
+  view[key] = on;
+  saveView(view);
+  paintOverlays();
+}
+
+function renderView() {
+  const wire = view.wire && view.shading !== "wireframe";
+  if (!view.faces && !wire) { renderer.render(scene3, camera); return; }
+  const hulls = state.batches.filter(b => b.visible && isHull(b));
+  for (const hull of hulls) hull.visible = false;
+  if (view.faces) content.visible = false;
+  renderer.render(scene3, camera);
+  content.visible = true;
+  const autoClear = renderer.autoClear;
+  renderer.autoClear = false;
+  overlayScene.add(content);
+  for (const material of [view.faces && faceOrientation, wire && wireOnTop].filter(Boolean)) {
+    overlayScene.overrideMaterial = material;
+    renderer.render(overlayScene, camera);
+  }
+  scene3.add(content);
+  renderer.autoClear = autoClear;
+  for (const hull of hulls) hull.visible = true;
 }
 
 function applySnap() {
@@ -1628,7 +1690,7 @@ function animate() {
     document.getElementById("ai").hidden = true;
     paintColors();
   }
-  renderer.render(scene3, camera);
+  renderView();
 }
 animate();
 
@@ -3288,6 +3350,13 @@ function wire() {
     prims.appendChild(b);
   }
   document.getElementById("add-btn").onclick = () => { prims.hidden = !prims.hidden; };
+  for (const mode of SHADING) document.getElementById(`shade-${mode}`).onclick = () => setShading(mode);
+  const overlayMenu = document.getElementById("overlay-menu");
+  overlayMenu.innerHTML = OVERLAYS.map(key => `<label class="row"><input id="ov-${key}" type="checkbox" /> ${OVERLAY_LABEL[key]}</label>`).join("");
+  for (const key of OVERLAYS) document.getElementById(`ov-${key}`).onchange = ev => setOverlay(key, ev.target.checked);
+  document.getElementById("overlay-btn").onclick = () => { overlayMenu.hidden = !overlayMenu.hidden; };
+  applyShadingLook();
+  paintOverlays();
   const modeSelect = document.getElementById("mode");
   modeSelect.onchange = () => { modeSelect.blur(); op("select", { mode: modeSelect.value }); };
   document.getElementById("brush-target").onchange = () => syncWork();
@@ -3463,8 +3532,16 @@ function wire() {
       if (k === "w" || k === "a" || k === "s" || k === "d" || k === "q" || k === "e") ev.preventDefault();
       return;
     }
-    if (k === "escape") { endFly(); document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; return; }
+    if (k === "escape") { endFly(); document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; document.getElementById("overlay-menu").hidden = true; return; }
     if ((ev.ctrlKey || ev.metaKey) && ["z", "b", "r", "j"].includes(k)) ev.preventDefault();
+    if (!ev.ctrlKey && !ev.metaKey && !ev.altKey && (k === "z" || (shadingArmed > performance.now() && /^[1-4]$/.test(k)))) {
+      const pick = shadingKey(k, { shift: ev.shiftKey, armed: shadingArmed > performance.now(), current: view.shading, last: lastShading });
+      shadingArmed = pick.armed ? performance.now() + 1500 : 0;
+      if (pick.mode) setShading(pick.mode);
+      ev.preventDefault();
+      return;
+    }
+    shadingArmed = 0;
     if (k === "tab") return;
     else if (k === " " && state.rigView && ev.target === document.body) { ev.preventDefault(); togglePlay(); }
     else if (k === "q") setWidget("select");
@@ -3512,7 +3589,8 @@ function applyTheme(vars) {
     probe.style.color = `var(--${token})`;
     return new THREE.Color(getComputedStyle(probe).color);
   };
-  scene3.background.copy(color("bg"));
+  themeBackground.copy(color("bg"));
+  applyShadingLook();
   for (const mat of [].concat(minorGrid.material)) mat.color.copy(color("border-light"));
   for (const mat of [].concat(majorGrid.material)) mat.color.copy(color("muted"));
   TINT.copy(color("accent")).lerp(WHITE, 0.5);
@@ -3539,6 +3617,7 @@ call("theme.get").then(theme => { if (requestedThemeVersion === themeVersion) ap
 wire();
 document.addEventListener("click", ev => {
   if (!ev.target.closest(".add-wrap")) { document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; }
+  if (!ev.target.closest(".overlay-wrap")) document.getElementById("overlay-menu").hidden = true;
 });
 window.addEventListener("unhandledrejection", ev => { setStatus(ev.reason?.message || "Operation failed", true); });
 restoreSession().then(() => refreshScenes()).then(() => { state.rev = -1; poll(); setInterval(poll, 250); setInterval(saveSession, 500); }).catch((err) => setStatus(err.message || String(err), true));

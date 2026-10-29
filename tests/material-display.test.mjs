@@ -1,7 +1,29 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import * as THREE from "three";
-import { applyMaterialDisplay } from "../ui/src/material-display.js";
+import { applyMaterialDisplay, materialFor } from "../ui/src/material-display.js";
+
+test("two-material mesh: lit colour, textured map, no vertex colours without a color attribute", () => {
+  const materials = [
+    { id: "fur", name: "Fur", base_color: [0.96, 0.62, 0.16, 1], textures: { base_color: "T_Lion_D.png" } },
+    { id: "nose", name: "Nose", base_color: [0.05, 0.04, 0.04, 1], textures: {} },
+    { id: "hull", name: "ToonOutline", base_color: [0.3, 0.13, 0.05, 1], toon_outline: true },
+  ];
+  const cache = new Map(), asked = [];
+  const tex = file => { asked.push(file); return new THREE.Texture(); };
+  const [fur, nose] = ["fur", "nose"].map(id => materialFor(id, materials, { smooth: true }, tex, cache));
+  assert.notEqual(fur, nose);
+  assert.ok(fur.map && !nose.map);
+  assert.deepEqual(asked, ["T_Lion_D.png"]);
+  assert.deepEqual(fur.color.toArray(), [1, 1, 1]);
+  assert.deepEqual(nose.color.toArray(), [0.05, 0.04, 0.04]);
+  assert.equal(fur.vertexColors, false);
+  assert.equal(materialFor("fur", materials, { smooth: true, colored: true }, tex, cache).vertexColors, true);
+  assert.equal(materialFor("fur", materials, { smooth: true }, tex, cache), fur);
+  const hull = materialFor("hull", materials, {}, tex, cache);
+  assert.ok(hull.isMeshBasicMaterial && hull.side === THREE.FrontSide && hull.userData.outline);
+  assert.ok(hull.color.r < 0.3);
+});
 
 test("authored neon, glass and PBR textures reach Three materials", () => {
   const mat = new THREE.MeshStandardMaterial();
