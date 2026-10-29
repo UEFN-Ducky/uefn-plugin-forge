@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import history, storage
+from . import history, projects, storage
 from .kernel.csg import boolean as csg_boolean
 from .kernel.mesh import Mesh, build_primitive
 from .check import check_mesh, fix_mesh
@@ -55,11 +55,14 @@ _OPEN: dict[str, "Scene"] = {}
 
 
 def scenes_root() -> Path:
-    env = os.environ.get("FORGE_SCENES_DIR")
-    if env:
-        return Path(env)
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    return Path(base) / "UEFN-Ducky" / "forge" / "scenes"
+    """Scenes folder of the active project (the flat FORGE_SCENES_DIR folder when that override is set)."""
+    return projects.scenes_dir()
+
+
+def _folder(name: str) -> Path:
+    """'Project/Scene' or a plain name in the active project."""
+    project, _, short = (name or "").rpartition("/")
+    return (projects.scenes_dir(projects.require(project)) if project else scenes_root()) / _safe(short)
 
 
 def _safe(name: str) -> str:
@@ -766,11 +769,11 @@ def _key(folder: Path) -> str:
 
 
 def forget(name: str) -> None:
-    _OPEN.pop(_key(scenes_root() / _safe(name)), None)
+    _OPEN.pop(_key(_folder(name)), None)
 
 
 def load(name: str) -> Scene:
-    folder = scenes_root() / _safe(name)
+    folder = _folder(name)
     key = _key(folder)
     path = folder / "scene.json"
     hit = _OPEN.get(key)
@@ -795,26 +798,16 @@ def load(name: str) -> Scene:
 
 
 def create(name: str) -> Scene:
-    folder = scenes_root() / _safe(name)
+    folder = _folder(name)
     if (folder / "scene.json").is_file():
         raise ValueError(f"Scene {name!r} already exists")
-    scene = Scene(_blank(_safe(name)), folder)
+    scene = Scene(_blank(_safe(name.rpartition("/")[2])), folder)
     scene.save()
     return scene
 
 
-def list_scenes() -> list[dict[str, Any]]:
-    root = scenes_root()
-    if not root.is_dir():
-        return []
-    out = []
-    for folder in sorted(p for p in root.iterdir() if (p / "scene.json").is_file()):
-        try:
-            data = json.loads((folder / "scene.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        out.append({"name": data.get("name") or folder.name, "rev": data.get("rev") or 0})
-    return out
+def list_scenes(project: str | None = None) -> list[dict[str, Any]]:
+    return projects.list_scenes(project)
 
 
 def _no_such(kind: str, name: Any, options) -> ValueError:
