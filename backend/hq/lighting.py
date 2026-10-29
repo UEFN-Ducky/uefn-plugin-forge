@@ -18,7 +18,10 @@ def light(scene, p):
               "transform": _pick(p.get("transform", "agx"), TRANSFORMS, "transform"),
               "size": list(p.get("size") or (640, 480)), "out_dir": str(scene.folder / "renders"),
               "textures_dir": str(scene.folder / "textures")}
-    ids = p.get("ids") or ([p["id"]] if p.get("id") else [n["id"] for n in scene.data["nodes"] if n.get("type") == "object"])
+    from ..scene import is_collision  # late: scene imports hq
+    ids = p.get("ids") or ([p["id"]] if p.get("id") else [
+        n["id"] for n in scene.data["nodes"]
+        if n.get("type") == "object" and (p.get("show_collision") or not is_collision(n))])
     for nid in ids:
         if scene.node(str(nid)) is None:
             raise ValueError("No object %r to light" % nid)
