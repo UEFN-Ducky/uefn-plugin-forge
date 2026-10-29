@@ -113,8 +113,36 @@ def op_auto_weights(p):
 
 
 def _heat(obj, arm, names, nv):
-    """Blender's bone-heat on a throwaway copy: one {bone: weight} per vertex; {} where heat failed."""
+    """Blender's bone-heat: one {bone: weight} per vertex; {} where heat failed.
+
+    Heat fails outright on open or self-intersecting meshes: then a closed voxel proxy takes the heat
+    and each vertex copies its nearest proxy vertex. The distance fallback covers whatever is left.
+    """
+    from mathutils.kdtree import KDTree
+
+    rows, _ = _heat_on(obj, arm, names)
+    if any(rows):
+        return rows
+    span = max(obj.dimensions) or 1.0
+    proxy, coords = _heat_on(obj, arm, names, voxel=span / 48.0)
+    if not any(proxy):
+        return [{} for _ in range(nv)]
+    tree = KDTree(len(coords))
+    for i, c in enumerate(coords):
+        tree.insert(c, i)
+    tree.balance()
+    world = [obj.matrix_world @ v.co for v in obj.data.vertices]
+    return [dict(proxy[tree.find(co)[1]]) for co in world]
+
+
+def _heat_on(obj, arm, names, voxel=0.0):
+    """Bone heat on a throwaway copy (voxel-remeshed when voxel > 0): (rows, world coords of its vertices).
+
+    Heat has absolute thresholds tuned for metre-sized bodies: a copy under 50 cm is scaled up 10x
+    about the armature with the armature, then the armature is put back.
+    """
     import bpy
+    from mathutils import Matrix
 
     dup = obj.copy()
     dup.data = obj.data.copy()
@@ -122,7 +150,22 @@ def _heat(obj, arm, names, nv):
     for m in list(dup.modifiers):
         dup.modifiers.remove(m)
     bpy.context.scene.collection.objects.link(dup)
-    rows = [{} for _ in range(nv)]
+    if voxel > 0:
+        mod = dup.modifiers.new("proxy", "REMESH")
+        mod.mode, mod.voxel_size = "VOXEL", voxel
+        bpy.context.view_layer.update()
+        old = dup.data
+        dup.data = bpy.data.meshes.new_from_object(dup.evaluated_get(bpy.context.evaluated_depsgraph_get()))
+        dup.modifiers.remove(mod)
+        bpy.data.meshes.remove(old)
+    coords = [dup.matrix_world @ v.co for v in dup.data.vertices]
+    rows = [{} for _ in coords]
+    keep = arm.matrix_world.copy()
+    if max(obj.dimensions) < 0.5:
+        grow = Matrix.Translation(keep.translation) @ Matrix.Scale(10.0, 4) @ Matrix.Translation(-keep.translation)
+        arm.matrix_world = grow @ keep
+        dup.matrix_world = grow @ dup.matrix_world
+        bpy.context.view_layer.update()
     try:
         with bpy.context.temp_override(active_object=arm, object=arm, selected_objects=[dup, arm], selected_editable_objects=[dup, arm]):
             bpy.ops.object.parent_set(type="ARMATURE_AUTO")
@@ -132,9 +175,11 @@ def _heat(obj, arm, names, nv):
                 if by_index.get(g.group) in names and g.weight > 0:
                     rows[v.index][by_index[g.group]] = g.weight
     except Exception:  # heat can fail on open meshes: those vertices fall back to distance weights
-        rows = [{} for _ in range(nv)]
+        rows = [{} for _ in coords]
     finally:
+        arm.matrix_world = keep
         data = dup.data
         bpy.data.objects.remove(dup)
         bpy.data.meshes.remove(data)
-    return rows
+        bpy.context.view_layer.update()
+    return rows, coords

@@ -94,6 +94,15 @@ X rotation on thighs swings legs: negative is forward, because the character fac
 
 A looping clip must end where it starts: frame `frames` equals frame 0. Generators already do. When keying by hand, copy the frame-0 keys to the last frame. `forge_check` flags a loop that pops. Keep `root` still for in-place cycles; UEFN moves the actor.
 
+## Game-ready clips
+
+- Workflow: block in `step` keys on the key poses, switch to `smooth`, then polish spacing; one clip per action.
+- Names: `<Rig>_<Action>` or `AN_<Action>` (`name=` on `clip`); Send turns each into `AS_<name>`.
+- Never key bone `scale` for a game: engines drop it or stretch the skin. `forge_hq(op="bake_clip", params={"clip": "Run"})` removes scale keys, closes the loop seam and thins the keys.
+- `forge_hq(op="clip")` reports `seam_deg` for loops; anything above 1 degree pops.
+- Root motion: `root_motion=true` puts the travel on `root` for engines that drive the capsule from it; in-place cycles keep `root` still.
+- Mocap or another rig's clip: `forge_hq(op="retarget", params={"src": "C:/mocap/run.bvh"})` (skill `hq_rig`).
+
 ## Check the motion
 
 - `forge_render(name, clip="Walk", frames=[0, 8, 16, 24])` returns one image per frame. Look at silhouettes: legs should cross, arms counter-swing, nothing should pass through the body.
@@ -112,3 +121,5 @@ A looping clip must end where it starts: frame `frames` equals frame 0. Generato
 ## In UEFN
 
 Each clip becomes an `AS_` AnimSequence on the `SK_` skeleton at Send. `place=true` puts the asset on an Animated Mesh device playing its first clip. Other clips, NPC presets, or playing on the player go through the Animation plugin: `skill_read_subskill("animation", "runtime_playback")`.
+
+"Game-ready clips" adapted from Blender Agent Skills by EL4CTEO (animation; MIT).

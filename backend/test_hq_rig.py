@@ -262,6 +262,137 @@ class FaceTests(Base):
         left = mesh.attrs["sk:mouthSmileLeft"]
         self.assertTrue(all(d[0] >= 0 for d, v in zip(left, mesh.verts) if any(d)))  # the left corner moves outward (+X)
 
+    def test_visemes_split_and_report(self):
+        scene, node = self.head()
+        out = HQ_OPS["face_shapes"](scene, {"ids": [node["id"]], "set": "basic12", "visemes": True,
+                                            "split": ["jawOpen"], "report": True})
+        attrs = scene._bake(node).attrs
+        self.assertEqual(len([k for k in attrs if k.startswith("sk:viseme_")]), 14)
+        self.assertEqual(out["shapes"], 12 + 14 + 2)
+        self.assertEqual(out["flat"], 0, out)
+        mesh = scene._bake(node)
+        whole, left, right = attrs["sk:jawOpen"], attrs["sk:jawOpen_L"], attrs["sk:jawOpen_R"]
+        for w, l, r in zip(whole, left, right):
+            self.assertTrue(all(abs(w[i] - l[i] - r[i]) < 1e-3 for i in range(3)))
+        far_right = [l for l, v in zip(left, mesh.verts) if v[0] < -8]
+        self.assertTrue(all(d == [0.0, 0.0, 0.0] for d in far_right))
+        self.assertLessEqual(len(str(out)), 300)
+        with self.assertRaisesRegex(ValueError, "No shape key"):
+            HQ_OPS["face_shapes"](scene, {"ids": [node["id"]], "set": "none", "split": ["nope"]})
+
+
+class AnimToolsTests(Base):
+    def test_loop_seam_reported(self):
+        scene, rig = self.character()
+        out = HQ_OPS["clip"](scene, {"kind": "walk"})
+        self.assertEqual(out["seam_deg"], 0.0, out)
+        self.assertNotIn("seam_deg", HQ_OPS["clip"](scene, {"kind": "jump"}))
+
+    def test_stress_clip(self):
+        scene, rig = self.character()
+        out = HQ_OPS["stress"](scene, {})
+        clip = rg.find_clip(rig, "Stress")
+        self.assertEqual(clip["frames"], 50)
+        for bone in ("upperarm_l", "lowerarm_r", "thigh_l", "calf_r"):
+            self.assertIn(bone, clip["tracks"])
+        _, q, _ = rg.local_pose(clip, "calf_l", 30)
+        self.assertAlmostEqual(math.degrees(2 * math.acos(min(1, abs(q[0])))), 150, delta=1)
+        HQ_OPS["stress"](scene, {})  # again: replaced, not duplicated
+        self.assertEqual([c["name"] for c in rig["actions"]].count("Stress"), 1)
+        self.assertLessEqual(len(str(out)), 300)
+
+    def test_retarget_between_rigs_scales_travel(self):
+        scene = self.scene("box", w=60, d=30, h=180)
+        first = next(n for n in scene.data["nodes"] if n["type"] == "object")["id"]
+        node = dispatch(scene.name, "add", {"kind": "box", "params": {"w": 30, "d": 15, "h": 90}})["id"]
+        scene = load(scene.name)
+        HQ_OPS["rig_template"](scene, {"template": "ue5_manny", "ids": [first]})
+        small = HQ_OPS["rig_template"](scene, {"template": "ue5_manny", "ids": [node], "bind": False})["id"]
+        HQ_OPS["clip"](scene, {"kind": "walk", "root_motion": True})
+        out = HQ_OPS["retarget"](scene, {"src": "Walk", "rig": small})
+        big = scene.data["rigs"][0]
+        tiny = rg.find_rig(scene, small)
+        got = rg.find_clip(tiny, "Walk")
+        self.assertIn("thigh_l", got["tracks"])
+        src_y = rg.find_clip(big, "Walk")["tracks"]["root"]["loc"][-1][1][1]
+        self.assertAlmostEqual(got["tracks"]["root"]["loc"][-1][1][1], src_y * rg.rig_height(tiny) / rg.rig_height(big), places=2)
+        self.assertIn("bones mapped", out["summary"])
+
+    def test_retarget_bvh(self):
+        bvh = """HIERARCHY
+ROOT Hips
+{
+ OFFSET 0 0 0
+ CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation
+ JOINT LeftUpLeg
+ {
+  OFFSET 10 0 0
+  CHANNELS 3 Zrotation Xrotation Yrotation
+  JOINT LeftLeg
+  {
+   OFFSET 0 -45 0
+   CHANNELS 3 Zrotation Xrotation Yrotation
+   JOINT LeftFoot
+   {
+    OFFSET 0 -45 0
+    CHANNELS 3 Zrotation Xrotation Yrotation
+    End Site
+    {
+     OFFSET 0 0 10
+    }
+   }
+  }
+ }
+}
+MOTION
+Frames: 5
+Frame Time: 0.0166667
+0 90 0 0 0 0 0 0 0 0 0 0 0 0 0
+0 90 5 0 0 0 0 10 0 0 0 0 0 0 0
+0 90 10 0 0 0 0 20 0 0 30 0 0 0 0
+0 90 15 0 0 0 0 30 0 0 0 0 0 0 0
+0 90 20 0 0 0 0 40 0 0 0 0 0 0 0
+"""
+        scene, rig = self.character()
+        path = os.path.join(self.tmp.name, "walk.bvh")
+        with open(path, "w") as f:
+            f.write(bvh)
+        out = HQ_OPS["retarget"](scene, {"src": path})
+        clip = rg.find_clip(rig, "walk")
+        self.assertEqual(clip["frames"], 2)  # 60 fps -> 30 fps
+        self.assertEqual(set(clip["tracks"]), {"pelvis", "thigh_l", "calf_l", "foot_l"})
+        # BVH +X rotation of the thigh (leg swings forward in +Z) stays +X in Forge; BVH +Z travel -> Forge -Y
+        self.assertAlmostEqual(clip["tracks"]["thigh_l"]["rot"][2][1][0], 40, places=1)
+        self.assertLess(clip["tracks"]["pelvis"]["loc"][-1][1][1], 0)
+        self.assertIn("4 bones mapped", out["summary"])
+
+    def test_bake_clip_reduces_and_closes_loop(self):
+        scene, rig = self.character()
+        HQ_OPS["clip"](scene, {"kind": "idle"})
+        clip = rg.find_clip(rig, "Idle")
+        clip["tracks"]["pelvis"]["scale"] = [[0, [1, 1, 1], "smooth"], [10, [1.1, 1, 1], "smooth"]]
+        clip["tracks"]["head"]["rot"][-1][1] = [5.0, 0.0, 0.0]  # a broken seam
+        out = HQ_OPS["bake_clip"](scene, {"clip": "Idle", "tol": 0.05})
+        self.assertNotIn("scale", clip["tracks"]["pelvis"])
+        head = clip["tracks"]["head"]["rot"]
+        self.assertEqual(head[0][1], head[-1][1])
+        self.assertTrue(all(k[2] == "linear" for k in head))
+        self.assertLess(out["keys"], 61 * len(clip["tracks"]))
+        self.assertIn("seam 0 deg", out["summary"])
+        self.assertEqual(hq.reduce_keys([[0, [0]], [1, [1]], [2, [2]], [3, [5]]], 0.01), [[0, [0]], [2, [2]], [3, [5]]])
+
+
+@unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
+class TinyHeatTests(Base):
+    def test_small_mesh_still_gets_heat(self):
+        """An 18 cm figure: heat runs on a 10x copy instead of falling back to distance weights."""
+        scene = self.scene("capsule", radius=3, height=18)
+        node = next(n for n in scene.data["nodes"] if n["type"] == "object")
+        HQ_OPS["rig_template"](scene, {"template": "ue5_manny", "ids": [node["id"]]})
+        out = HQ_OPS["auto_weights"](scene, {"ids": [node["id"]]})
+        heat = int(out["summary"].split("heat ")[1].split(",")[0])
+        self.assertGreater(heat, 0, out)
+
 
 if __name__ == "__main__":
     unittest.main()

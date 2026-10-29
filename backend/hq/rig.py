@@ -7,10 +7,13 @@ import copy
 import difflib
 import json
 import math
+import re
 from pathlib import Path
 
 from .. import rig as rg
+from ..transforms import decompose
 from . import engine, op
+from .qa import loop_seam
 
 _ASSETS = Path(__file__).resolve().parents[2] / "assets" / "rigs"
 TEMPLATES = ("ue5_manny", "quadruped", "bird", "tail_chain")
@@ -377,8 +380,263 @@ def clip(scene, p):
         made["name"], n = "%s_%d" % (base, n), n + 1
     rig["actions"].append(made)
     scene.touch_geom()
-    return {"summary": "%s: %d frames%s%s" % (made["name"], made["frames"], ", loops" if made["loop"] else "", ", root motion" if made["root_motion"] else ""),
+    out = {"summary": "%s: %d frames%s%s" % (made["name"], made["frames"], ", loops" if made["loop"] else "", ", root motion" if made["root_motion"] else ""),
+           "ids": [rig["id"]], "clip": made["id"], "frames": made["frames"]}
+    if made["loop"] and p.get("loop_check", True):
+        deg, cm = loop_seam(made)
+        out["seam_deg"] = deg
+        out["summary"] += ", seam %g deg %g cm" % (deg, cm)
+    return out
+
+
+def _add_clip(rig, clip):
+    """Replace a clip of the same name, else append."""
+    rig["actions"] = [c for c in rig.setdefault("actions", []) if c["name"] != clip["name"]] + [clip]
+    return clip
+
+
+@op("stress", "stress(rig?, map?) Stress clip for weight checks: arms up f10, elbows 140 f20, knees 150 f30, spine twist f40, "
+              "rest f1/f50; then forge_render(clip='Stress') or look frames")
+def stress(scene, p):
+    rig = rg.find_rig(scene, str(p.get("rig") or ""))
+    c = _Clip(rig, 50, 1.0, dict(p.get("map") or {}))
+    zero = [0.0, 0.0, 0.0]
+
+    def at(*pts):
+        return [[float(f), list(v), "smooth"] for f, v in pts]
+
+    for side in ("l", "r"):
+        arm = c.bone("upperarm_" + side)
+        sg = _horizontal(rig, arm) if arm else 0
+        c.put("upperarm_" + side, "rot", at((1, zero), (10, [0, -sg * 80, 0] if sg else [-150, 0, 0]), (20, zero), (50, zero)))
+        c.put("lowerarm_" + side, "rot", at((1, zero), (10, zero), (20, [0, 0, -sg * 140] if sg else [-140, 0, 0]), (30, zero), (50, zero)))
+        c.put("thigh_" + side, "rot", at((1, zero), (20, zero), (30, [-90, 0, 0]), (40, zero), (50, zero)))
+        c.put("calf_" + side, "rot", at((1, zero), (20, zero), (30, [150, 0, 0]), (40, zero), (50, zero)))
+    for name in c.spine[-1:]:
+        c.put(name, "rot", at((1, zero), (30, zero), (40, [0, 0, 45]), (50, zero)))
+    if not c.tracks:
+        raise ValueError("No arm, leg or spine bones matched. Pass map={'upperarm_l': '<bone>', ...} or use rig_template")
+    made = _add_clip(rig, {"id": rg._nid("a"), "name": "Stress", "fps": 30, "frames": 50, "loop": False, "tracks": c.tracks})
+    scene.touch_geom()
+    return {"summary": "Stress: 50 frames, %d bones keyed; render frames 10 20 30 40" % len(c.tracks), "ids": [rig["id"]], "clip": made["id"]}
+
+
+# ---- retarget and bake ---------------------------------------------------------------
+
+
+def _norm(name):
+    return re.sub(r"[^a-z0-9]", "", str(name).split(":")[-1].lower())
+
+
+# Mixamo / CMU / Blender / Unity humanoid names -> UE5 Manny names (keys normalised by _norm)
+ALIAS = {"hips": "pelvis", "pelvis": "pelvis", "spine": "spine_01", "spine1": "spine_02", "spine2": "spine_03",
+         "chest": "spine_03", "upperchest": "spine_04", "neck": "neck_01", "neck1": "neck_02", "head": "head"}
+for _s, _side in (("l", "left"), ("r", "right")):
+    for _src, _dst in (("shoulder", "clavicle"), ("collar", "clavicle"), ("arm", "upperarm"), ("upperarm", "upperarm"),
+                       ("forearm", "lowerarm"), ("lowerarm", "lowerarm"), ("hand", "hand"), ("upleg", "thigh"),
+                       ("upperleg", "thigh"), ("thigh", "thigh"), ("leg", "calf"), ("lowerleg", "calf"), ("shin", "calf"),
+                       ("foot", "foot"), ("toebase", "ball"), ("toe", "ball"), ("toes", "ball")):
+        ALIAS[_side + _src] = "%s_%s" % (_dst, _s)
+
+
+def map_bones(src_names, dst_names, given=None):
+    """{src bone: dst bone}: given map first, then the same name, then the alias table."""
+    dst = {_norm(n): n for n in dst_names}
+    out = {}
+    for s in src_names:
+        if given and s in given:
+            out[s] = given[s]
+        elif _norm(s) in dst:
+            out[s] = dst[_norm(s)]
+        elif ALIAS.get(_norm(s)) in dst_names:
+            out[s] = ALIAS[_norm(s)]
+    return out
+
+
+_C = [[1, 0, 0], [0, 0, -1], [0, 1, 0]]  # BVH Y-up, +Z front -> Forge Z-up, -Y front
+
+
+def _mat(axis, deg):
+    c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return {"X": [[1, 0, 0], [0, c, -s], [0, s, c]], "Y": [[c, 0, s], [0, 1, 0], [-s, 0, c]], "Z": [[c, -s, 0], [s, c, 0], [0, 0, 1]]}[axis]
+
+
+def _mm(a, b):
+    return [[sum(a[i][k] * b[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
+
+
+def _euler3(m):
+    return [round(v, 3) for v in decompose([m[0] + [0.0], m[1] + [0.0], m[2] + [0.0], [0.0, 0.0, 0.0, 1.0]])["rot"]]
+
+
+def parse_bvh(text):
+    """(joints [{name, parent, offset, channels}], frame time, frames [[values]]). End Sites have name None."""
+    tok = text.split()
+    joints, stack, i = [], [], 0
+    while i < len(tok) and tok[i] != "MOTION":
+        t = tok[i]
+        if t in ("ROOT", "JOINT", "End"):
+            joints.append({"name": tok[i + 1] if t != "End" else None, "parent": stack[-1] if stack else None,
+                           "offset": [0.0, 0.0, 0.0], "channels": []})
+            i += 2
+        elif t == "{":
+            stack.append(len(joints) - 1)
+            i += 1
+        elif t == "}":
+            stack.pop()
+            i += 1
+        elif t == "OFFSET":
+            joints[stack[-1]]["offset"] = [float(x) for x in tok[i + 1:i + 4]]
+            i += 4
+        elif t == "CHANNELS":
+            n = int(tok[i + 1])
+            joints[stack[-1]]["channels"] = tok[i + 2:i + 2 + n]
+            i += 2 + n
+        else:
+            i += 1
+    if i >= len(tok):
+        raise ValueError("Not a BVH file: no MOTION section")
+    count, ft = int(tok[i + 2]), float(tok[i + 5])
+    width = sum(len(j["channels"]) for j in joints)
+    vals = [float(x) for x in tok[i + 6:i + 6 + count * width]]
+    return joints, ft, [vals[f * width:(f + 1) * width] for f in range(count)]
+
+
+def _leg(points):
+    return sum(math.dist(points[k], points[k + 1]) for k in range(len(points) - 1))
+
+
+def bvh_clip(text, rig, given=None, fps=30, name="Mocap"):
+    """A Forge clip from BVH text. Rest poses must match (T-pose to T-pose); unmapped joints fold into their children."""
+    joints, ft, frames = parse_bvh(text)
+    names = [j["name"] for j in joints if j["name"]]
+    bone_map = map_bones(names, [b["name"] for b in rig["bones"]], given)
+    if not bone_map:
+        raise ValueError("No BVH joints matched the rig. Pass map={'<bvh joint>': '<bone>'}")
+    by = {j["name"]: k for k, j in enumerate(joints) if j["name"]}
+    # leg ratio: target thigh->calf->foot over the source's, scales the hips travel
+    src_leg = [n for n in names if bone_map.get(n) in ("thigh_l", "calf_l", "foot_l")]
+    src_len = sum(math.dist([0, 0, 0], joints[by[n]]["offset"]) for n in src_leg[1:]) if len(src_leg) == 3 else 0
+    bones = {b["name"]: b for b in rig["bones"]}
+    dst_len = _leg([bones[n]["head"] for n in ("thigh_l", "calf_l", "foot_l")]) if all(n in bones for n in ("thigh_l", "calf_l", "foot_l")) else 0
+    k = dst_len / src_len if src_len and dst_len else 1.0
+    step = max(1, int(round(1.0 / (ft * fps)))) if ft > 0 else 1
+    Ct = [list(r) for r in zip(*_C)]
+    tracks = {}
+    first = None
+    for out_f, values in enumerate(frames[::step]):
+        at, rots, pos = 0, {}, None
+        for j, joint in enumerate(joints):
+            r = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+            for ch in joint["channels"]:
+                v = values[at]
+                at += 1
+                if ch.endswith("rotation"):
+                    r = _mm(r, _mat(ch[0].upper(), v))
+                elif ch.endswith("position") and joint["parent"] is None:
+                    pos = (pos or [0.0, 0.0, 0.0])
+                    pos["XYZ".index(ch[0].upper())] = v
+            rots[j] = r
+        for j, joint in enumerate(joints):
+            dst = bone_map.get(joint["name"])
+            if not dst:
+                continue
+            r, up = rots[j], joint["parent"]
+            while up is not None and not bone_map.get(joints[up]["name"]):  # fold unmapped parents in
+                r = _mm(rots[up], r)
+                up = joints[up]["parent"]
+            rf = _mm(_mm(_C, r), Ct)
+            tracks.setdefault(dst, {}).setdefault("rot", []).append([float(out_f), _euler3(rf), "linear"])
+            if joint["parent"] is None and pos is not None:
+                p = [sum(_C[a][b] * pos[b] for b in range(3)) for a in range(3)]
+                first = first or p
+                tracks[dst].setdefault("loc", []).append([float(out_f), [round((p[a] - first[a]) * k, 3) for a in range(3)], "linear"])
+    count = max(1, len(frames[::step]) - 1)
+    return {"id": rg._nid("a"), "name": name, "fps": fps, "frames": count, "loop": False, "tracks": tracks}, len(bone_map)
+
+
+@op("retarget", "retarget(src=<clip name on another rig>|<file.bvh>, rig?, map?={src bone: bone}, name?) clip onto this rig: "
+                "auto names (Manny, Mixamo, CMU), root travel scaled by leg ratio, BVH resampled to 30 fps")
+def retarget(scene, p):
+    rig = rg.find_rig(scene, str(p.get("rig") or ""))
+    src = str(p.get("src") or "")
+    given = dict(p.get("map") or {})
+    if src.lower().endswith(".bvh"):
+        path = Path(src).expanduser()
+        if not path.is_file():
+            raise ValueError("No BVH at %s" % path)
+        made, mapped = bvh_clip(path.read_text(encoding="utf-8", errors="replace"), rig, given, name=str(p.get("name") or path.stem))
+    else:
+        owner = next((r for r in scene.data.get("rigs") or [] if r is not rig and any(c["name"] == src or c["id"] == src for c in r.get("actions") or [])), None)
+        if owner is None:
+            raise ValueError("retarget needs src=<clip name on another rig> or a .bvh path")
+        clip = rg.find_clip(owner, src)
+        bone_map = map_bones(list(clip.get("tracks") or {}), [b["name"] for b in rig["bones"]], given)
+        if not bone_map:
+            raise ValueError("No bones of %s matched this rig. Pass map={'<their bone>': '<bone>'}" % src)
+        k = rg.rig_height(rig) / (rg.rig_height(owner) or 1.0)
+        tracks = {}
+        for s, d in bone_map.items():
+            track = copy.deepcopy(clip["tracks"][s])
+            track.pop("scale", None)
+            for key in track.get("loc") or []:
+                key[1] = [round(v * k, 3) for v in key[1]]
+            tracks[d] = track
+        made = dict(copy.deepcopy({x: clip[x] for x in clip if x != "tracks"}), id=rg._nid("a"), tracks=tracks,
+                    name=str(p.get("name") or clip["name"]))
+        mapped = len(bone_map)
+    _add_clip(rig, made)
+    scene.touch_geom()
+    return {"summary": "%s on %s: %d bones mapped, %d frames" % (made["name"], rig.get("name"), mapped, made["frames"]),
             "ids": [rig["id"]], "clip": made["id"], "frames": made["frames"]}
+
+
+def _close(a, b, tol):
+    return all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
+def reduce_keys(keys, tol):
+    """Drop keys that the straight line between their kept neighbours reproduces within tol."""
+    if len(keys) <= 2:
+        return keys
+    kept = [keys[0]]
+    for i in range(1, len(keys) - 1):
+        a, b, c = kept[-1], keys[i], keys[i + 1]
+        t = (b[0] - a[0]) / ((c[0] - a[0]) or 1.0)
+        if not _close(b[1], [x + (y - x) * t for x, y in zip(a[1], c[1])], tol):
+            kept.append(b)
+    return kept + [keys[-1]]
+
+
+@op("bake_clip", "bake_clip(clip, rig?, step=1, tol=0.1, to=game) resample to linear keys, drop bone scale keys, "
+                 "close loop seams, reduce keys within tol (deg/cm)")
+def bake_clip(scene, p):
+    rig = rg.find_rig(scene, str(p.get("rig") or ""))
+    clip = rg.find_clip(rig, str(p.get("clip") or ""))
+    step, tol = max(1, int(p.get("step") or 1)), float(p.get("tol", 0.1))
+    end = int(math.ceil(float(clip.get("frames") or 1)))
+    frames = list(range(0, end + 1, step))
+    if frames[-1] != end:
+        frames.append(end)
+    before = after = 0
+    for bone, track in (clip.get("tracks") or {}).items():
+        before += sum(len(track.get(ch) or []) for ch in rg.CHANNELS)
+        track.pop("scale", None)  # engines drop or mangle bone scale; game rigs never key it
+        for ch in ("rot", "loc"):
+            if not track.get(ch):
+                continue
+            keys = []
+            for f in frames:
+                loc, q, _ = rg.local_pose({"tracks": {bone: track}}, bone, f)
+                keys.append([float(f), _euler3(rg._qmat(q)) if ch == "rot" else [round(v, 3) for v in loc], "linear"])
+            if clip.get("loop") and not (ch == "loc" and clip.get("root_motion") and bone in ("root", "forge_root")):
+                keys[-1][1] = list(keys[0][1])
+            track[ch] = reduce_keys(keys, tol)
+            after += len(track[ch])
+    scene.touch_geom()
+    deg, cm = loop_seam(clip) if clip.get("loop") else (0, 0)
+    return {"summary": "%s baked: %d -> %d keys%s" % (clip["name"], before, after, ", seam %g deg" % deg if clip.get("loop") else ""),
+            "ids": [rig["id"]], "keys": after}
 
 
 # ---- r-face --------------------------------------------------------------------
@@ -453,21 +711,83 @@ def face_deltas(verts, names, head_frac=None):
     return out
 
 
-@op("face_shapes", "face_shapes(ids, set='arkit52'|'basic12', head_frac) ARKit-named shape keys from landmark regions of a head")
+# Oculus / Ready Player Me visemes as ARKit mixes (sil is the rest pose). "~X" = XLeft + XRight.
+VISEMES = {"PP": {"mouthClose": 1, "~mouthPress": .5}, "FF": {"mouthRollLower": .6, "~mouthUpperUp": .3},
+           "TH": {"jawOpen": .2, "tongueOut": .4}, "DD": {"jawOpen": .3, "~mouthStretch": .2},
+           "kk": {"jawOpen": .35, "~mouthStretch": .3}, "CH": {"mouthFunnel": .6, "jawOpen": .2},
+           "SS": {"~mouthStretch": .5, "jawOpen": .1}, "nn": {"jawOpen": .25, "mouthClose": .2},
+           "RR": {"mouthFunnel": .4, "jawOpen": .2}, "aa": {"jawOpen": .7}, "E": {"jawOpen": .35, "~mouthStretch": .5},
+           "ih": {"jawOpen": .25, "~mouthSmile": .3}, "oh": {"jawOpen": .5, "mouthFunnel": .5},
+           "ou": {"mouthPucker": .8, "jawOpen": .15}}
+
+
+def viseme_deltas(verts, head_frac=None):
+    parts = {}
+    for mix in VISEMES.values():
+        for n in mix:
+            for name in ((n[1:] + "Left", n[1:] + "Right") if n.startswith("~") else (n,)):
+                parts[name] = None
+    base = face_deltas(verts, list(parts), head_frac)
+    out = {}
+    for vis, mix in VISEMES.items():
+        rows = [[0.0, 0.0, 0.0] for _ in verts]
+        for n, w in mix.items():
+            for name in ((n[1:] + "Left", n[1:] + "Right") if n.startswith("~") else (n,)):
+                for row, d in zip(rows, base[name]):
+                    for i in range(3):
+                        row[i] += w * d[i]
+        out["viseme_" + vis] = [[round(c, 4) for c in r] for r in rows]
+    return out
+
+
+def split_lr(verts, rows, soft=0.1):
+    """(left, right) deltas of one shape: a smoothstep across the centre, `soft` of the width wide. Left is +X."""
+    xs = [v[0] for v in verts]
+    cx, half = (min(xs) + max(xs)) / 2, max(1e-6, soft * (max(xs) - min(xs)))
+    left, right = [], []
+    for v, d in zip(verts, rows):
+        t = max(0.0, min(1.0, (v[0] - cx + half) / (2 * half)))
+        w = t * t * (3 - 2 * t)
+        left.append([round(c * w, 4) for c in d])
+        right.append([round(c * (1 - w), 4) for c in d])
+    return left, right
+
+
+@op("face_shapes", "face_shapes(ids, set='arkit52'|'basic12'|'none', visemes=false, split=[shape names], report=false, head_frac) "
+                   "ARKit-named shape keys, 14 viseme_ keys, _L/_R splits, and a list of keys that move nothing")
 def face_shapes(scene, p):
     nodes = _targets(scene, p)
     if not nodes:
         raise ValueError("face_shapes needs the head mesh id")
-    which = _pick(str(p.get("set") or "arkit52"), ("arkit52", "basic12"), "shape set")
-    names = list(SHAPES) if which == "arkit52" else list(BASIC12)
+    which = _pick(str(p.get("set") or "arkit52"), ("arkit52", "basic12", "none"), "shape set")
+    names = {"arkit52": list(SHAPES), "basic12": list(BASIC12), "none": []}[which]
+    split = [str(s) for s in p.get("split") or []]
+    flat = []
     for node in nodes:
         if scene.is_locked(node):
             raise ValueError("%s is locked" % node.get("name"))
         mesh = scene._bake(node)
-        for key in [k for k in mesh.attrs if k.startswith("sk:") and k[3:] in SHAPES]:
-            mesh.attrs.pop(key)
+        if names:
+            for key in [k for k in mesh.attrs if k.startswith("sk:") and k[3:] in SHAPES]:
+                mesh.attrs.pop(key)
         for name, rows in face_deltas(mesh.verts, names, p.get("head_frac")).items():
             mesh.attrs["sk:" + name] = rows
+        if p.get("visemes"):
+            for name, rows in viseme_deltas(mesh.verts, p.get("head_frac")).items():
+                mesh.attrs["sk:" + name] = rows
+        for name in split:
+            rows = mesh.attrs.get("sk:" + name)
+            if rows is None:
+                raise ValueError("No shape key %r on %s to split" % (name, node.get("name")))
+            mesh.attrs["sk:%s_L" % name], mesh.attrs["sk:%s_R" % name] = split_lr(mesh.verts, rows)
+        flat += [k[3:] for k, rows in mesh.attrs.items() if k.startswith("sk:") and max((abs(c) for r in rows for c in r), default=0) < 1e-4]
         scene.write_mesh(node, mesh)
     scene.touch_geom()
-    return {"summary": "%d %s shape keys on %d mesh(es)" % (len(names), which, len(nodes)), "ids": [n["id"] for n in nodes], "shapes": len(names)}
+    count = len(names) + (len(VISEMES) if p.get("visemes") else 0) + 2 * len(split)
+    out = {"summary": "%d shape keys (%s%s%s) on %d mesh(es)" % (count, which, " +visemes" if p.get("visemes") else "",
+                                                                  " +%d split" % len(split) if split else "", len(nodes)),
+           "ids": [n["id"] for n in nodes], "shapes": count}
+    if p.get("report"):
+        out["flat"] = len(flat)
+        out["summary"] += "; %d move nothing%s" % (len(flat), " (%s)" % ", ".join(flat[:4]) if flat else "")
+    return out

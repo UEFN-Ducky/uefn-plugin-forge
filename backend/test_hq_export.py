@@ -19,7 +19,12 @@ class RecipeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Did you mean 'godot'"):
             hq_export.recipe("godt")
         with self.assertRaisesRegex(ValueError, "No format"):
-            hq_export.recipe("ue5", "obj")
+            hq_export.recipe("ue5", "dwg")
+        roblox = hq_export.recipe("roblox")
+        self.assertEqual((roblox["format"], roblox["tris"], roblox["verts"], roblox["triangulate"]), ("fbx", 20000, 10000, True))
+        self.assertEqual(hq_export.recipe("web")["webp"], 85)
+        self.assertEqual(hq_export.recipe("godot")["ucx"], "godot")
+        self.assertEqual(hq_export.recipe("ue5", "stl")["format"], "stl")
 
 
 @unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
@@ -56,7 +61,76 @@ class ExportTests(unittest.TestCase):
             self.assertTrue(out["path"].endswith(ext), out)
             self.assertEqual((out["stats"]["skins"], out["stats"]["clips"], out["stats"]["morphs"]), (1, 1, 2), out)
             self.assertNotIn("warnings", out)
+            self.assertTrue(out["verified"], out)
             self.assertLessEqual(len(str(out)), 300)
+
+    def static(self, name="Hero"):
+        from .scene import dispatch, load
+        dispatch("", "scene_new", {"name": name})
+        nid = dispatch(name, "add", {"kind": "box", "object_name": "Crate", "params": {"w": 50, "d": 40, "h": 200}})["id"]
+        return load(name), nid
+
+    def test_obj_and_stl_axis_and_scale(self):
+        """Read the files themselves: OBJ is metres Y-up, STL is millimetres Z-up."""
+        import struct
+        from . import hq
+        scene, _ = self.static()
+        out = hq.run_hq(scene, "export", {"format": "obj", "verify": True})
+        self.assertTrue(out["verified"], out)
+        from pathlib import Path
+        ys = [float(line.split()[2]) for line in Path(out["path"]).read_text().splitlines() if line.startswith("v ")]
+        self.assertAlmostEqual(max(ys) - min(ys), 2.0, places=3)
+        out = hq.run_hq(scene, "export", {"format": "stl", "verify": True})
+        self.assertTrue(out["verified"], out)
+        raw = Path(out["path"]).read_bytes()
+        count = struct.unpack("<I", raw[80:84])[0]
+        zs = [struct.unpack("<f", raw[84 + 50 * t + 12 + 12 * k + 8:84 + 50 * t + 12 + 12 * k + 12])[0] for t in range(count) for k in range(3)]
+        self.assertAlmostEqual(max(zs) - min(zs), 2000.0, delta=0.5)
+        out = hq.run_hq(scene, "export", {"format": "usdz", "verify": True})
+        self.assertTrue(out["path"].endswith(".usdz") and out["verified"], out)
+
+    def test_roblox_limits_and_web(self):
+        from . import hq
+        from .scene import dispatch, load
+        dispatch("", "scene_new", {"name": "Hero"})
+        dispatch("Hero", "add", {"kind": "sphere", "params": {"radius": 50, "seg": 200, "rings": 100}})
+        scene = load("Hero")
+        out = hq.run_hq(scene, "export", {"target": "roblox", "verify": True})
+        self.assertTrue(out["path"].endswith(".fbx"), out)
+        self.assertIn("> 20k", out["summary"], out)
+        out = hq.run_hq(scene, "export", {"target": "web"})
+        self.assertTrue(out["path"].endswith(".glb"), out)
+        self.assertIn("> 30k", out["summary"], out)
+        self.assertLessEqual(len(str(out)), 300)
+
+    def test_ucx_and_lods(self):
+        from . import hq
+        scene, nid = self.static()
+        hq.run_hq(scene, "collision", {"id": nid, "kind": "box"})
+        scene.node(nid)["hq"] = {"lods": {"ratios": [1, 0.5, 0.25]}}
+        out = hq.run_hq(scene, "export", {"target": "ue5", "verify": True, "lods": True})
+        self.assertIn("3 LODs", out["summary"])
+        self.assertIn("1 UCX", out["summary"])
+        from pathlib import Path
+        text = Path(out["path"]).read_bytes()
+        base = scene.node(nid)["name"].encode()
+        for name in (b"UCX_" + base + b"_01", base + b"_LOD0", base + b"_LOD2"):
+            self.assertTrue(name in text, name)
+        out = hq.run_hq(scene, "export", {"target": "godot"})
+        self.assertTrue(base + b"_01-colonly" in Path(out["path"]).read_bytes())
+        out = hq.run_hq(scene, "export", {"target": "unity"})
+        self.assertFalse(b"UCX_" in Path(out["path"]).read_bytes())
+
+    def test_convert(self):
+        from . import hq
+        scene, _ = self.static()
+        glb = hq.run_hq(scene, "export", {"target": "generic"})["path"]
+        out = hq.run_hq(scene, "convert", {"path": glb, "to": "obj"})
+        self.assertTrue(out["path"].endswith(".obj") and os.path.isfile(out["path"]), out)
+        self.assertEqual(out["tris"], 12, out)
+        with self.assertRaisesRegex(ValueError, "overwrite"):
+            hq.run_hq(scene, "convert", {"path": glb, "to": "glb"})
+        self.assertLessEqual(len(str(out)), 300)
 
 
 class SendTests(unittest.TestCase):

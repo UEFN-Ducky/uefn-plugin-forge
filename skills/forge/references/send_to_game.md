@@ -45,11 +45,11 @@ Sending again replaces the assets in place, so meshes already in the level updat
 
 ## Collision
 
-Static meshes get simple collision (`CTF_UseSimpleAsComplex`). Objects on the `collision` layer are for seeing blockers in the dock; they are not imported as custom collision yet. Skeletal meshes get the generated PhysicsAsset.
+Static meshes get simple collision (`CTF_UseSimpleAsComplex`). Objects on the `collision` layer are for seeing blockers in the dock; they are not imported as custom collision yet. `forge_hq(op="collision", params={"id": ...})` makes such a `UCX_<name>_01` hull; it ships as real collision in the UE5 FBX (`export target=ue5`, skill `hq_export`). Skeletal meshes get the generated PhysicsAsset.
 
 ## Validate
 
-Every asset in the result carries `validate_uefn_asset` output. Fix its errors before publishing. To inspect afterwards: `get_static_mesh_info`, `get_skeletal_mesh_info`, or `get_anim_sequence_info`.
+Before sending, run `forge_hq(op="qa", params={"profile": "uefn", "fix": true})` (skill `asset_qa`): it catches n-gons, inward normals, z-fighting, pivots and the 20k-tris-per-mesh cap. Every asset in the result carries `validate_uefn_asset` output. Fix its errors before publishing. To inspect afterwards: `get_static_mesh_info`, `get_skeletal_mesh_info`, or `get_anim_sequence_info`.
 
 ## Orientation
 

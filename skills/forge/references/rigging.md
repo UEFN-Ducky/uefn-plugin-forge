@@ -70,6 +70,20 @@ A single batch builds the chest:
 
 The lid hinge sits on the back edge (+Y), so a negative X rotation swings the front up and back. Passing `"rig": "$2"` keeps every step on the new rig even when the scene already has one.
 
+## Mechanical rigs
+
+Forge bakes motion into keys; nothing stays live, so mechanisms are bones plus keyed rotations on one axis.
+
+| Mechanism | Bones | Keys |
+|---|---|---|
+| Hinge (door, lid, lever) | one bone, head on the pivot line | `rot` on the hinge axis only, within the limit (door 0 to -95) |
+| Piston | `cylinder` bone, `rod` child on the same line | `rod` `loc` along the line; key both ends at the same frames |
+| Gears | one bone per gear at its hub | `spin` on each; teeth ratio sets `amount` (20 and 10 teeth: 1 and -2 turns), opposite signs for meshing gears |
+| Wheels on a vehicle | `body` root, one bone per wheel hub | `spin` per wheel, `linear`; turns = distance / (2 pi r) |
+| Turret | `yaw` then `pitch` child | yaw about Z, pitch about X |
+
+Bind each hard part rigidly (`bone=`). Keep the pivot bone's head exactly on the axis, or the part wobbles.
+
 ## Binding
 
 | Mesh | Call | Result |
@@ -109,6 +123,8 @@ At preview and Send, each vertex keeps its four strongest bones, normalized. A v
 ## Checks
 
 `forge_check` adds rig issues: no bones, a cycle, nothing bound, a binding to a missing bone, keys on missing bones, keys after the last frame, and loops whose last frame doesn't match frame 0.
+
+For a game rig, `forge_hq(op="rig_check", params={"profile": "uefn"})` scores names, mirroring, unweighted verts, influences and loop seams, and `op="stress"` keys extreme poses to render (skill `hq_rig`).
 
 ## Tool args
 
