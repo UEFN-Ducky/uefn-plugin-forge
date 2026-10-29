@@ -1691,11 +1691,20 @@ def _op_fix(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Fix {len(fixed)}", "ids": [f["id"] for f in fixed], "fixed": fixed}
 
 
+def _style(value: Any) -> str:
+    """'pbr' (default, the engine's empty style) or 'toon'."""
+    v = str(value or "pbr").strip().lower()
+    if v not in ("pbr", "toon"):
+        raise ValueError(f"style={value!r} is not a render style. Use pbr or toon")
+    return "" if v == "pbr" else v
+
+
 def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
     """The whole asset in one image (or one object with id), or with a clip, posed at each frame."""
     from . import render as rd
     from .render import render_png
 
+    style = _style(p.get("style"))
     views = list(p.get("views") or ["three"])
     paths = []
     folder = _captures()
@@ -1708,14 +1717,14 @@ def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
         frames = [float(f) for f in (p.get("frames") or [0, clip["frames"] / 4, clip["frames"] / 2, clip["frames"] * 3 / 4])]
         for f in frames:
             dest = folder / f"forge_{scene.name}_{_safe(clip['name'])}_f{round(f)}.png"
-            paths.extend(render_png(posed_meshes(scene, nodes, rig, clip, f), dest, views, mats, scene.folder / "textures"))
+            paths.extend(render_png(posed_meshes(scene, nodes, rig, clip, f), dest, views, mats, scene.folder / "textures", style=style))
         return _noted({"summary": f"Render {clip['name']} at {len(frames)} frames", "ids": [], "paths": paths, "kind": "look"}, rd)
     # Oct 28 2026: one image per object showed a lion's body and its hair cards as two separate pictures.
     mesh = Mesh()
     for n in nodes:
         mesh.append(scene.world_mesh(n))
     dest = folder / f"forge_{scene.name}_{p.get('id') or 'all'}.png"
-    paths.extend(render_png(mesh, dest, views, mats, scene.folder / "textures"))
+    paths.extend(render_png(mesh, dest, views, mats, scene.folder / "textures", style=style))
     return _noted({"summary": f"Render {len(paths)}", "ids": [], "paths": paths, "kind": "look"}, rd)
 
 
@@ -1734,6 +1743,11 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
     from .render import _VIEWS, render_tiles
 
     look = p.get("look") or "three"
+    style = p.get("style")
+    if isinstance(look, dict):  # {view, style}
+        style = look.get("style") or style
+        look = look.get("view") or "three"
+    style = _style(style)
     ids = set(look) if isinstance(look, list) else set()
     views = ["three"] if ids else _LOOK_VIEWS.get(look, [look])
     bad = [v for v in views if v not in _VIEWS]
@@ -1765,7 +1779,8 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
         "; ".join(f"{k} x{c}" for k, c in list(kinds.items())[:3]) or "no issues")
     from . import render as rd
 
-    path = render_tiles(mesh, _captures() / f"forge_{scene.name}_look.png", views, mats, scene.folder / "textures")
+    path = render_tiles(mesh, _captures() / f"forge_{scene.name}_look.png", views, mats, scene.folder / "textures",
+                        style=style)
     return _noted({"summary": seen, "seen": seen, "ids": [], "paths": [path]}, rd)
 
 

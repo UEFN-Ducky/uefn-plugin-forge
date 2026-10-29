@@ -128,6 +128,33 @@ class ProjectStorage(unittest.TestCase):
         rpc = panel_rpc.forge_projects(action="active")
         self.assertTrue(rpc["ok"] and rpc["active"] == "My Scenes")
 
+    def test_render_style_passthrough(self):
+        api = _Api()
+        tools.register_tools(api)
+        t = api.fns
+        t["forge_scene_new"](name="Toony")
+        calls = []
+
+        def fake_png(mesh, path, views=None, materials=None, textures=None, style=""):
+            calls.append(("png", style, views))
+            return []
+
+        def fake_tiles(mesh, path, views, materials=None, textures=None, long_side=768, quality="look", style=""):
+            calls.append(("tiles", style, views))
+            return str(path)
+
+        with patch("backend.render.render_png", fake_png), patch("backend.render.render_tiles", fake_tiles), \
+                patch.object(tools, "_attach_captures", lambda r: r):
+            t["forge_render"](name="Toony", views=["front"], style="toon")
+            t["forge_render"](name="Toony", views=["front"])
+            t["forge_fix"](name="Toony", look={"view": "front", "style": "toon"})
+            t["forge_fix"](name="Toony", look="front")
+            with self.assertRaises(ValueError) as bad:
+                t["forge_render"](name="Toony", style="neon")
+        self.assertEqual(calls, [("png", "toon", ["front"]), ("png", "", ["front"]),
+                                 ("tiles", "toon", ["front"]), ("tiles", "", ["front"])])
+        self.assertIn("pbr or toon", str(bad.exception))
+
     def test_flat_override_still_works(self):
         with patch.dict(os.environ, {"FORGE_SCENES_DIR": str(self.root / "flat")}):
             scene.create("A")
