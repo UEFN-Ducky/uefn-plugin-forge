@@ -18,6 +18,7 @@ metadata:
 - Smart returns `charts` and `px_per_cm_1024`, the texels per cm on a 1024 texture. About 1 px/cm suits a prop seen up close; small props can go higher.
 - `forge_uv_transform(name, id, faces, offset=[u, v], rotate=90, scale=[su, sv])` moves UVs about their centre: turn a plank's grain, fit a decal.
 - Unwrap again after big topology edits.
+- For a game asset that gets baked or exported, use the HQ op instead: `forge_hq(op="uv", id, params={method: "seams", texel: 512, res: 2048})` cuts seams on sharp edges, scales to a texel target, packs with margin, and reports islands, overlap and texel. See `retopo_uv`.
 
 ## Paint a texture
 

@@ -5,6 +5,7 @@ A layer is a type name or {"type": ..., **params}; layers apply in order to one 
 state (colour, roughness, metallic, height, ...), so a worn painted steel is four short layers.
 Node refs are {"n": node id, "o": output name or "#index"}; any other input value is a constant.
 """
+import contextlib
 import difflib
 import json
 from pathlib import Path
@@ -21,9 +22,11 @@ DEFAULTS = {
     "scratches": {"color": [0.7, 0.7, 0.7], "amount": 0.5, "scale": 30.0, "stretch": 20.0},
     "sss": {"weight": 0.5, "radius": [1.0, 0.4, 0.25], "scale": 0.1},
     "clearcoat": {"weight": 1.0, "roughness": 0.05},
-    "normal": {"image": "", "strength": 1.0, "bump": 0.3},
+    "normal": {"image": "", "strength": 1.0, "bump": 0.3, "dx": False},
+    "image": {"image": "", "target": "color", "strength": 1.0},
 }
-_TARGETS = {"noise": ("color", "roughness", "bump"), "triplanar": ("color", "roughness", "bump")}
+_TARGETS = {"noise": ("color", "roughness", "bump"), "triplanar": ("color", "roughness", "bump"),
+            "image": ("color", "roughness", "metallic", "orm", "emissive", "opacity")}
 
 
 def normalize(layers):
@@ -41,8 +44,8 @@ def normalize(layers):
         target = layer.get("target")
         if target is not None and target not in _TARGETS.get(kind, ()):
             raise ValueError("Layer %s target %r: use %s" % (kind, target, "/".join(_TARGETS.get(kind, ()))))
-        if kind == "triplanar" and not layer.get("image"):
-            raise ValueError("Layer triplanar needs image=<file in the scene textures>")
+        if kind in ("triplanar", "image") and not layer.get("image"):
+            raise ValueError("Layer %s needs image=<file in the scene textures>" % kind)
         out.append({"type": kind, **layer})
     return out
 
@@ -149,11 +152,33 @@ def _normal(g, s, p):
     s["bump"] = p["bump"]
     if p["image"]:
         image = g.add("ShaderNodeTexImage", props={"image": p["image"], "noncolor": True}, out="Color")
+        if p["dx"]:  # DirectX green points down; Blender wants OpenGL
+            rgb = g.add("ShaderNodeSeparateColor", {"Color": image})
+            green = g.math("SUBTRACT", 1.0, {"n": rgb["n"], "o": "#1"})
+            image = g.add("ShaderNodeCombineColor", {"#0": rgb, "#1": green, "#2": {"n": rgb["n"], "o": "#2"}}, out="Color")
         s["normal"] = g.add("ShaderNodeNormalMap", {"Color": image, "Strength": p["strength"]}, {"space": "TANGENT"}, "Normal")
 
 
+def _image(g, s, p):
+    """A UV-mapped texture into one channel; orm splits G roughness, B metallic (R AO stays in the texture)."""
+    image = g.add("ShaderNodeTexImage", props={"image": p["image"], "noncolor": p["target"] not in ("color", "emissive")}, out="Color")
+    if p["target"] == "color":
+        s["color"] = image
+    elif p["target"] == "roughness":
+        s["rough"] = image
+    elif p["target"] == "metallic":
+        s["metal"] = image
+    elif p["target"] == "orm":
+        rgb = g.add("ShaderNodeSeparateColor", {"Color": image})
+        s["rough"], s["metal"] = {"n": rgb["n"], "o": "#1"}, {"n": rgb["n"], "o": "#2"}
+    elif p["target"] == "emissive":
+        s["emit"], s["emit_str"] = image, p["strength"]
+    else:
+        s["alpha"] = image
+
+
 _APPLY = {"base": _base, "noise": _noise, "edge_wear": _edge_wear, "dirt": _dirt, "triplanar": _triplanar,
-          "scratches": _scratches, "sss": _sss, "clearcoat": _clearcoat, "normal": _normal}
+          "scratches": _scratches, "sss": _sss, "clearcoat": _clearcoat, "normal": _normal, "image": _image}
 
 
 def graph(layers):
@@ -240,7 +265,8 @@ def build(mat, compiled, folder=None):
             put(node.inputs[_key(key)], value)
     for key, value in compiled["out"].items():
         put(bsdf.inputs[key], value)
-    if float(compiled["out"].get("Alpha", 1.0) or 1.0) < 1.0:
+    alpha = compiled["out"].get("Alpha", 1.0)
+    if isinstance(alpha, dict) or float(alpha or 1.0) < 1.0:
         try:
             mat.surface_render_method = "BLENDED"
         except (AttributeError, TypeError):
@@ -264,3 +290,201 @@ def op_material_check(p):
     from . import bridge
     bridge.load(p["scene"])
     return {"built": build_all(p.get("textures_dir"))}
+
+
+# ---- extra bake maps: ao, curvature, id, thickness, cage normal, miss % --------
+# ponytail: beside bake.py's op_bake because that file is another lane; fold in when one owner has both.
+
+EXTRA = {"ao": "AO", "curvature": "CRV", "id": "ID", "thickness": "TH", "normal": "N"}
+
+
+def _hue(name):
+    import colorsys
+    import hashlib
+    h = int(hashlib.sha1(name.encode()).hexdigest()[:6], 16) / 0xFFFFFF
+    return tuple(colorsys.hsv_to_rgb(h, 0.8, 0.9)) + (1.0,)
+
+
+def _maker(kind, diag):
+    """fn(tree, material name) -> the colour socket the bake reads for one map kind."""
+    def make(tree, name):
+        if kind == "curvature":  # Pointiness: 0.5 flat, above convex, below concave
+            geo = tree.nodes.new("ShaderNodeNewGeometry")
+            rng = tree.nodes.new("ShaderNodeMapRange")
+            rng.inputs["From Min"].default_value, rng.inputs["From Max"].default_value = 0.42, 0.58
+            tree.links.new(geo.outputs["Pointiness"], rng.inputs["Value"])
+            return rng.outputs["Result"]
+        if kind == "thickness":  # AO cast inward: thin parts see their own back side; white = thick
+            ao = tree.nodes.new("ShaderNodeAmbientOcclusion")
+            ao.inside, ao.only_local, ao.samples = True, True, 16
+            ao.inputs["Distance"].default_value = diag * 0.25
+            return ao.outputs["AO"]
+        rgb = tree.nodes.new("ShaderNodeRGB")
+        rgb.outputs[0].default_value = _hue(name) if kind == "id" else (1.0, 1.0, 1.0, 1.0)
+        return rgb.outputs[0]
+    return make
+
+
+def _out_node(tree):
+    return next(n for n in tree.nodes if n.type == "OUTPUT_MATERIAL" and n.is_active_output)
+
+
+@contextlib.contextmanager
+def _route(mat, make):
+    """mat emits make()'s colour instead of its surface, restored after."""
+    tree = mat.node_tree
+    before = {n.name for n in tree.nodes}
+    out = _out_node(tree)
+    old = out.inputs["Surface"].links[0].from_socket if out.inputs["Surface"].is_linked else None
+    emit = tree.nodes.new("ShaderNodeEmission")
+    tree.links.new(make(tree, mat.name), emit.inputs["Color"])
+    tree.links.new(emit.outputs[0], out.inputs["Surface"])
+    try:
+        yield
+    finally:
+        for node in [n for n in tree.nodes if n.name not in before]:
+            tree.nodes.remove(node)
+        if old is not None:
+            tree.links.new(old, out.inputs["Surface"])
+
+
+@contextlib.contextmanager
+def _swap(ob, make):
+    """Every slot of ob (the high-poly) shows make()'s colour, keyed by its original material name."""
+    import bpy
+    me = ob.data
+    keep = list(me.materials)
+    temps = []
+    for i in range(max(1, len(keep))):
+        mat = bpy.data.materials.new("hq_src")
+        mat.use_nodes = True
+        tree = mat.node_tree
+        tree.nodes.clear()
+        out, emit = tree.nodes.new("ShaderNodeOutputMaterial"), tree.nodes.new("ShaderNodeEmission")
+        src = keep[i].name if i < len(keep) and keep[i] is not None else "slot%d" % i
+        tree.links.new(make(tree, src), emit.inputs["Color"])
+        tree.links.new(emit.outputs[0], out.inputs["Surface"])
+        temps.append(mat)
+    me.materials.clear()
+    for mat in temps:
+        me.materials.append(mat)
+    try:
+        yield
+    finally:
+        me.materials.clear()
+        for mat in keep:
+            me.materials.append(mat)
+        for mat in temps:
+            bpy.data.materials.remove(mat)
+
+
+def _bake_px(ob, mats, size, kind, high, margin, **kw):
+    """bake._bake with a margin: {material name: float (size*size, 4)}, images in Non-Color."""
+    import bpy
+    import numpy as np
+    from .bake import _select
+    images, nodes = {}, {}
+    for mat in mats:
+        img = bpy.data.images.new("hq_bake", size, size, alpha=False)
+        img.colorspace_settings.name = "Non-Color"
+        tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        mat.node_tree.nodes.active = tex
+        images[mat.name], nodes[mat.name] = img, tex
+    try:
+        _select(*([high, ob] if high is not None else [ob]), active=ob)
+        bpy.ops.object.bake(type=kind, margin=margin, margin_type="EXTEND", use_clear=True,
+                            use_selected_to_active=high is not None, **kw)
+        out = {}
+        for name, img in images.items():
+            px = np.empty(size * size * 4, np.float32)
+            img.pixels.foreach_get(px)
+            out[name] = px.reshape(-1, 4)
+    finally:
+        for mat in mats:
+            mat.node_tree.nodes.remove(nodes[mat.name])
+        for img in images.values():
+            bpy.data.images.remove(img)
+    return out
+
+
+def op_bake_maps(p):
+    """ao, curvature, id, thickness and a cage/ray normal, plus miss % (texels whose rays found no high-poly)."""
+    import bpy
+    from . import bridge
+    from .bake import _device, _ensure_uv, _high, _safe, _save
+    size, margin = int(p["size"]), int(p.get("margin", 16))
+    objs, _ = bridge.load(p["scene"])
+    build_all(p.get("textures_dir"))
+    low = objs[p["id"]]
+    mats = [m for m in low.data.materials if m is not None]
+    if not mats:
+        raise ValueError("%s has no material; run material first" % low.name)
+    high = _high(p, objs)
+    unwrapped = _ensure_uv(low)
+    scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
+    scene.cycles.use_denoising = False
+    scene.cycles.use_adaptive_sampling = False
+    device = _device(size)
+    diag = low.dimensions.length
+    kw = {}
+    if high is not None:
+        kw = {"cage_extrusion": float(p.get("extrusion", 0.03)) * diag, "max_ray_distance": float(p.get("ray", 0)) * diag}
+        if p.get("cage_id"):
+            kw.update(use_cage=True, cage_object=objs[p["cage_id"]].name)
+
+    def emit(kind, samples=1, edge=margin, src=high):
+        scene.cycles.samples = samples
+        make = _maker(kind, diag)
+        with contextlib.ExitStack() as stack:
+            if src is not None:
+                stack.enter_context(_swap(src, make))
+            else:
+                for mat in mats:
+                    stack.enter_context(_route(mat, make))
+            return _bake_px(low, mats, size, "EMIT", src, edge, **(kw if src is not None else {}))
+
+    baked = {}
+    for kind in p.get("maps") or []:
+        if kind not in EXTRA:
+            raise ValueError("bake_maps has no %r. Maps: %s" % (kind, ", ".join(EXTRA)))
+        scene.cycles.samples = 16
+        if kind == "normal":
+            baked[kind] = _bake_px(low, mats, size, "NORMAL", high, margin, normal_space="TANGENT", **kw)
+            if p.get("target", "ue") in ("ue", "dx"):  # DirectX green points down
+                for arr in baked[kind].values():
+                    arr[:, 1] = 1.0 - arr[:, 1]
+        elif kind == "ao":
+            baked[kind] = _bake_px(low, mats, size, "AO", high, margin, **kw)
+        else:
+            baked[kind] = emit(kind, 16 if kind == "thickness" else 1)
+    miss = None
+    if high is not None:  # no margin: dilation would paint over the very holes we count
+        mask = emit("mask", edge=0, src=None)
+        hit = emit("mask", edge=0)
+        inside = lost = 0
+        for n in mask:
+            m = (mask[n][:, 0] > 0.5).reshape(size, size)
+            m[1:-1, 1:-1] &= m[:-2, 1:-1] & m[2:, 1:-1] & m[1:-1, :-2] & m[1:-1, 2:]  # island borders: half-covered texels
+            m[[0, -1], :] = m[:, [0, -1]] = False
+            inside += int(m.sum())
+            lost += int((m & (hit[n][:, 0] < 0.5).reshape(size, size)).sum())
+        miss = round(100.0 * lost / max(1, inside), 2)
+    out_dir = Path(p["out_dir"])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    textures = {}
+    for mat in mats:
+        record = json.loads(mat.get("forge") or "{}")
+        files = {}
+        for kind, per in baked.items():
+            fname = "T_%s_%s.png" % (_safe(record.get("name") or mat.name), EXTRA[kind])
+            _save(out_dir / fname, per[mat.name], kind == "id")
+            files[kind] = fname
+        textures[record.get("id") or mat.name] = files
+    if high is not None and not p.get("high_id"):
+        bpy.data.objects.remove(high, do_unlink=True)  # a sidecar reference never comes back as a Forge object
+    out = {"textures": textures, "size": size, "device": device, "unwrapped": unwrapped, "miss_pct": miss}
+    if unwrapped:
+        out["scene"] = bridge.dump(p["scene"])
+    return out

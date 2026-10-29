@@ -1,4 +1,5 @@
 """HQ materials: layer spec -> nodes, 40 presets, bakes (Blender engine tests skip until it is installed)."""
+import json
 import os
 import statistics
 import tempfile
@@ -62,12 +63,47 @@ class GraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Override 'colr' unknown"):
             hqm.expand("worn_steel", {"colr": 1})
 
-    def test_forty_presets_compile(self):
+    def test_presets_compile(self):
         presets = hqm.presets()
-        self.assertEqual(len(presets), 40)
+        self.assertEqual(len(presets), 46)
         self.assertGreaterEqual(len({p["cat"] for p in presets.values()}), 11)
         for name in presets:
             self.assertTrue(graph(hqm.expand(name)["layers"])["out"], name)
+
+    def test_category_presets_and_lint(self):
+        self.assertEqual(hqm.expand("metal")["preset"], "metal")
+        self.assertEqual(hqm.expand("wood")["layers"][0]["color"], hqm.presets()["oak"]["color"])
+        painted = hqm.expand("painted_metal")
+        self.assertEqual([l["type"] for l in painted["layers"]], ["base", "noise", "scratches", "edge_wear", "dirt"])
+        self.assertEqual(hqm.lint(hqm.expand("gold")), [])
+        self.assertEqual(hqm.lint(hqm.expand("painted_metal")), [])
+        self.assertRegex(" ".join(hqm.lint(hqm.expand("gold", {"metallic": 0.5}))), "metallic 0.50")
+        self.assertRegex(" ".join(hqm.lint(hqm.expand("iron", {"color": [0.05, 0.05, 0.05]}))), "metal albedo")
+        self.assertRegex(" ".join(hqm.lint(hqm.expand("cotton", {"color": [1, 1, 1]}))), "outside 30-240")
+        bad = {"layers": [{"type": "base"}, {"type": "image", "image": "rock_nor_gl_2k.png", "target": "color"}]}
+        self.assertRegex(" ".join(hqm.lint(bad)), "normal map")
+
+    def test_texture_names(self):
+        cases = {"rock_wall_diff_2k": "base_color", "rock_wall_nor_gl_2k": "normal", "rock_wall_arm_2k": "orm",
+                 "Bricks059_2K-PNG_Color": "base_color", "Bricks059_2K-PNG_NormalDX": "normal",
+                 "Bricks059_2K-PNG_AmbientOcclusion": "ao", "Crate_Roughness": "roughness", "Crate_Metallic": "metallic",
+                 "T_Crate_BC": "base_color", "T_Crate_N": "normal", "T_Crate_ORM": "orm", "metal_plate_diff_1k": "base_color",
+                 "x_disp_2k": "height", "Crate_Emissive": "emissive", "Crate_Opacity": "opacity"}
+        for stem, slot in cases.items():
+            self.assertEqual(hqm._slot(stem)[0], slot, stem)
+        self.assertEqual(hqm._slot("T_Crate_N")[1], "dx")
+        self.assertEqual(hqm._slot("Bricks059_2K-PNG_NormalDX")[1], "dx")
+        self.assertEqual(hqm._slot("rock_nor_gl_2k")[1], "gl")
+
+    def test_image_layer_and_dx_normal_compile(self):
+        g = graph(["base", {"type": "image", "image": "t.png", "target": "orm"}, {"type": "image", "image": "o.png", "target": "opacity"},
+                   {"type": "normal", "image": "n.png", "dx": True}])
+        types = [n["type"] for n in g["nodes"]]
+        self.assertIn("ShaderNodeCombineColor", types)
+        self.assertIsInstance(g["out"]["Roughness"], dict)
+        self.assertIsInstance(g["out"]["Alpha"], dict)
+        with self.assertRaisesRegex(ValueError, "image target"):
+            graph([{"type": "image", "image": "t.png", "target": "bump"}])
 
     def test_registered(self):
         self.assertIn("material", hq.HQ_OPS)
@@ -105,6 +141,26 @@ class SceneCase(unittest.TestCase):
         self.assertEqual(back["textures"], {"normal": "T_Hull_N.png", "orm": "T_Hull_ORM.png"})
         self.assertEqual(back["spec"]["preset"], "worn_steel")
         self.assertEqual(load("Hull").node(nid)["material"], mat["id"])
+
+    def test_texture_folder_wires_and_packs(self):
+        from PIL import Image
+        scene, nid = self.scene()
+        src = Path(self.tmp.name) / "set"
+        src.mkdir()
+        Image.new("RGB", (16, 16), (200, 100, 50)).save(src / "rock_diff_1k.png")
+        Image.new("RGB", (16, 16), (128, 200, 255)).save(src / "rock_nor_gl_1k.png")
+        Image.new("L", (16, 16), 180).save(src / "rock_rough_1k.png")
+        Image.new("L", (16, 16), 90).save(src / "rock_ao_1k.png")
+        Image.new("L", (16, 16), 7).save(src / "rock_disp_1k.png")
+        r = hq.HQ_OPS["material"](scene, {"material": "Rock", "preset": "granite", "textures": str(src), "id": nid})
+        mat = next(m for m in scene.data["materials"] if m["name"] == "Rock")
+        self.assertEqual(set(mat["textures"]), {"base_color", "normal", "orm"})
+        tex = scene.folder / "textures"
+        self.assertEqual(Image.open(tex / mat["textures"]["orm"]).getpixel((3, 3)), (90, 180, 0))
+        self.assertEqual(Image.open(tex / mat["textures"]["normal"]).getpixel((3, 3))[1], 55)  # GL -> DX for ue
+        self.assertIn("skipped height", " ".join(r["warnings"]))
+        self.assertEqual([l["type"] for l in mat["spec"]["layers"]][:4], ["base", "image", "normal", "image"])
+        self.assertLessEqual(len(json.dumps(hq.compact(r))), 300)
 
 
 @unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
@@ -154,6 +210,35 @@ class BakeTests(SceneCase):
         self.bake(scene, nid, size=128, maps=["normal"], target="ue", from_high=high)
         flipped = [px[1] for px in _pixels(path) if px[2] > 128]
         self.assertAlmostEqual(statistics.mean(dx) + statistics.mean(flipped), 255, delta=6)
+
+    def test_extra_maps_not_flat(self):
+        from .scene import dispatch, load
+        scene, nid = self.scene("box", w=100, d=100, h=100)
+        hq.HQ_OPS["material"](scene, {"material": "Hull", "preset": "plastic_white", "id": nid})
+        high = dispatch("Hull", "add", {"kind": "sphere", "params": {"radius": 105}})["id"]  # a faceted sphere still clear of the corners (0.87 m)
+        scene = load("Hull")
+        hq.HQ_OPS["uv"](scene, {"id": nid, "method": "smart", "texel": 0, "res": 128})  # box UVs stack every face on 0-1
+        r = self.bake(scene, nid, size=128, maps=["ao", "curvature", "id", "thickness", "normal"], from_high=high, extrusion=0.4)
+        self.assertLessEqual(len(json.dumps(hq.compact(r))), 300, r)
+        tex = next(m for m in scene.data["materials"] if m["name"] == "Hull")["textures"]
+        for slot in ("ao", "curvature", "thickness", "normal"):
+            px = [p[0] for p in _pixels(scene.folder / "textures" / tex[slot])]
+            self.assertGreater(statistics.pstdev(px), 2, slot)
+        self.assertIsNotNone(r["stats"]["miss_pct"])
+        self.assertLess(r["stats"]["miss_pct"], 3, r)
+        self.assertFalse(r["warnings"], r)
+        flat = scene.folder / "textures" / tex["id"]
+        self.assertGreater(len(set(_pixels(flat))), 1)
+
+    def test_short_ray_misses(self):
+        from .scene import dispatch, load
+        scene, nid = self.scene("box", w=100, d=100, h=100)
+        hq.HQ_OPS["material"](scene, {"material": "Hull", "preset": "plastic_white", "id": nid})
+        high = dispatch("Hull", "add", {"kind": "sphere", "params": {"radius": 40}})["id"]
+        scene = load("Hull")
+        r = self.bake(scene, nid, size=64, maps=["normal"], from_high=high, extrusion=0.01, ray=0.02)
+        self.assertGreater(r["stats"]["miss_pct"], 20, r)
+        self.assertTrue(r["warnings"], r)
 
     def test_bake_speed(self):
         import time
