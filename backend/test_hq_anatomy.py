@@ -109,7 +109,7 @@ def test_creature_watertight_and_quads():
     assert ok, "creature has open edges"
     assert parts == 1, "%d loose parts" % parts
     assert s["quads"] / s["faces"] >= 0.9, s
-    assert 8000 <= s["faces"] <= 16000, s
+    assert 5000 <= s["faces"] <= 8000, s
 
 
 def test_creature_silhouette():
@@ -128,6 +128,31 @@ def front_depth(ob, z, x=0.0):
     tree = BVHTree.FromPolygons(verts, [tuple(p.vertices) for p in me.polygons])
     hit = tree.ray_cast(Vector((x, -3, z)), Vector((0, 1, 0)))[0]
     return hit.y if hit else None
+
+
+def test_creature_smooth_shaded():
+    ob, _ = make()
+    assert all(q.use_smooth for q in ob.data.polygons), "flat-shaded faces"
+    assert not [m for m in ob.modifiers], "modifier left unapplied"
+
+
+def test_default_budget():
+    ob, p = make()
+    assert p["faces"] == 7000
+    assert len(ob.data.polygons) <= 8000, len(ob.data.polygons)  # budget counts quad faces
+
+
+def test_big_cat_proportions():
+    # lion ranges, as fractions of body height / length (measured on the 220 cm cat)
+    j = hq_anatomy.spec_for("big_cat")["joints"]
+    assert 1.5 <= j["elbow"][3] / 0.078 <= 1.7 and 1.5 <= j["wrist"][3] / 0.05 <= 1.7, "forelegs ~1.6x"
+    assert 1.25 <= j["head"][3] / 0.15 <= 1.35, "head ~1.3x"
+    assert j["chest"][3] > j["belly"][3] * 1.3 and j["belly"][2] <= 0.65, "deep chest, low belly"
+    ob, p = make()
+    H = p["height"] * 0.01
+    zs = [v.co.z for v in ob.data.vertices if abs(v.co.y) < 0.8 and v.co.z < 0.3 * H]
+    assert zs  # legs exist
+    assert 0.55 <= ob.dimensions.z / ob.dimensions.y <= 0.80, tuple(ob.dimensions)
 
 
 def test_head_parts_present():

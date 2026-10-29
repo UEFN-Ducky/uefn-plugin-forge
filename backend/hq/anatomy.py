@@ -11,7 +11,7 @@ NAME = "anatomy"
 
 _DIR = Path(__file__).resolve().parents[2] / "assets" / "anatomy"
 BUILDS = ("lean", "heavy")
-_DEFAULTS = {"kind": "big_cat", "length": 220.0, "height": None, "build": "lean", "faces": 12000, "name": None, "face": True}
+_DEFAULTS = {"kind": "big_cat", "length": 220.0, "height": None, "build": "lean", "faces": 7000, "name": None, "face": True}
 
 
 def kinds():
@@ -37,13 +37,13 @@ def params(given):
     if p["build"] not in BUILDS:
         raise ValueError("build must be one of: %s" % ", ".join(BUILDS))
     if not 1000 <= int(p["faces"]) <= 40000:
-        raise ValueError("faces must be 1000-40000 (UEFN budget: about 12000)")
+        raise ValueError("faces must be 1000-40000 (UEFN budget: about 7000)")
     p["length"] = float(p["length"])
     p["height"] = float(p["height"] or p["length"] * spec["aspect"])
     return {**p, "spec": spec}
 
 
-@op("creature", "creature(kind=big_cat|canine|horse, length=220, height?, build=lean|heavy, faces=12000, name?, face=true) smooth sculpted quad body; face adds eye objects, nose, lips, ears and head UVs")
+@op("creature", "creature(kind=big_cat|canine|horse, length=220, height?, build=lean|heavy, faces=7000, name?, face=true) smooth sculpted quad body; face adds eye objects, nose, lips, ears and head UVs")
 def creature(scene, p):
     q = params({k: v for k, v in p.items() if k not in ("id", "wait")})
     result, changed = engine(scene, "creature", [], q)

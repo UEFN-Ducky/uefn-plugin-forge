@@ -99,6 +99,9 @@ def _smooth(ob, factor=0.5, repeat=2):
 def _shade(ob):
     ob.data.polygons.foreach_set("use_smooth", np.ones(len(ob.data.polygons), bool))
     ob.data.update()
+    m = ob.modifiers.new("wn", "WEIGHTED_NORMAL")  # big faces win: no faceting on the flat quads
+    m.keep_sharp = False
+    _apply(ob, m)
 
 
 def _material(name, color, roughness):
@@ -237,7 +240,18 @@ def build_creature(p):
     cm = lambda v: v / unit  # noqa: E731
     # voxel remesh welds the skin joins; retopo gives even quads
     remesh(ob, {"voxel": cm(length) / 110, "unit": unit})
-    retopo(ob, {"faces": int(p.get("faces", 12000))})
+    me = ob.data
+    if len(me.vertices) - len(me.edges) + len(me.polygons) != 2:  # handles between fat limbs and body hang quadriflow
+        raise ValueError("Spec skin has holes or handles (limbs merge into a loop with the body); "
+                         "shrink the limb/chest radii or move the joints apart")
+    faces = int(p.get("faces", 7000))
+    for k in (1.0, 1.15, 0.85, 1.3):  # quadriflow fails on some targets of the same mesh: nudge the count
+        try:
+            retopo(ob, {"faces": int(faces * k)})
+            break
+        except RuntimeError:
+            if k == 1.3:
+                raise
     # sculpt: muscle masses out, smooth, then creases in so the smooth cannot fill them
     _strokes(ob, _strokes_for(spec["muscles"], length, height, scale, 1))
     _smooth(ob)
