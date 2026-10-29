@@ -117,13 +117,21 @@ class Parts(_Engine):
         self.assertAlmostEqual(hi[0] - lo[0], 22.5, delta=22.5 * 0.06, msg="section width")
 
     def test_materials_slots(self):
-        out = self.hq("car_part", kind="headlight", style="sport")
+        out = self.hq("car_part", kind="headlight", style="sport", materials="full")
         scene = load(self.name)
         used = {m for m in scene.local_mesh(scene.node(out["ids"][0])).face_mat}
         names = {m["id"]: m for m in scene.data["materials"]}
         self.assertTrue({"mcar_glass", "mcar_chrome", "mcar_emissive", "mcar_plastic"} <= used, used)
         self.assertGreater(names["mcar_emissive"]["emissive_strength"], 0)
         self.assertEqual(names["mcar_paint"]["clearcoat"], 1.0) if "mcar_paint" in names else None
+
+    def test_hero_slots_and_red_lamp_mask(self):
+        out = self.hq("car_part", kind="taillight", style="sedan")
+        scene = load(self.name)
+        mesh = scene.local_mesh(scene.node(out["ids"][0]))
+        self.assertTrue(set(mesh.face_mat) <= {"mcar_paint", "mcar_glass", "mcar_chrome", "mcar_rubber", "mcar_emissive"}, set(mesh.face_mat))
+        col = mesh.attrs.get("col:color")
+        self.assertTrue(col and any(c[0] > 0.9 and c[1] < 0.1 for c in col), "red lamps keep a COLOR_0 mask")
 
     def test_right_side_mirrors(self):
         left = self.hq("car_part", kind="mirror", side="left")
@@ -205,6 +213,9 @@ class Cars(_Engine):
         qa = self.t["forge_hq"](name=self.name, op="qa", params={"id": gid, "profile": "uefn", "budget": "hero"})
         self.assertEqual(qa["errors"], 0, qa)
         self.assertTrue(qa["pass"], qa)
+        self.assertGreaterEqual(qa["score"], 95, qa)  # closed 3 mm panels, 5 hero slots
+        self.assertNotIn("open edges", qa["summary"])
+        self.assertLessEqual(len({m for n in nodes for m in scene.world_mesh(n).face_mat}), 5)
         before = {n["car_slot"]: dict(n["transform"]) for n in nodes if n.get("car_slot", "").startswith("wheel_")}
         swap = self.hq("car_swap", car=gid, slot="rim", spokes="mesh")
         self.assertIn("4 x wheel", swap["summary"])

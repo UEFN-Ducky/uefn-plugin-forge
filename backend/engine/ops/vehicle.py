@@ -38,7 +38,7 @@ SLOTS = {
     "accent": {"base_color": [0.75, 0.05, 0.03, 1], "metallic": 0.3, "roughness": 0.35},
 }
 STYLES = ("sport", "sedan", "suv", "truck", "classic", "scifi")
-_STATE = {"paint": None}
+_STATE = {"paint": None, "materials": "hero"}
 
 
 def tire_size(code):
@@ -899,6 +899,29 @@ def _collapse_slivers(bm, at, cell=0.1):
         bmesh.ops.dissolve_degenerate(bm, dist=1e-4, edges=bm.edges[:])
 
 
+# materials="hero" (default): 5 slots for the hero budget. Red lamps join the light slot and keep their colour as a
+# COLOR_0 vertex mask (col:color, red on tail lamps); materials="full" keeps all 11 slots.
+HERO = {"accent": "paint", "metal": "chrome", "plastic": "rubber", "leather": "rubber", "lens_red": "emissive",
+        "emissive_red": "emissive"}
+_RED = (1.0, 0.05, 0.02, 1.0)
+
+
+def _hero_slots(me, slots):
+    """After to_mesh: remap polygons onto the 5 hero slots and paint red-lamp vertices into col:color. Returns slots."""
+    if _STATE["materials"] == "full":
+        return slots
+    hero = list(dict.fromkeys(HERO.get(s, s) for s in slots))
+    idx = [0] * len(me.polygons)
+    me.polygons.foreach_get("material_index", idx)
+    old = [slots[min(i, len(slots) - 1)] for i in idx]
+    red = {v for p, s in zip(me.polygons, old) if s in ("lens_red", "emissive_red") for v in p.vertices}
+    if red:
+        cols = [c for i in range(len(me.vertices)) for c in (_RED if i in red else (1.0, 1.0, 1.0, 1.0))]
+        me.color_attributes.new("color", "FLOAT_COLOR", "POINT").data.foreach_set("color", cols)
+    me.polygons.foreach_set("material_index", [hero.index(HERO.get(s, s)) for s in old])
+    return hero
+
+
 def _emit(g, name, u, at=(0, 0, 0), smooth=True):
     bm = g.bm
     bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=0.06)  # cm, before the unit scale: what qa welds, welded here
@@ -913,12 +936,14 @@ def _emit(g, name, u, at=(0, 0, 0), smooth=True):
     if extra:
         bmesh.ops.delete(bm, geom=list(extra), context="FACES_ONLY")
         bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
+        # cap the pinholes the slivers leave (small loops only: an open sheet's own rim is never a part's)
+        bmesh.ops.holes_fill(bm, edges=[e for e in bm.edges if len(e.link_faces) == 1], sides=8)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.transform(Matrix.Scale(u, 4))
     me = bpy.data.meshes.new(name)
     bm.to_mesh(me)
     bm.free()
-    for s in g.slots:
+    for s in _hero_slots(me, g.slots):
         me.materials.append(_material(s))
     me.polygons.foreach_set("use_smooth", [smooth] * len(me.polygons))
     ob = bpy.data.objects.new(name, me)
@@ -970,6 +995,7 @@ def build_part(spec, u):
 def car_part(p):
     u = float(p.get("unit", 0.01))
     _STATE["paint"] = p.get("paint")
+    _STATE["materials"] = p.get("materials") or "hero"
     parts = {}
     for spec in p["parts"]:
         ob, info = build_part(spec, u)
@@ -1218,7 +1244,7 @@ def _body(B, u):
         slot = "glass" if glass else "plastic" if name.startswith(("Underbody", "Rocker")) else "paint"
         for f in pb.faces:
             f.material_index = 0
-        me = solidify(pb, 0.5 if glass else 1.0, 0.0 if glass else 0.25, 1)
+        me = solidify(pb, 0.5 if glass else 0.3, 0.0, 1)  # 3 mm sheet, rim closed; a bevel folds at sharp sheet corners
         g = Geo()
         g.mi(slot)
         append_mesh(g, me)
@@ -1265,6 +1291,7 @@ def _kart(B, u, style, parts):
 def car(p):
     u = float(p.get("unit", 0.01))
     _STATE["paint"] = p.get("paint")
+    _STATE["materials"] = p.get("materials") or "hero"
     B = Body(p)
     style, prefix = B.style, p.get("name") or "Car"
     parts = dict(p.get("parts") or {})

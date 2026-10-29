@@ -21,9 +21,10 @@ SPOKES = ("5", "10", "mesh", "dish")
 SOCKETS = {"wheel": "Hub", "rim": "Hub", "tire": "Hub", "brake_disc": "Hub", "caliper": "Hub", "fender": "Hub",
            "suspension": "Hub", "door": "Hinge", "hood": "Hinge", "trunk": "Hinge", "steering_wheel": "Column", "wiper": "Pivot"}
 _PART_KEYS = ("kind", "style", "tire", "spokes", "tread", "disc", "brake", "width", "height", "length", "side", "text",
-              "region", "label", "front", "rear", "paint", "seed", "name", "at")
+              "region", "label", "front", "rear", "paint", "seed", "name", "at", "materials")
 _CAR_KEYS = ("body", "style", "length_cm", "width_cm", "height_cm", "wheelbase_cm", "track_cm", "doors", "parts",
-             "interior", "paint", "seed", "name", "at")
+             "interior", "paint", "seed", "name", "at", "materials")
+MATERIALS = ("hero", "full")  # hero: 5 slots (paint, glass, chrome, rubber, emissive + red lamp mask); full: 11
 _SWAP_KEYS = ("car", "slot") + tuple(k for k in _PART_KEYS if k not in ("name", "at", "side", "paint"))
 _WHEEL_SLOTS = {"rim": "wheel", "tire": "wheel", "brake_disc": "wheel", "wheel": "wheel"}
 
@@ -117,7 +118,7 @@ def _r(x):
 @op("car_part", "car_part(kind=wheel|rim|tire|brake_disc|caliper|headlight|taillight|grille|mirror|door|hood|trunk|bumper_front|"
                 "bumper_rear|fender|spoiler|diffuser|exhaust|seat|steering_wheel|dashboard|engine|suspension|license_plate|wiper|window, "
                 "style=sport|sedan|suv|truck|classic|scifi, tire=225/45R17, spokes=5|10|mesh|dish|n, side=left|right, width|height|length cm, "
-                "disc mm, text?, at?, name?) one part in real cm, origin = its socket (Hub/Hinge/Mount); see skill forge/vehicles")
+                "disc mm, text?, materials=hero|full, at?, name?) one part in real cm, origin = its socket (Hub/Hinge/Mount); see skill forge/vehicles")
 def car_part(scene, p):
     _check(p, _PART_KEYS, "car_part")
     q = _spec(p)
@@ -125,7 +126,8 @@ def car_part(scene, p):
     spec = dict(q, name=q.get("name") or "SM_" + "".join(w.title() for w in q["kind"].split("_")),
                 at=[float(v) for v in (q.get("at") or [0, 0, 0])])
     before = _mats(scene)
-    result, changed = engine(scene, "car_part", [], {"parts": [spec], "paint": paint})
+    mats = _pick(str(p.get("materials") or "hero"), MATERIALS, "materials")
+    result, changed = engine(scene, "car_part", [], {"parts": [spec], "paint": paint, "materials": mats})
     _keep_mats(scene, before, paint)
     info = result["parts"]
     params = {k: v for k, v in spec.items() if k not in ("name", "at", "side", "kind")}
@@ -191,7 +193,8 @@ def measure(scene, nodes):
 
 
 @op("car", "car(body=sedan|coupe|hatch|suv|pickup|limo|sports|van|classic|kart, style?, length_cm?, wheelbase_cm?, track_cm?, "
-           "doors?, parts={rim:'mesh', tire:'245/40R18', spoiler:'sport', engine:false, ...}, interior=true, paint?, name?, at?) "
+           "doors?, parts={rim:'mesh', tire:'245/40R18', spoiler:'sport', engine:false, ...}, interior=true, paint?, "
+           "materials=hero(5 slots)|full(11), name?, at?) "
            "whole car: body panels with 4 mm gaps + car_part parts, FL/FR/RL/RR_wheel + door bones, LODs + UCX; see skill forge/vehicles")
 def car(scene, p):
     _check(p, _CAR_KEYS, "car")
@@ -212,6 +215,7 @@ def car(scene, p):
     if q.get("length_cm") and q.get("wheelbase_cm") and float(q["wheelbase_cm"]) > float(q["length_cm"]) * 0.9:
         raise ValueError("wheelbase_cm must be under 90% of length_cm")
     paint = _paint(q.pop("paint", None))
+    q["materials"] = _pick(str(q.get("materials") or "hero"), MATERIALS, "materials")
     name = str(q.get("name") or "Car_" + body.title())
     q["name"] = name.replace(" ", "_")
     at = [float(v) for v in (q.pop("at", None) or [0, 0, 0])]
@@ -224,7 +228,8 @@ def car(scene, p):
     gid = _nid("g")
     scene.data["nodes"].append({"id": gid, "type": "group", "name": q["name"], "parent": None, "layer": "default", "visible": True,
                                 "locked": False, "transform": {"pos": at, "rot": [0, 0, 0], "scale": [1, 1, 1]}, "combine": True,
-                                "car": {"body": body, "style": result.get("style"), "dims": result["dims"]}})
+                                "car": {"body": body, "style": result.get("style"), "dims": result["dims"],
+                                                                                  "materials": q["materials"]}})
     rig = {"id": _nid("r"), "name": q["name"] + "_Rig", "actions": [],
            "bones": [dict(b, head=[h + o for h, o in zip(b["head"], at)], tail=[t + o for t, o in zip(b["tail"], at)]) for b in result["bones"]]}
     scene.data.setdefault("rigs", []).append(rig)
@@ -277,7 +282,8 @@ def car_swap(scene, p):
         at = [a + b for a, b in zip(group["transform"]["pos"], n["transform"]["pos"])]
         specs.append(dict(spec, side=cp["side"], name=n["name"], at=at))
     before = _mats(scene)
-    result, changed = engine(scene, "car_part", [], {"parts": specs})
+    mats = _pick(str(over.get("materials") or group["car"].get("materials") or "hero"), MATERIALS, "materials")
+    result, changed = engine(scene, "car_part", [], {"parts": specs, "materials": mats})
     _keep_mats(scene, before, None)
     info = result["parts"]
     for spec, n in zip(specs, targets):

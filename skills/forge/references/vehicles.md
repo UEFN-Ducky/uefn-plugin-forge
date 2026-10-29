@@ -13,7 +13,7 @@ Three `forge_hq` ops, all cm. Car frame: **-Y is the front, +X the car's left, Z
 | op | params (defaults) | Result |
 |---|---|---|
 | `car_part` | `kind`, `style` sedan, `tire` by style, `spokes`, `tread` 64, `disc` mm, `side` left, `width`/`height`/`length` cm, `text`, `region` eu\|us, `at`, `name`, `paint` | `car_part tire sedan 225/45R17 r=31.7cm, tread 64, 10.9k tris, socket Hub` |
-| `car` | `body` sedan, `style` (from body), `length_cm`, `wheelbase_cm`, `track_cm`, `doors`, `parts` {}, `interior` true, `paint`, `name`, `at` | `car limo 717x190x149cm, 58 parts, 4 wheels rigged, 90.1k tris, LOD x4, UCX 1` |
+| `car` | `body` sedan, `style` (from body), `length_cm`, `wheelbase_cm`, `track_cm`, `doors`, `parts` {}, `interior` true, `paint`, `materials` hero, `name`, `at` | `car limo 717x190x149cm, 58 parts, 4 wheels rigged, 71.7k tris, LOD x4, UCX 1` |
 | `car_swap` | `car` group id, `slot`, then any `car_part` param | `car_swap rim: 4 x wheel rebuilt (spokes=mesh), sockets kept` |
 
 Styles: `sport` `sedan` `suv` `truck` `classic` `scifi`. Bodies: `sedan` `coupe` `hatch` `suv` `pickup` `limo` `sports` `van` `classic` `kart`.
@@ -36,7 +36,10 @@ Styles: `sport` `sedan` `suv` `truck` `classic` `scifi`. Bodies: `sedan` `coupe`
 | `spoiler` | Mount | airfoil wing + end plates + uprights (sport, scifi double), ducktail (sedan, classic) |
 | `diffuser` `exhaust` `seat` `steering_wheel` (Column) `dashboard` `engine` `suspension` (Hub + Chassis) `license_plate` `wiper` (Pivot) `window` | | each its own SM_ with real sizes |
 
-Left-side parts sit on +X; `side=right` mirrors them. Material slots are shared ids (`mcar_paint`, `mcar_chrome`, `mcar_rubber`, `mcar_glass`, `mcar_plastic`, `mcar_emissive`, `mcar_metal`, `mcar_lens_red`, `mcar_emissive_red`, `mcar_leather`, `mcar_accent`), so one `forge_material` edit recolours every car. A rebuild never resets materials you changed.
+Left-side parts sit on +X; `side=right` mirrors them. Material slots are shared ids, so one `forge_material` edit recolours every car:
+
+- `materials="hero"` (default, the hero budget of 5): `mcar_paint` (takes accent), `mcar_glass`, `mcar_chrome` (takes metal), `mcar_rubber` (takes plastic and leather), `mcar_emissive` (takes the red lamps). Red tail lamps keep their colour as a `col:color` vertex mask that ships as glTF `COLOR_0`: multiply the emissive by vertex colour in UE. In Forge renders the lamps glow white.
+- `materials="full"`: 11 slots, adding `mcar_plastic`, `mcar_metal`, `mcar_lens_red`, `mcar_emissive_red`, `mcar_leather` and `mcar_accent`, for close-up stills. `car_swap` keeps the car's mode. A rebuild never resets materials you changed.
 
 | slot | base fields (`look`, UE export) | `spec` layers (`light`, bakes) |
 |---|---|---|
@@ -49,7 +52,7 @@ Metallic paint reflects in its own colour, which acts as a specular tint, so a b
 ## Real numbers
 
 - Sedan 480 × 185 × 145, wheelbase 280; limo 720 × 190 × 148 (wheelbase stretches with `length_cm`, 600-900); sports 445 × 195 × 120; SUV 480 × 195 × 175; pickup 560 × 200 × 190; kart 180 × 130.
-- Panel gaps 4 mm (production 3-5 mm), panels 1 cm thick with a 2.5 mm chamfer, glass 5 mm.
+- Panel gaps 4 mm (production 3-5 mm). Panels are closed 3 mm solids (rim on, no open edges), glass 5 mm.
 - Track = width − tyre width − 8 cm; wheel arch radius = tyre radius + 4.5 cm; hubs at z = tyre radius.
 
 ## A limo in one batch
@@ -81,7 +84,7 @@ Run it with `forge_batch(steps=[...], look="three")`. For a showcase still, end 
 
 `car_swap` slots: `wheel`/`rim`/`tire` (all four), `caliper`, `headlight`, `taillight`, `grille`, `mirror`, `bumper_front`, `bumper_rear`, `spoiler`, `diffuser`, `exhaust`, `seat`, `steering_wheel`, `dashboard`, `engine`, `license_plate`, `wiper`, or an exact slot like `mirror_L`. The new part keeps the old transform, parent, bone and LODs. Body panels (`body_*`) are the shell: rebuild the car to change them.
 
-**Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back, dark glass and paint in its own colour with no white patches (the `light` studio render shows the seats through the glass); the `car` summary is within 5 % of the target size and 40-120k tris; `qa(profile="uefn", budget="hero")` has 0 errors (the limo: 90k tris, pass). Its warnings are the hinge and hub pivots on purpose.
+**Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back, dark glass and paint in its own colour with no white patches (the `light` studio render shows the seats through the glass); the `car` summary is within 5 % of the target size and 40-120k tris; `qa(profile="uefn", budget="hero")` has 0 errors and 0 open edges (the limo: `uefn score 100: clean`, 72k tris, 5 materials).
 
 ---
 Dimensions from ISO tyre size codes and typical OEM specs. Workflow ideas adapted from Blender Agent Skills (hardsurface-modeling, optimization) by EL4CTEO, MIT licence.
