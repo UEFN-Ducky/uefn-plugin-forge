@@ -17,7 +17,28 @@ svg { display: block; flex: none; }
 .brand { font-weight: 650; letter-spacing: .08em; padding-right: 10px; border-right: 1px solid var(--border); }
 .top .sp { flex: 1; }
 #scene { max-width: 220px; }
-.main { display: grid; grid-template-columns: 44px minmax(180px, 1fr) minmax(290px, 340px); min-height: 0; }
+.main { display: grid; grid-template-columns: 44px 190px minmax(180px, 1fr) minmax(290px, 340px); min-height: 0; }
+.proj { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; padding: 6px; overflow-y: auto; min-height: 0; order: 1; }
+.rail { order: 0; } #view { order: 2; } .side { order: 3; }
+.proj input { width: 100%; box-sizing: border-box; }
+.proj .node { display: flex; gap: 6px; align-items: center; width: 100%; text-align: left; background: transparent; border-color: transparent; padding: 3px 6px; }
+.proj .node:hover { background: var(--btn-hover); }
+.proj .node.on { border-left: 2px solid var(--accent); }
+.proj .node img { width: 28px; height: 28px; object-fit: cover; border-radius: var(--radius-sm); background: var(--card); }
+.proj .group { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 4px 2px; }
+.proj .item { cursor: grab; }
+#view.drop { outline: 2px dashed var(--accent); outline-offset: -4px; }
+#scene-tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; }
+#scene-tabs button { background: transparent; border-color: transparent; border-bottom: 2px solid transparent; white-space: nowrap; }
+#scene-tabs button.on { background: var(--card); border-bottom-color: var(--accent); }
+#scene-tabs .x { padding: 0 4px; margin-left: 4px; color: var(--fg-dim); }
+#scene-tabs input { width: 110px; }
+#proj-menu { position: absolute; z-index: 6; top: 34px; left: 0; width: 240px; background: var(--dropdown-bg); border: 1px solid var(--border-light); border-radius: var(--radius-sm); box-shadow: var(--shadow-dropdown); padding: 5px; display: flex; flex-direction: column; gap: 2px; }
+#proj-menu button { text-align: left; background: transparent; border-color: transparent; }
+#proj-menu button:hover, #proj-menu button.on { background: var(--btn-hover); }
+#proj-menu hr { border: 0; border-top: 1px solid var(--border); width: 100%; margin: 3px 0; }
+#proj-menu #files { position: static; width: auto; box-shadow: none; }
+.simple #cam-speed, .simple #snap, .simple #rot-snap, .simple #scale-snap, .simple .view-help { display: none; }
 .rail { display: flex; flex-direction: column; gap: 4px; padding: 6px 4px; background: var(--sidebar); border-right: 1px solid var(--border); overflow-y: auto; }
 .rail button, .hud button.icon { width: 34px; min-height: 32px; padding: 0; display: grid; place-items: center; background: transparent; border-color: transparent; }
 .rail button:nth-child(5), .rail button:nth-child(11) { margin-top: 12px; }
@@ -114,5 +135,5 @@ p { margin: 4px 0; }
 .key-chip button + button { border-left: 0; color: var(--fg-dim); }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
-@media (max-width: 800px) { .main { grid-template-columns: 40px minmax(140px, 1fr) 290px; } .brand, .view-help { display: none; } .hud { gap: 3px; } .top { gap: 4px; padding: 6px; } }
-@media (max-width: 560px) { .main { grid-template-columns: 36px minmax(0, 1fr); grid-template-rows: minmax(180px, 1fr) minmax(240px, 45%); overflow: auto; } .rail { grid-row: 1 / 3; } .side { grid-column: 2; grid-row: 2; grid-template-rows: 160px auto minmax(180px, 1fr); overflow: auto; } .rail button { width: 28px; } }
+@media (max-width: 800px) { .main { grid-template-columns: 40px 140px minmax(140px, 1fr) 290px; } .brand, .view-help { display: none; } .hud { gap: 3px; } .top { gap: 4px; padding: 6px; } }
+@media (max-width: 560px) { .proj { display: none; } .main { grid-template-columns: 36px minmax(0, 1fr); grid-template-rows: minmax(180px, 1fr) minmax(240px, 45%); overflow: auto; } .rail { grid-row: 1 / 3; } .side { grid-column: 2; grid-row: 2; grid-template-rows: 160px auto minmax(180px, 1fr); overflow: auto; } .rail button { width: 28px; } }

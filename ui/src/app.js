@@ -8,6 +8,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { createPresence } from "./presence.js";
 import { createShotsPanel } from "./shots-panel.js";
+import { LIBRARY_KINDS, buildTree, makeBrowser, nextSceneName, pickerRows, pushRecent } from "./project-browser.js";
 
 document.getElementById("forge-version").textContent = `Forge ${version}`;
 
@@ -1931,6 +1932,164 @@ async function refreshScenes(select) {
   const preferred = select || state.name || sessionRestore?.name;
   state.name = scenes.some(s => s.name === preferred) ? preferred : scenes[0].name;
   sel.value = state.name;
+  browser.setCurrent(state.name);
+  paintBrowser(scenes.map(s => s.name));
+}
+
+const browser = makeBrowser((method, params) => rpc(method, params), { onOpen: name => switchScene(name) });
+const browserUi = { scenes: [], closed: new Set(), recent: [], project: "", library: {}, projects: [] };
+try { browserUi.recent = JSON.parse(localStorage.getItem("forge.recent") || "[]"); } catch { /* no storage */ }
+
+function switchScene(name) {
+  if (name === state.name) return;
+  resetScene();
+  state.name = name;
+  state.rev = -1;
+  document.getElementById("scene").value = name;
+  browser.setCurrent(name);
+  showLoading(name);
+  loadStep("read", "Switching scenes. The long wait is the next step, which packs every mesh before the view can open.");
+  paintBrowser();
+}
+
+function el(tag, props, ...kids) {
+  const e = document.createElement(tag);
+  Object.assign(e, props || {});
+  e.append(...kids);
+  return e;
+}
+
+function paintBrowser(names) {
+  if (names) browserUi.scenes = names;
+  const tabs = document.getElementById("scene-tabs");
+  tabs.innerHTML = "";
+  for (const name of browserUi.scenes) {
+    if (browserUi.closed.has(name) && name !== state.name) continue;
+    const on = name === state.name;
+    const tab = el("button", { type: "button", className: on ? "on" : "", textContent: name, title: "Double-click to rename" });
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(on));
+    tab.setAttribute("aria-label", `Scene ${name}`);
+    tab.onclick = () => browser.openScene(name);
+    tab.ondblclick = () => renameTab(tab, name);
+    if (browserUi.scenes.length > 1) {
+      const x = el("span", { className: "x", textContent: "×", title: "Close tab" });
+      x.setAttribute("role", "button");
+      x.setAttribute("aria-label", `Close ${name}`);
+      x.onclick = ev => {
+        ev.stopPropagation();
+        browserUi.closed.add(name);
+        if (on) browser.openScene(browserUi.scenes.find(n => !browserUi.closed.has(n)) || name);
+        else paintBrowser();
+      };
+      tab.append(x);
+    }
+    tabs.append(tab);
+  }
+  const add = el("button", { type: "button", textContent: "+", title: "New scene" });
+  add.setAttribute("aria-label", "New scene");
+  add.onclick = () => document.getElementById("new").click();
+  tabs.append(add);
+  paintProjectPanel();
+}
+
+function renameTab(tab, name) {
+  const input = el("input", { value: name });
+  input.setAttribute("aria-label", "Scene name");
+  tab.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const finish = async save => {
+    if (done) return;
+    done = true;
+    const next = input.value.trim();
+    if (save && next && next !== name) {
+      const res = await rpc("forge_call", { op: "scene_rename", name, params: { name: next }, actor: "user" }).catch(err => ({ ok: false, error: err.message }));
+      if (!res || res.ok === false) setStatus((res && res.error) || "Could not rename the scene", true);
+      else { if (state.name === name) state.name = next; await refreshScenes(next); return; }
+    }
+    paintBrowser();
+  };
+  input.onkeydown = ev => { if (ev.key === "Enter") finish(true); else if (ev.key === "Escape") finish(false); };
+  input.onblur = () => finish(true);
+}
+
+async function loadProjects() {
+  const res = await browser.projects().catch(() => null);
+  if (!res) return;
+  browserUi.project = res.active || "";
+  browserUi.projects = res.projects || [];
+  document.getElementById("proj-btn").textContent = `${browserUi.project || "Project"} ▾`;
+  paintProjectList();
+}
+
+function paintProjectList() {
+  const box = document.getElementById("proj-list");
+  box.innerHTML = "";
+  for (const name of pickerRows(browserUi.projects, document.getElementById("proj-search").value, browserUi.recent)) {
+    const b = el("button", { type: "button", textContent: name, className: name === browserUi.project ? "on" : "" });
+    b.setAttribute("role", "menuitem");
+    b.onclick = () => chooseProject(name);
+    box.append(b);
+  }
+}
+
+async function chooseProject(name) {
+  document.getElementById("proj-menu").hidden = true;
+  const res = await browser.openProject(name).catch(err => ({ ok: false, error: err.message }));
+  if (!res || res.ok === false) { setStatus((res && res.error) || "Could not open the project", true); return; }
+  browserUi.recent = pushRecent(browserUi.recent, name);
+  try { localStorage.setItem("forge.recent", JSON.stringify(browserUi.recent)); } catch { /* no storage */ }
+  browserUi.closed.clear();
+  resetScene();
+  state.name = "";
+  await refreshScenes();
+  state.rev = -1;
+  await loadProjects();
+  setStatus("Opened project " + name);
+}
+
+async function loadLibrary() {
+  const q = document.getElementById("lib-search").value;
+  for (const kind of LIBRARY_KINDS) browserUi.library[kind] = await browser.library(kind, q).catch(() => []);
+  paintProjectPanel();
+}
+
+function paintProjectPanel() {
+  const tree = buildTree(browserUi.project || "Project", browserUi.scenes, browserUi.library, state.name);
+  const box = document.getElementById("proj-tree");
+  box.innerHTML = "";
+  box.append(el("div", { className: "group", textContent: tree.label }));
+  for (const s of tree.children[0].children) {
+    const b = el("button", { type: "button", className: "node" + (s.current ? " on" : ""), textContent: s.label });
+    b.setAttribute("aria-label", `Open scene ${s.label}`);
+    b.onclick = () => { browserUi.closed.delete(s.name); browser.openScene(s.name); };
+    box.append(b);
+  }
+  const lib = document.getElementById("lib");
+  lib.innerHTML = "";
+  for (const group of tree.children[1].children) {
+    lib.append(el("div", { className: "group", textContent: `${group.label} (${group.children.length})` }));
+    for (const leaf of group.children) {
+      const item = { ...leaf.item, kind: group.lib };
+      const b = el("button", { type: "button", className: "node item", draggable: true });
+      if (item.thumb) b.append(el("img", { src: item.thumb, alt: "", loading: "lazy" }));
+      b.append(leaf.label);
+      b.setAttribute("role", "treeitem");
+      b.setAttribute("aria-label", `${group.lib} ${leaf.label}. Drag into the viewport to link, or press Enter.`);
+      b.ondragstart = ev => ev.dataTransfer.setData("application/x-forge-lib", JSON.stringify(item));
+      b.onclick = () => linkItem(item);
+      lib.append(b);
+    }
+  }
+}
+
+async function linkItem(item) {
+  const res = await browser.link(item, state.name).catch(err => ({ ok: false, error: err.message }));
+  if (!res || res.ok === false) { setStatus((res && res.error) || "Could not link it", true); return; }
+  state.rev = -1;
+  setStatus(`Linked ${item.name}`);
 }
 
 async function poll() {
@@ -2799,10 +2958,7 @@ function wire() {
     op("join", { ids });
   };
   document.getElementById("new").onclick = async () => {
-    const names = new Set([...document.getElementById("scene").options].map(option => option.value));
-    let number = 1;
-    while (names.has(`Scene_${number}`)) number++;
-    const name = `Scene ${number}`;
+    const name = nextSceneName([...document.getElementById("scene").options].map(option => option.value));
     const made = await rpc("forge_call", { op: "scene_new", name: "", params: { name }, actor: "user" });
     if (!made || made.ok === false) { setStatus((made && made.error) || "Could not make a scene", true); return; }
     resetScene();
@@ -2844,14 +3000,41 @@ function wire() {
     }
     box.hidden = false;
   };
-  document.getElementById("scene").onchange = (ev) => {
-    if (ev.target.value === state.name) return;
-    resetScene();
-    state.name = ev.target.value;
-    state.rev = -1;
-    showLoading(state.name);
-    loadStep("read", "Switching scenes. The long wait is the next step, which packs every mesh before the view can open.");
+  document.getElementById("scene").onchange = (ev) => switchScene(ev.target.value);
+  const projMenu = document.getElementById("proj-menu");
+  const projBtn = document.getElementById("proj-btn");
+  const toggleMenu = open => { projMenu.hidden = !open; projBtn.setAttribute("aria-expanded", String(open)); if (open) { loadProjects(); document.getElementById("proj-search").focus(); } };
+  projBtn.onclick = () => toggleMenu(projMenu.hidden);
+  projMenu.addEventListener("keydown", ev => { if (ev.key === "Escape") { toggleMenu(false); projBtn.focus(); } });
+  document.addEventListener("click", ev => { if (!projMenu.hidden && !ev.target.closest(".add-wrap")) toggleMenu(false); });
+  document.getElementById("proj-search").oninput = paintProjectList;
+  document.getElementById("proj-new").onclick = async () => {
+    const name = (prompt("New project name") || "").trim();
+    if (!name) return;
+    const res = await browser.newProject(name).catch(err => ({ ok: false, error: err.message }));
+    if (!res || res.ok === false) { setStatus((res && res.error) || "Could not make the project", true); return; }
+    await chooseProject(res.active || name);
+    loadLibrary();
   };
+  let libTimer = 0;
+  document.getElementById("lib-search").oninput = () => { clearTimeout(libTimer); libTimer = setTimeout(loadLibrary, 250); };
+  const viewEl = document.getElementById("view");
+  viewEl.addEventListener("dragover", ev => { if ([...ev.dataTransfer.types].includes("application/x-forge-lib")) { ev.preventDefault(); viewEl.classList.add("drop"); } });
+  viewEl.addEventListener("dragleave", () => viewEl.classList.remove("drop"));
+  viewEl.addEventListener("drop", ev => {
+    viewEl.classList.remove("drop");
+    const raw = ev.dataTransfer.getData("application/x-forge-lib");
+    if (!raw) return;
+    ev.preventDefault();
+    linkItem(JSON.parse(raw));
+  });
+  const simplify = document.getElementById("simplify");
+  try { simplify.checked = localStorage.getItem("forge.simple") === "1"; } catch { /* no storage */ }
+  const applySimple = () => { document.body.classList.toggle("simple", simplify.checked); try { localStorage.setItem("forge.simple", simplify.checked ? "1" : "0"); } catch { /* no storage */ } };
+  simplify.onchange = applySimple;
+  applySimple();
+  loadProjects();
+  loadLibrary();
   document.getElementById("follow").onchange = (ev) => { state.follow = ev.target.checked; };
   const tabs = document.getElementById("tabs");
   const tabIcons = {
