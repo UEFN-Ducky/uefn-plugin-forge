@@ -57,6 +57,33 @@ def test_look_styles() -> None:
         raise AssertionError(bad)
 
 
+def test_camera_moves() -> None:
+    from backend.tools import apply_move, lens_fov, move_keys
+    root = Path(tempfile.mkdtemp(prefix="forge-cam-"))
+    os.environ["FORGE_SCENES_DIR"] = str(root)
+    dispatch("", "scene_new", {"name": "Dolly"}, actor="user")
+    dispatch("Dolly", "add", {"kind": "box", "name": "Box", "params": {"w": 80, "d": 80, "h": 80}}, actor="agent")
+    got = apply_move("Dolly", "dolly", frames=60, preset="portrait")
+    keys = got["shot"]["keys"]
+    assert [k["t"] for k in keys] == [0.0, 2.0] and got["shot"]["ease"] == "in_out", keys
+    assert keys[1]["pos"][1] > keys[0]["pos"][1]  # pushes in toward the box
+    assert all(k["fov"] == lens_fov("portrait") for k in keys) and 15 < lens_fov("portrait") < 17
+    assert "85 mm" in got["summary"]
+    orbit = move_keys([0, 0, 0], [100, 100, 100], "orbit", frames=96)
+    assert len(orbit) == 9 and orbit[-1]["t"] == 3.2
+    assert all(abs(a - b) < 1e-6 for a, b in zip(orbit[0]["pos"], orbit[-1]["pos"]))  # loops
+    zoom = move_keys([0, 0, 0], [100, 100, 100], "zoom")
+    assert zoom[0]["pos"] == zoom[1]["pos"] and zoom[1]["fov"] < zoom[0]["fov"]
+    crane = move_keys([0, 0, 0], [100, 100, 100], "crane")
+    assert crane[1]["pos"][2] > crane[0]["pos"][2]
+    for bad in (("spin", ""), ("orbit", "fisheye")):
+        try:
+            apply_move("Dolly", bad[0], preset=bad[1])
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+
+
 def test_kernel_and_scene() -> None:
     root = Path(tempfile.mkdtemp(prefix="forge-"))
     os.environ["FORGE_SCENES_DIR"] = str(root)
@@ -615,6 +642,7 @@ def test_send() -> None:
 if __name__ == "__main__":
     test_dock_parts_keep_every_triangle()
     test_look_styles()
+    test_camera_moves()
     test_kernel_and_scene()
     test_rig_anim_batch()
     test_sculpt_paint_shapes()

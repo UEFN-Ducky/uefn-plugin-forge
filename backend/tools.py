@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import json
+import math
 
 from . import live_view
 from .hq import compact
@@ -43,6 +44,63 @@ def _look(name: str, look: Any) -> dict:
     if got.get("error"):
         out["look_error"] = got["error"][:120]
     return out
+
+
+MOVES = ("orbit", "dolly", "zoom", "crane")
+LENSES = {"wide": 20, "neutral": 50, "portrait": 85, "product": 120}  # mm on a 24 mm-tall sensor
+
+
+def lens_fov(preset: str) -> float:
+    if preset not in LENSES:
+        raise ValueError(f"preset={preset!r} is not a lens. Use {', '.join(LENSES)}")
+    return round(math.degrees(2 * math.atan(12.0 / LENSES[preset])), 2)
+
+
+def move_keys(lo: list, hi: list, move: str, frames: int = 96, fov: float = 45.0, target: list | None = None,
+              fps: int = 30) -> list[dict]:
+    """Shot keys {t, pos, target, fov} for a standard move framed on the box lo..hi (cm)."""
+    if move not in MOVES:
+        raise ValueError(f"move={move!r} is not a camera move. Use {', '.join(MOVES)}")
+    frames = int(frames)
+    if frames < 2:
+        raise ValueError("frames is 2 or more")
+    c = list(target) if target else [(lo[i] + hi[i]) / 2 for i in range(3)]
+    radius = max(1.0, max(hi[i] - lo[i] for i in range(3)) / 2)
+    dist = radius * 1.2 / math.sin(math.radians(fov) / 2)
+    end = frames / fps
+    flat, up = dist * 0.85, dist * 0.45  # the three-quarter view's distance out and height
+    if move == "orbit":  # 8 legs, last key = first: frames 0..N-1 loop, frame N is frame 0 again
+        pts = [(end * k / 8, [c[0] + flat * math.sin(math.radians(45 * k)), c[1] - flat * math.cos(math.radians(45 * k)), c[2] + up], fov)
+               for k in range(9)]
+    elif move == "dolly":
+        pts = [(0.0, [c[0], c[1] - flat * 1.6, c[2] + up * 0.6], fov), (end, [c[0], c[1] - flat * 0.7, c[2] + up * 0.3], fov)]
+    elif move == "zoom":
+        pts = [(0.0, [c[0], c[1] - flat, c[2] + up * 0.5], fov), (end, [c[0], c[1] - flat, c[2] + up * 0.5], max(5.0, fov / 2))]
+    else:  # crane: rises from ground level over the subject while easing back
+        pts = [(0.0, [c[0], c[1] - flat, lo[2] + radius * 0.1], fov), (end, [c[0], c[1] - flat * 1.2, c[2] + dist], fov)]
+    return [{"t": round(t, 3), "pos": [round(v, 2) for v in p], "target": c, "fov": f} for t, p, f in pts]
+
+
+def apply_move(name: str, move: str, frames: int = 96, preset: str = "", shot: str = "", target: list | None = None,
+               fps: int = 30) -> dict:
+    """Add (or re-key) a shot with a standard move. ponytail: one dispatch per key, so undo steps back a key at a time."""
+    fov = lens_fov(preset) if preset else 45.0
+    scene = load_scene(name)
+    nodes = [n for n in scene.data["nodes"] if n.get("type") == "object" and n.get("visible", True)]
+    lo, hi = [0.0, 0.0, 0.0], [100.0, 100.0, 100.0]
+    if nodes:
+        pts = [v for n in nodes for v in scene.world_mesh(n).verts]
+        if pts:
+            lo, hi = [min(v[i] for v in pts) for i in range(3)], [max(v[i] for v in pts) for i in range(3)]
+    keys = move_keys(lo, hi, move, frames, fov, target, fps)
+    if not shot:
+        shot = dispatch(name, "shot", {"action": "add", "shot_name": move.title(), "duration": keys[-1]["t"],
+                                       "ease": "linear" if move == "orbit" else "in_out"}, actor="agent")["shot"]["id"]
+    for k in keys:
+        got = dispatch(name, "shot", {"action": "key", "shot": shot, **k}, actor="agent")
+    lens = f", {LENSES[preset]} mm" if preset else ""
+    got["summary"] = f"{move} shot {got['shot']['name']}: {len(keys)} keys over {frames} frames{lens}"
+    return got
 
 
 # ponytail: one "last scene" per Forge process, not per chat; key it by chat id if two chats share one Forge.
@@ -502,9 +560,15 @@ def register_tools(api: Any) -> None:
 
     @api.tool(**host)
     def forge_camera(name: str = "", action: str = "get", pos: list | None = None, target: list | None = None, fov: float | None = None,
-                     seconds: float = 1.0, ids: list | None = None, drive: bool = False, doing: str = "", camera_name: str = "") -> dict:
-        """Your camera: get|goto|look_at|frame|orbit|people|ping|save|cameras; drive=true moves the viewport. See forge/camera."""
+                     seconds: float = 1.0, ids: list | None = None, drive: bool = False, doing: str = "", camera_name: str = "",
+                     move: str = "", frames: int = 96, preset: str = "") -> dict:
+        """Your camera: get|goto|look_at|frame|orbit|people|ping|save|cameras; drive=true moves the viewport. move=orbit|dolly|zoom|crane
+        keys a shot over frames; preset=wide|neutral|portrait|product (20/50/85/120 mm). See forge/camera."""
         name = _scene_name(name)
+        if move:
+            return compact(apply_move(name, move, frames, preset, target=target))
+        if preset and fov is None:
+            fov = lens_fov(preset)
         result = live_view.camera(name, action, pos=pos, target=target, fov=fov, seconds=seconds, ids=ids, drive=drive,
                                   doing=doing, camera_name=camera_name)
         if action == "save":
@@ -523,9 +587,15 @@ def register_tools(api: Any) -> None:
     @api.tool(**host)
     def forge_shot(name: str = "", action: str = "add", shot: str = "", shot_name: str = "", t: float | None = None,
                    pos: list | None = None, target: list | None = None, fov: float | None = None, from_view: str = "",
-                   duration: float | None = None, ease: str = "", camera: str = "") -> dict:
-        """Keyed camera shots: add|key|unkey|edit|delete. See forge/camera."""
+                   duration: float | None = None, ease: str = "", camera: str = "", move: str = "", frames: int = 96,
+                   preset: str = "") -> dict:
+        """Keyed camera shots: add|key|unkey|edit|delete; move=orbit|dolly|zoom|crane keys a whole move over frames
+        (shot= re-keys that shot); preset=wide|neutral|portrait|product lens. See forge/camera."""
         name = _scene_name(name)
+        if move:
+            return compact(apply_move(name, move, frames, preset, shot, target))
+        if preset and fov is None:
+            fov = lens_fov(preset)
         params = _given(action=action, shot=shot, shot_name=shot_name, t=t, pos=pos, target=target, fov=fov,
                         duration=duration, ease=ease)
         if camera:
