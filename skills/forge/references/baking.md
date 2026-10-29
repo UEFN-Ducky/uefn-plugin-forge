@@ -31,7 +31,9 @@ Done when: the result says `miss` under 3 % with no warning, and `look` shows no
 | `id` | `_ID` | one flat colour per material of the high-poly: masks for texturing |
 | `thickness` | `_TH` | white = thick, dark = thin (ears, cloth, leaves): SSS and translucency |
 
-`maps: "all"` bakes all nine. `target`: ue / dx (DirectX green, default), unity, godot, gl.
+`maps: "all"` bakes all nine.
+
+`to: "vcol"` bakes `ao`, `base_color`, `curvature`, `thickness` or `id` into point colours `bake_<map>` instead of a texture: no UVs needed, good for mobile AO and LOD tints. `{"op": "bake", "params": {"id": "rock", "to": "vcol", "maps": ["ao"]}}`. Forge keeps one UV set, so there is no lightmap bake onto UV2; UEFN builds lightmaps itself. `target`: ue / dx (DirectX green, default), unity, godot, gl.
 
 ## Cage and rays
 

@@ -105,6 +105,15 @@ class GraphTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "image target"):
             graph([{"type": "image", "image": "t.png", "target": "bump"}])
 
+    def test_wet_and_snow_layers(self):
+        wet = graph([{"type": "base", "roughness": 0.7}, {"type": "wet", "amount": 1.0, "porosity": 1.0}])
+        self.assertEqual(wet["out"]["Coat Weight"], 1.0)
+        mix = next(n for n in wet["nodes"] if n["type"] == "ShaderNodeMix")
+        self.assertAlmostEqual(mix["in"]["#0"], 0.55)  # albedo darkens 55 % at full porosity
+        snow = graph(["base", {"type": "snow", "up": 0.7}])
+        self.assertIn("ShaderNodeSeparateXYZ", [n["type"] for n in snow["nodes"]])
+        self.assertIsInstance(snow["out"]["Base Color"], dict)
+
     def test_registered(self):
         self.assertIn("material", hq.HQ_OPS)
         self.assertIn("bake", hq.HQ_OPS)
@@ -239,6 +248,17 @@ class BakeTests(SceneCase):
         r = self.bake(scene, nid, size=64, maps=["normal"], from_high=high, extrusion=0.01, ray=0.02)
         self.assertGreater(r["stats"]["miss_pct"], 20, r)
         self.assertTrue(r["warnings"], r)
+
+    def test_bake_to_vertex_colours(self):
+        from .scene import load
+        scene, nid = self.scene("sphere", radius=50)
+        hq.HQ_OPS["material"](scene, {"material": "Hull", "layers": [{"type": "base", "color": [0.2, 0.4, 0.8]}], "id": nid})
+        r = self.bake(scene, nid, to="vcol", maps=["base_color"])
+        self.assertIn("bake_base_color", r["summary"])
+        cols = load("Hull").base_mesh(load("Hull").node(nid)).attrs["col:bake_base_color"]
+        self.assertAlmostEqual(statistics.mean(c[2] for c in cols), 0.8, delta=0.05)
+        with self.assertRaisesRegex(ValueError, "vertex-colour map"):
+            self.bake(scene, nid, to="vcol", maps=["normal"])
 
     def test_bake_speed(self):
         import time

@@ -244,7 +244,7 @@ def _high(scene, node, given):
     return None, str(path)
 
 
-@op("bake", "bake(id, size=1024, maps?, from_high?, cage?=<id>, extrusion=.03, ray=0, margin_px=16, target=ue) BaseColor/Normal/ORM/Emissive/Opacity + ao/curvature/id/thickness PNGs; reports miss % from high; see skill forge/baking", long=True)
+@op("bake", "bake(id, size=1024, maps?, from_high?, cage?=<id>, extrusion=.03, ray=0, margin_px=16, target=ue, to=texture|vcol) BaseColor/Normal/ORM/Emissive/Opacity + ao/curvature/id/thickness PNGs; reports miss % from high; see skill forge/baking", long=True)
 def bake(scene, p):
     node = scene.node(str(p.get("id") or scene.data["selection"].get("object") or ""))
     if node is None or node.get("type") != "object":
@@ -269,6 +269,16 @@ def bake(scene, p):
               "textures_dir": str(textures), "high_id": high_id, "high_path": high_path, "cage_id": cage or None,
               "extrusion": float(p.get("extrusion", 0.03)), "ray": float(p.get("ray", 0)), "margin": int(p.get("margin_px", 16))}
     ids = [node["id"]] + [i for i in (high_id, cage) if i]
+    if p.get("to") == "vcol":  # baked into point colours bake_<map>: no UVs, no textures (LOD tints, mobile AO)
+        vmaps = list(maps or ["ao"])
+        for m in vmaps:
+            _pick(m, ("ao", "base_color", "curvature", "thickness", "id"), "vertex-colour map")
+        r, changed = engine(scene, "bake_maps", ids, dict(params, maps=vmaps, to="vcol"))
+        scene.touch_geom()
+        return {"summary": "%s into vertex colours on %s" % (", ".join(r["vcol"]), r["device"]), "ids": changed or [node["id"]],
+                "stats": {"maps": len(r["vcol"])}}
+    if p.get("to", "texture") != "texture":
+        raise ValueError("to=%r: use texture (default) or vcol" % p["to"])
     # the classic engine bake keeps its own cage and margin; a cage, ray, extrusion or margin moves normal to bake_maps
     tuned = any(k in p for k in ("cage", "extrusion", "ray", "margin_px"))
     classic = None if maps is None else [m for m in maps if m in _MAPS[:5] and not (m == "normal" and tuned)]

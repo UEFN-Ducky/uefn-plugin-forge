@@ -30,7 +30,7 @@ One word. A category name picks its first preset (`metal` → worn_steel, `wood`
 
 `overrides` patches base values (`color`, `metallic`, `roughness`, `emissive`, `emissive_strength`, `opacity`) or one layer type (`{"edge_wear": {"amount": 0.9}}`). `layers=[...]` replaces the preset's layers.
 
-Layers: base, noise (`target` color|roughness|bump), edge_wear (`metal: true` shows bare metal under paint), dirt (cavities), scratches, triplanar, sss, clearcoat, normal (`image`, `dx`), image (`image`, `target` color|roughness|metallic|orm|emissive|opacity). Wear and dirt are Cycles masks: bake them before export.
+Layers: base, noise (`target` color|roughness|bump), edge_wear (`metal: true` shows bare metal under paint), dirt (cavities), scratches, triplanar, sss, clearcoat, normal (`image`, `dx`), image (`image`, `target` color|roughness|metallic|orm|emissive|opacity), wet (`amount`, `porosity`: albedo darkens up to 55 %, roughness drops, clear coat), snow (`amount`, `up` 0-1: faces pointing up get white, rough 0.6). Weather particles stay in UEFN (Niagara). Wear and dirt are Cycles masks: bake them before export.
 
 ## Texture folder
 

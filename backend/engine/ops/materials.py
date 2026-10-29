@@ -24,6 +24,8 @@ DEFAULTS = {
     "clearcoat": {"weight": 1.0, "roughness": 0.05},
     "normal": {"image": "", "strength": 1.0, "bump": 0.3, "dx": False},
     "image": {"image": "", "target": "color", "strength": 1.0},
+    "wet": {"amount": 0.6, "porosity": 0.5},
+    "snow": {"amount": 0.8, "up": 0.6, "color": [0.85, 0.86, 0.87]},
 }
 _TARGETS = {"noise": ("color", "roughness", "bump"), "triplanar": ("color", "roughness", "bump"),
             "image": ("color", "roughness", "metallic", "orm", "emissive", "opacity")}
@@ -177,7 +179,23 @@ def _image(g, s, p):
         s["alpha"] = image
 
 
-_APPLY = {"base": _base, "noise": _noise, "edge_wear": _edge_wear, "dirt": _dirt, "triplanar": _triplanar,
+def _wet(g, s, p):
+    """Water film: porous albedo darkens up to 55 %, roughness drops, a clear coat on top."""
+    s["color"] = g.mixc(0.55 * p["porosity"] * p["amount"], s["color"], [0.0, 0.0, 0.0, 1.0])
+    s["rough"] = g.mixf(p["amount"], s["rough"], 0.08)
+    s["extra"].update({"Coat Weight": p["amount"], "Coat Roughness": 0.05})
+
+
+def _snow(g, s, p):
+    """Snow on faces whose world normal points up more than `up` (0 = walls too, 1 = flat tops only)."""
+    z = g.add("ShaderNodeSeparateXYZ", {"Vector": g.add("ShaderNodeNewGeometry", out="Normal")}, out="Z")
+    fac = g.math("MULTIPLY", g.ramp(z, p["up"] - 0.1, p["up"] + 0.1), p["amount"], True)
+    s["color"] = g.mixc(fac, s["color"], list(p["color"])[:3] + [1.0])
+    s["rough"] = g.mixf(fac, s["rough"], 0.6)
+    s["metal"] = g.mixf(fac, s["metal"], 0.0)
+
+
+_APPLY = {"wet": _wet, "snow": _snow, "base": _base, "noise": _noise, "edge_wear": _edge_wear, "dirt": _dirt, "triplanar": _triplanar,
           "scratches": _scratches, "sss": _sss, "clearcoat": _clearcoat, "normal": _normal, "image": _image}
 
 
@@ -408,6 +426,38 @@ def _bake_px(ob, mats, size, kind, high, margin, **kw):
     return out
 
 
+def _to_vcol(p, low, mats, high, diag, kw):
+    """Each map into a point colour attribute bake_<map> on the low-poly (no UVs needed): {vcol, scene}."""
+    import bpy
+    from . import bridge
+    from .bake import _emit, _select
+    me, made = low.data, []
+    _select(*([high, low] if high is not None else [low]), active=low)
+    for kind in p.get("maps") or ["ao"]:
+        attr = me.color_attributes.get("bake_" + kind) or me.color_attributes.new("bake_" + kind, "FLOAT_COLOR", "POINT")
+        me.color_attributes.active_color = attr
+        bpy.context.scene.cycles.samples = 16
+        with contextlib.ExitStack() as stack:
+            if kind == "ao":
+                kind_type = "AO"
+            else:
+                kind_type = "EMIT"
+                if kind == "base_color":
+                    for mat in mats:
+                        stack.enter_context(_emit(mat, "Base Color"))
+                elif high is not None:
+                    stack.enter_context(_swap(high, _maker(kind, diag)))
+                else:
+                    for mat in mats:
+                        stack.enter_context(_route(mat, _maker(kind, diag)))
+            bpy.ops.object.bake(type=kind_type, target="VERTEX_COLORS", use_clear=True,
+                                use_selected_to_active=high is not None and kind != "base_color", **kw)
+        made.append(attr.name)
+    if high is not None and not p.get("high_id"):
+        bpy.data.objects.remove(high, do_unlink=True)
+    return {"vcol": made, "textures": {}, "unwrapped": False, "miss_pct": None, "scene": bridge.dump(p["scene"])}
+
+
 def op_bake_maps(p):
     """ao, curvature, id, thickness and a cage/ray normal, plus miss % (texels whose rays found no high-poly)."""
     import bpy
@@ -421,7 +471,6 @@ def op_bake_maps(p):
     if not mats:
         raise ValueError("%s has no material; run material first" % low.name)
     high = _high(p, objs)
-    unwrapped = _ensure_uv(low)
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.use_denoising = False
@@ -433,6 +482,9 @@ def op_bake_maps(p):
         kw = {"cage_extrusion": float(p.get("extrusion", 0.03)) * diag, "max_ray_distance": float(p.get("ray", 0)) * diag}
         if p.get("cage_id"):
             kw.update(use_cage=True, cage_object=objs[p["cage_id"]].name)
+    if p.get("to") == "vcol":
+        return dict(_to_vcol(p, low, mats, high, diag, kw), device=device)
+    unwrapped = _ensure_uv(low)
 
     def emit(kind, samples=1, edge=margin, src=high):
         scene.cycles.samples = samples
