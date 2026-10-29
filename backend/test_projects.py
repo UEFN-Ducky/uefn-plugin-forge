@@ -128,6 +128,60 @@ class ProjectStorage(unittest.TestCase):
         rpc = panel_rpc.forge_projects(action="active")
         self.assertTrue(rpc["ok"] and rpc["active"] == "My Scenes")
 
+    def test_delete_scene_to_trash(self):
+        api = _Api()
+        tools.register_tools(api)
+        t = api.fns
+        t["forge_scene_new"](name="DbgLion2")
+        t["forge_scene_new"](name="Keep")
+        self.assertIn("confirm", t["forge_project"](action="delete_scene", name="DbgLion2")["error"])
+        self.assertIn("Did you mean", t["forge_project"](action="delete_scene", name="DbgLion3", confirm=True)["error"])
+        out = t["forge_project"](action="delete_scene", name="DbgLion2", confirm=True)
+        self.assertEqual(out["summary"], "ok deleted DbgLion2 (in trash)")
+        self.assertLessEqual(len(json.dumps(out)), 300)
+        self.assertEqual([s["name"] for s in scene.list_scenes()], ["Keep"])
+        trash = self.root / "projects" / "My Scenes" / ".trash"
+        self.assertEqual([p.name for p in trash.glob("*/DbgLion2") if (p / "scene.json").is_file()], ["DbgLion2"])
+        with self.assertRaises(ValueError):
+            scene.load("DbgLion2")
+        rpc = panel_rpc.forge_projects(action="delete_scene", scene="My Scenes/Keep", confirm=True)
+        self.assertTrue(rpc["ok"], rpc)
+        self.assertEqual(scene.list_scenes(), [])
+
+    def test_last_project_refused(self):
+        projects.ensure()
+        with self.assertRaises(ValueError) as cm:
+            projects.delete_project("My Scenes")
+        self.assertIn("last project", str(cm.exception))
+        projects.new_project("Other")
+        projects.delete_project("My Scenes")
+        self.assertEqual([p["name"] for p in projects.list_projects()], ["Other"])
+        self.assertIn("last project", panel_rpc.forge_projects(action="delete", name="Other", confirm=True)["error"])
+
+    def test_scene_thumbs(self):
+        import base64
+
+        projects.new_project("Race")
+        a = scene.create("Race/A")
+        scene.create("Race/B")
+        scene.dispatch("Race/A", "add", {"kind": "box"})
+        jpg = b"\xff\xd8\xff\xe0fake-jpeg"
+        url = "data:image/jpeg;base64," + base64.b64encode(jpg).decode()
+        self.assertTrue(panel_rpc.forge_scene_thumb(name="Race/A", data_url=url)["ok"])
+        self.assertEqual((a.folder / "thumb.jpg").read_bytes(), jpg)
+        self.assertIn("data_url", panel_rpc.forge_scene_thumb(name="Race/A", data_url="nope")["error"])
+        rows = {r["name"]: r for r in scene.dispatch("", "scene_list", {"project": "Race", "cards": True})["scenes"]}
+        self.assertEqual(rows["A"]["thumb"], url)
+        self.assertEqual(rows["A"]["objects"], 1)
+        self.assertIsNone(rows["B"]["thumb"])
+        self.assertIsNone(rows["B"]["objects"])
+        self.assertIsInstance(rows["B"]["modified"], int)
+        self.assertNotIn("thumb", scene.list_scenes("Race")[0])  # agent results stay small
+        os.utime(a.folder / "scene.json", (time.time() + 60,) * 2)  # A is the newest scene
+        proj = {p["name"]: p for p in panel_rpc.forge_projects(action="list", cards=True)["projects"]}
+        self.assertEqual(proj["Race"]["thumb"], url)
+        self.assertIsNone(proj["My Scenes"]["thumb"])
+
     def test_render_style_passthrough(self):
         api = _Api()
         tools.register_tools(api)

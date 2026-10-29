@@ -161,7 +161,26 @@ def read_project(name: str) -> dict[str, Any]:
     return data
 
 
-def list_projects() -> list[dict[str, Any]]:
+def _thumb_url(folder: Path) -> str | None:
+    path = folder / "thumb.jpg"
+    if not path.is_file():
+        return None
+    import base64
+
+    return "data:image/jpeg;base64," + base64.b64encode(path.read_bytes()).decode("ascii")
+
+
+def _card(folder: Path, row: dict[str, Any]) -> dict[str, Any]:
+    """Picker card extras: modified (epoch s), objects (from the last thumbnail, else None), thumb (data URL or None)."""
+    try:
+        objects = json.loads((folder / "thumb.json").read_text(encoding="utf-8")).get("objects")
+    except (OSError, ValueError, AttributeError):
+        objects = None
+    return {**row, "modified": int((folder / "scene.json").stat().st_mtime), "objects": objects, "thumb": _thumb_url(folder)}
+
+
+def list_projects(cards: bool = False) -> list[dict[str, Any]]:
+    """cards=True (the panel picker) adds modified and thumb: the most recently modified scene's thumbnail."""
     root = ensure()
     out = []
     for folder in sorted(root.iterdir()):
@@ -172,8 +191,13 @@ def list_projects() -> list[dict[str, Any]]:
         except (OSError, json.JSONDecodeError):
             continue
         scenes = folder / "scenes"
-        n = sum(1 for p in scenes.iterdir() if (p / "scene.json").is_file()) if scenes.is_dir() else 0
-        out.append({"name": folder.name, "scenes": n, "targets": info["targets"], "default_scene": info["default_scene"]})
+        found = [p for p in scenes.iterdir() if (p / "scene.json").is_file()] if scenes.is_dir() else []
+        row = {"name": folder.name, "scenes": len(found), "targets": info["targets"], "default_scene": info["default_scene"]}
+        if cards:
+            latest = max(found, key=lambda p: (p / "scene.json").stat().st_mtime_ns, default=None)
+            row["modified"] = int((latest / "scene.json").stat().st_mtime) if latest else int((folder / "project.json").stat().st_mtime)
+            row["thumb"] = _thumb_url(latest) if latest else None
+        out.append(row)
     return out
 
 
@@ -191,14 +215,16 @@ def _header(path: Path, fallback: str) -> dict[str, Any]:
     return {"name": data.get("name") or fallback, "rev": data.get("rev") or 0}
 
 
-def list_scenes(project: str | None = None) -> list[dict[str, Any]]:
+def list_scenes(project: str | None = None, cards: bool = False) -> list[dict[str, Any]]:
+    """[{name, rev}]; cards=True (the panel picker) adds modified, objects and thumb per scene."""
     root = scenes_dir(require(project) if project else None)
     if not root.is_dir():
         return []
     out = []
     for folder in sorted(p for p in root.iterdir() if (p / "scene.json").is_file()):
         try:
-            out.append(_header(folder / "scene.json", folder.name))
+            row = _header(folder / "scene.json", folder.name)
+            out.append(_card(folder, row) if cards else row)
         except (OSError, ValueError):
             continue
     return out
@@ -231,6 +257,9 @@ def rename_project(name: str, new_name: str) -> str:
 def delete_project(name: str) -> str:
     """Moves the folder to projects/.trash/<name>-<stamp>; returns that path."""
     name = require(name)
+    if [p["name"] for p in list_projects()] == [name]:
+        raise ValueError("Can't delete %r: it is the last project and Forge needs one. "
+                         "Create another with forge_project(action=\"new\", name=...) first" % name)
     trash = projects_root() / ".trash"
     trash.mkdir(exist_ok=True)
     dest = trash / ("%s-%s" % (name, time.strftime("%Y%m%d-%H%M%S")))
@@ -263,7 +292,7 @@ def act(action: str = "list", name: str = "", new_name: str = "", scene: str = "
     """forge_project tool and the panel RPC share this. Results stay small: names and counts only."""
     action = (action or "list").strip().lower()
     name = name or project
-    acts = ("list", "new", "open", "rename", "delete", "move_scene", "active")
+    acts = ("list", "new", "open", "rename", "delete", "delete_scene", "move_scene", "active")
     if action not in acts:
         raise ValueError("Unknown action %r. Actions: %s" % (action, ", ".join(acts)))
     if action in ("list", "active"):
@@ -283,6 +312,13 @@ def act(action: str = "list", name: str = "", new_name: str = "", scene: str = "
         if not new_name:
             raise ValueError("Pass new_name for rename")
         return {"name": rename_project(name, new_name), "active": active()}
+    if action == "delete_scene":
+        target = scene or name
+        if not target:
+            raise ValueError("delete_scene needs name = the scene (\"Project/Scene\" or a plain name in the active project)")
+        from . import scene as scenes
+
+        return scenes.delete_scene(target, confirm)
     if action == "delete":
         require(name)
         if not confirm:

@@ -11,6 +11,7 @@ import copy
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -815,8 +816,57 @@ def create(name: str) -> Scene:
     return scene
 
 
-def list_scenes(project: str | None = None) -> list[dict[str, Any]]:
-    return projects.list_scenes(project)
+def list_scenes(project: str | None = None, cards: bool = False) -> list[dict[str, Any]]:
+    return projects.list_scenes(project, cards)
+
+
+def _existing(name: str) -> Path:
+    folder = _folder(name)
+    if not (folder / "scene.json").is_file():
+        project = name.rpartition("/")[0]
+        raise _no_such("scene", folder.name, [s["name"] for s in list_scenes(project or None)])
+    return folder
+
+
+def delete_scene(name: str, confirm: bool = False) -> dict[str, Any]:
+    """Moves the scene folder to <project>/.trash/<stamp>/<Scene>: undoable by moving it back, never hard-deleted."""
+    folder = _existing(name)
+    if not confirm:
+        raise ValueError(f"Deleting scene {folder.name!r} moves it to the project trash; pass confirm=true to do it")
+    from datetime import datetime
+
+    base = folder.parent.parent if projects.project_of(folder) else folder.parent
+    dest = base / ".trash" / datetime.now().strftime("%Y%m%d-%H%M%S-%f") / folder.name
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with _LOCK:
+        _OPEN.pop(_key(folder), None)
+        shutil.move(str(folder), str(dest))
+    return {"summary": f"ok deleted {folder.name} (in trash)", "trashed": folder.name}
+
+
+THUMB_MAX = 600_000  # a 320x180 JPEG is ~15 KB; anything near this is not a thumbnail
+
+
+def set_thumb(name: str, data_url: str) -> dict[str, Any]:
+    """The dock's 320x180 capture -> <scene>/thumb.jpg, plus thumb.json {objects} for the picker card."""
+    folder = _existing(name)
+    head, _, body = str(data_url or "").partition(",")
+    if not head.startswith("data:image/") or not head.endswith(";base64"):
+        raise ValueError("data_url must be 'data:image/jpeg;base64,...' (a 320x180 canvas.toDataURL('image/jpeg'))")
+    try:
+        raw = base64.b64decode(body, validate=True)
+    except ValueError:
+        raise ValueError("data_url is not valid base64; send canvas.toDataURL('image/jpeg') as is") from None
+    if not raw or len(raw) > THUMB_MAX:
+        raise ValueError(f"thumbnail is {len(raw)} bytes; send a 320x180 JPEG under {THUMB_MAX} bytes")
+    with _LOCK:
+        hit = _OPEN.get(_key(folder))
+    objects = len(hit.data.get("nodes") or []) if hit is not None else None
+    tmp = folder / "thumb.jpg.tmp"
+    tmp.write_bytes(raw)
+    tmp.replace(folder / "thumb.jpg")
+    (folder / "thumb.json").write_text(json.dumps({"objects": objects}), encoding="utf-8")
+    return {"summary": f"Thumbnail saved for {folder.name}", "bytes": len(raw)}
 
 
 def _rename_scene(name: str, p: dict) -> dict[str, Any]:
@@ -870,7 +920,7 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
             from .blend_import import import_blend
             return import_blend(str(params.get("path") or ""), preview=True, scale=params.get("scale", 1))
         if op == "scene_list":
-            return {"scenes": list_scenes(params.get("project") or None)}
+            return {"scenes": list_scenes(params.get("project") or None, bool(params.get("cards")))}
         if op == "scene_new":
             project = str(params.get("project") or "")
             short = str(params.get("name") or "Scene")
