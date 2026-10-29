@@ -62,7 +62,7 @@ def stats(ob, res=2048, grid=512):
     """{islands, overlap_pct, texel_px_m, spread, packed_pct, oob} of ob's active UVs (world-space metres)."""
     me = ob.data
     if not me.uv_layers or not len(me.polygons):
-        return {"islands": 0, "overlap_pct": 0.0, "texel_px_m": 0.0, "spread": 0.0, "packed_pct": 0.0, "oob": False}
+        return {"islands": 0, "overlap_pct": 0.0, "texel_px_m": 0.0, "spread": 0.0, "packed_pct": 0.0, "degenerate_islands": 0, "oob": False}
     face, tri = _tris(me)
     uv = _uv(me)
     vidx = np.empty(len(me.loops), np.int64)
@@ -82,14 +82,15 @@ def stats(ob, res=2048, grid=512):
         of_face[faces] = i
     isl = of_face[face]
     A3, A2 = np.bincount(isl, a3, len(islands)), np.bincount(isl, a2, len(islands))
-    big = A3 >= 0.002 * A3.sum()  # slivers say nothing about density
+    ok = (A3 >= 1e-9) & (A2 >= 1e-9)  # zero-area islands (collapsed faces or UVs) would divide by ~0
+    big = ok & (A3 >= 0.002 * A3[ok].sum())  # slivers say nothing about density
     dens = np.sqrt(A2[big] / A3[big]) * res
     owner, over = _raster(t, isl, grid)
     covered = int((owner >= 0).sum())
     return {"islands": len(islands), "overlap_pct": round(100.0 * over.sum() / max(1, covered), 2),
-            "texel_px_m": round(float(math.sqrt(A2.sum() / max(A3.sum(), 1e-12)) * res), 1),
+            "texel_px_m": round(float(math.sqrt(A2[ok].sum() / max(A3[ok].sum(), 1e-12)) * res), 1),
             "spread": round(float(dens.max() / max(dens.min(), 1e-9)), 2) if len(dens) else 0.0,
-            "packed_pct": round(100.0 * covered / grid / grid, 1),
+            "packed_pct": round(100.0 * covered / grid / grid, 1), "degenerate_islands": int((~ok).sum()),
             "oob": bool(len(uv) and (uv.min() < -1e-3 or uv.max() > 1 + 1e-3))}
 
 

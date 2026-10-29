@@ -15,8 +15,9 @@ def _node(scene, p):
 
 
 def _line(r):
-    return "%d islands, %.1f%% overlap, %d px/m, spread %.2f, %d%% packed" % (
-        r["islands"], r["overlap_pct"], r["texel_px_m"], r["spread"], r["packed_pct"])
+    bad = r.get("degenerate_islands")
+    return "%d islands, %.1f%% overlap, %d px/m, spread %.2f, %d%% packed%s" % (
+        r["islands"], r["overlap_pct"], r["texel_px_m"], r["spread"], r["packed_pct"], ", %d zero-area" % bad if bad else "")
 
 
 @op("uv", "uv(id, method=seams|smart|min_stretch, angle=60, res=2048, texel=512, margin_px=res/256, lightmap=false, check=false) unwrap (seams on edges sharper than angle), pack to texel px/m; check=true only reports; see skill forge/retopo_uv")
@@ -44,7 +45,7 @@ def uv(scene, p):
     used = "" if r["method"] == params["method"] else " (%s fell back to smart)" % params["method"]
     return {"summary": _line(r) + used + (", lightmap-safe" if params["lightmap"] else ""),
             "ids": changed or [node["id"]], "warnings": warnings,
-            "stats": {k: r[k] for k in ("islands", "overlap_pct", "texel_px_m", "spread", "packed_pct", "margin_px")}}
+            "stats": {k: r[k] for k in ("islands", "overlap_pct", "texel_px_m", "spread", "packed_pct", "margin_px", "degenerate_islands")}}
 
 
 def report(mesh):

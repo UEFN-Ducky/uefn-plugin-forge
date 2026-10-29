@@ -85,6 +85,14 @@ class UVTests(Case):
         self.assertGreater(s["packed_pct"], 40)
         self.assertIn("lightmap-safe", r["summary"])
 
+    def test_headlight_spread_ignores_zero_area_islands(self):
+        from .scene import load
+        self.scene()
+        nid = hq.HQ_OPS["car_part"](load("UV"), {"kind": "headlight"})["ids"][0]
+        r = self.run_op("uv", load("UV"), id=nid, method="seams", texel=512, res=2048)
+        self.assertLessEqual(r["stats"]["spread"], 1.3, r)
+        self.assertIn("degenerate_islands", r["stats"])
+
     def test_too_big_texel_warns(self):
         scene, nid = self.scene(w=1000, d=1000, h=1000)
         r = self.run_op("uv", scene, id=nid, texel=2048, res=512)
