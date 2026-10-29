@@ -1,6 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildTree, makeBrowser, nextSceneName, pickerRows, pushRecent } from "../ui/src/project-browser.js";
+import { buildTree, drawGroups, makeBrowser, nextSceneName, pickerRows, pushRecent, sceneTris } from "../ui/src/project-browser.js";
+
+test("100 linked copies of one part payload rows make 1 instanced group, and tris sum for auto-simplify", () => {
+  const protos = new Map([["p1", { id: "p1", proto: "lib_wheel", tris: 4000 }], ["p2", { id: "p2", proto: "lib_wheel", tris: 4000 }]]);
+  const rows = Array.from({ length: 100 }, (_, i) => [`o${i}`, i % 2 ? "p1" : "p2", "", i, 0, 0, 0, 0, 0, 1, 1, 1, "m"]);
+  const groups = drawGroups(rows, protos);
+  assert.equal(groups.size, 1);
+  assert.equal([...groups.values()][0].length, 100);
+  assert.equal(sceneTris(rows, protos), 400000);
+});
 
 const calls = [];
 const rpc = async (method, params) => {

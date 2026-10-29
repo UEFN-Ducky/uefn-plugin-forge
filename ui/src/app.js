@@ -2,7 +2,8 @@ import * as THREE from "three";
 import * as Brush from "./brush.js";
 import { applyMaterialDisplay } from "./material-display.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { runMeshTask as compatibleMeshTask } from "./mesh-engine.js";
+import { runMeshTask as compatibleMeshTask, setSimplified, isSimplified } from "./mesh-engine.js";
+import { drawGroups, sceneTris, SIMPLIFY_TRIS } from "./project-browser.js";
 import { version } from "../../plugin.json";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
@@ -391,6 +392,35 @@ async function prepareProto(proto) {
   geoCache.get(proto.id)?.dispose();
   geoCache.set(proto.id, geo);
 }
+
+// Simplify: preview-only vertex clustering in the worker. Picks and saves keep the full mesh.
+// ponytail: textured and multi-material meshes stay full (their index is expanded per corner); add a corner-aware pass if needed.
+function syncSimplify() {
+  const btn = document.getElementById("simplify");
+  if (btn) btn.classList.toggle("active", isSimplified());
+}
+async function applySimplify() {
+  const on = isSimplified();
+  for (const geo of geoCache.values()) {
+    const src = geo.userData.source;
+    if (src.ub || src.groups?.length || !geo.index) continue;
+    if (!on) {
+      if (geo.userData.fullIndex) { geo.setIndex(geo.userData.fullIndex); geo.userData.fullIndex = null; }
+      continue;
+    }
+    if (geo.userData.fullIndex) continue;
+    const idx = await meshTask("simplify", { key: geo.userData.workerKey, cells: 32 });
+    if (!isSimplified() || !idx.length) continue;
+    geo.userData.fullIndex = geo.index;
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  }
+}
+document.getElementById("simplify")?.addEventListener("click", () => {
+  state.simplifyTouched = true;
+  setSimplified(!isSimplified());
+  syncSimplify();
+  applySimplify();
+});
 
 function geometryFor(proto) {
   const geo = cachedGeometry(proto);
@@ -1196,18 +1226,22 @@ function buildBatches() {
     return false;
   }
   let pulled = null;
-  const groups = new Map();
+  const drawn = [];
   for (const row of payload.instances || []) {
     if (culled(row[0])) continue;
     if (editing && !pulled && row[0] === sel) {
       pulled = row;
       continue;
     }
-    const gk = `${row[1]}\0${row[12] || ""}`;
-    let list = groups.get(gk);
-    if (!list) groups.set(gk, (list = []));
-    list.push(row);
+    drawn.push(row);
   }
+  const groups = drawGroups(drawn, protos);
+  // Huge scenes preview simplified on their own; the toggle stays the user's after they touch it.
+  if (!state.simplifyTouched && isSimplified() !== sceneTris(drawn, protos) > SIMPLIFY_TRIS) {
+    setSimplified(!isSimplified());
+    syncSimplify();
+  }
+  queueMicrotask(applySimplify);
   const local = new THREE.Matrix4();
   for (const rows of groups.values()) {
     const proto = protos.get(rows[0][1]);

@@ -4,6 +4,26 @@
 export const LIBRARY_KINDS = ["Materials", "Textures", "Parts", "Rigs"];
 const RECENT_MAX = 6;
 
+// Instance rows [id, protoId, parent, ..., material@12] -> Map("shared proto\0material" -> rows).
+// Linked copies share one prototype (payload `proto` key), so each group is one InstancedMesh draw.
+export function drawGroups(rows, protos = new Map()) {
+  const out = new Map();
+  for (const row of rows) {
+    const k = `${protos.get(row[1])?.proto || row[1]}\0${row[12] || ""}`;
+    if (!out.has(k)) out.set(k, []);
+    out.get(k).push(row);
+  }
+  return out;
+}
+
+// Above this many drawn triangles the viewport turns Simplify on by itself.
+export const SIMPLIFY_TRIS = 300000;
+export function sceneTris(rows, protos) {
+  let total = 0;
+  for (const row of rows) { const p = protos.get(row[1]); if (p) total += p.full_tris || p.tris || 0; }
+  return total;
+}
+
 /** Most recent first, no duplicates, capped. */
 export function pushRecent(list, name) {
   return [name, ...(list || []).filter(n => n !== name)].slice(0, RECENT_MAX);
