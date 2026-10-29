@@ -49,7 +49,7 @@ Change any of these through `length_cm`: a "compact rifle" is `length_cm: 78`, a
 - **Budgets:** FPS hero 8-20k tris, third person 3-6k, pickups / mobile 1-3k. Forge weapons come out at 0.3-6k, already third-person ready. Use `qa budget=weapon` (15k, 3 materials).
 - **Materials:** 3 slots or fewer: anodized + metal + polymer (rifle), metal + polymer (pistol: grey slide, black frame), metal + wood + grip (shotgun, axe), metal + polymer + glow (sci-fi). Slots are named `Weapon_<Slot>_<Style>` (`Weapon_Anodized_Realistic`, `Weapon_Metal_Realistic`, `Weapon_Polymer_Realistic`, `Weapon_Grip_Realistic`, `Weapon_Wood_*`, `Weapon_Steel_*`, `Weapon_Glow_*`). Wear goes on the edges in the material, not in geometry. Realistic slots already carry light `edge_wear` / `scratches` / `dirt` layers. Those masks use Pointiness and AO, which only Cycles computes, so they show after `bake` (and in UE once baked), not in an Eevee `look`.
 
-**Wear:** edit each slot by name, **without `id`** (`id` assigns that one material to the whole weapon and the 3 slots become 1). Pass the slot's base values so the layers sit on its colour:
+**Wear:** edit each slot by name, **without `id`** (`id` assigns that one material to the whole weapon and the 3 slots become 1). Pass the slot's base values so the layers sit on its colour. Gun finishes (anodise, parkerise, bluing, nitride) are dark **dielectric** coats: base 0.02-0.12 linear at `metallic` 0. Bare steel or aluminium shows only through `edge_wear` with `"metal": true`. A dark base at `metallic` 1 is wrong: it trips the lint "metal albedo sRGB < 180".
 
 ```json
 [

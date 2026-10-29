@@ -143,6 +143,10 @@ class DocCalls(unittest.TestCase):
                 self.assertIn(step["op"], hq.HQ_OPS, step)
                 if step["op"] == "weapon":
                     hq_weapon.params(step["params"])
+                if step["op"] == "material":  # documented finishes pass the PBR lint (coats are dielectric)
+                    from .hq import materials as hq_mat
+                    q = step["params"]
+                    self.assertEqual(hq_mat.lint(hq_mat.expand(q.get("preset"), q.get("overrides"), q.get("layers"))), [], q)
 
 
 @unittest.skipUnless(_READY and os.environ.get("FORGE_WEAPON_DEMO_OUT"), "set FORGE_WEAPON_DEMO_OUT=<folder> to write demo renders")
