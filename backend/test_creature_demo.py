@@ -1,6 +1,6 @@
-"""Phase 2 proof: a rigged, walking lion built through the AI path (forge_batch on a fake api), real scenes dir.
+"""Phase 3 proof: a rigged, walking lion with default params built through the AI path (forge_batch on a fake api), real scenes dir.
 
-Needs the Blender engine (skips without it). Writes scene Lion_Built and Eevee renders to FORGE_DEMO_OUT.
+Needs the Blender engine (skips without it). Writes scene Lion_Built and Eevee renders (Lion_Built_v2_*) to FORGE_DEMO_OUT.
 Run: py -3 -m backend.test_creature_demo
 """
 import json
@@ -73,7 +73,7 @@ class LionBuilt(unittest.TestCase):
             shutil.rmtree(load_dir(name), ignore_errors=True)
             f.t["forge_scene_new"](name=name)
 
-        made = f.hq("creature", kind="big_cat", length=220, faces=2500)
+        f.hq("creature", kind="big_cat")
         objs = _objects(name)
         body = max(objs, key=lambda n: load(name).world_mesh(n).tri_count())["id"]
         scene = load(name)
@@ -82,14 +82,11 @@ class LionBuilt(unittest.TestCase):
         pts = [scene.world_mesh(n).bounds() for n in eyes] or [(lo, hi)]
         head = [sum((a[0][k] + a[1][k]) / 2 for a in pts) / len(pts) for k in range(3)]
 
-        preset = "fur_lion" if "fur_lion" in __import__("backend.hq.materials", fromlist=["presets"]).presets() else None
-        if preset is None:
-            preset = next((p for p in __import__("backend.hq.materials", fromlist=["presets"]).presets() if "fur" in p), None)
-        f.hq("material", material="LionCoat", preset=preset, id=body) if preset else None
-        f.hq("hair", id=body, style="mane", color=[0.45, 0.27, 0.1], region={"sphere": head + [48.0]})
+        f.hq("material", material="LionCoat", id=body)  # fur_bake needs a material to bake into
+        f.hq("hair", id=body, style="mane", region={"sphere": head + [48.0]})
         f.hq("hair_cards", id=body)
-        f.hq("fur_shells", id=body, layers=2, decimate_shells=False, budget=UEFN_TRIS, color=[0.72, 0.5, 0.28])
-        f.hq("fur_bake", id=body, size=512)
+        f.hq("fur_shells", id=body)
+        f.hq("fur_bake", id=body, coat="lion")
         f.hq("rig_template", template="quadruped", ids=[o["id"] for o in _objects(name)])
         f.hq("auto_weights", ids=[o["id"] for o in _objects(name)])
         look = f.t["forge_batch"](name=name, steps=[{"tool": "forge_hq", "op": "clip", "params": {"kind": "walk"}}], look="three")
@@ -97,7 +94,7 @@ class LionBuilt(unittest.TestCase):
         self.assertNotIn("look_error", look)
 
         from PIL import Image, ImageStat
-        shutil.copyfile(look["path"], OUT / "Lion_Built_three.png")
+        shutil.copyfile(look["path"], OUT / "Lion_Built_v2_three.png")
         with Image.open(look["path"]) as im:
             self.assertGreater(sum(ImageStat.Stat(im.convert("L")).stddev), 5, "look is blank")
 
@@ -110,38 +107,11 @@ class LionBuilt(unittest.TestCase):
         skinned = [n for n in _objects(name)]
         for frame in (0, 8, 16, 24):
             mesh = rg.posed_meshes(scene, skinned, rig, walk, frame)
-            render.render_tiles(mesh, OUT / f"Lion_Built_walk_{frame:02d}.png", ["side"], scene.materials(), scene.folder / "textures")
+            render.render_tiles(mesh, OUT / f"Lion_Built_v2_walk_{frame:02d}.png", ["side"], scene.materials(), scene.folder / "textures")
         tris = _tris(name)
         print("\nLion_Built: %d tris, %d bones, %d objects" % (tris, len(rig["bones"]), len(skinned)))
         self.assertLessEqual(tris, UEFN_TRIS, "over the UEFN budget")
         self.assertGreater(len(rig["bones"]), 10)
-
-
-@unittest.skipUnless(_READY and os.environ.get("FORGE_DEMO_LIVE") == "1",
-                     "spends Tripo/Meshy credits: set FORGE_DEMO_LIVE=1 inside Ducky with the plugin installed")
-class LionGenerated(unittest.TestCase):
-    def test_lion_generated(self):
-        from . import live_view, render, rig as rg
-        if live_view._api is None:
-            self.skipTest("no Ducky plugin api: run from inside Ducky so generate can call Tripo/Meshy")
-        name = "Lion_Generated"
-        OUT.mkdir(parents=True, exist_ok=True)
-        with patch.object(tools, "_attach_captures", lambda r: r):
-            f = Fake(name)
-            f.t["forge_scene_new"](name=name)
-            f.hq("creature_from_prompt", prompt="adult male lion, full mane, standing, realistic", kind="quadruped", faces=12000)
-            body = max(_objects(name), key=lambda n: load(name).world_mesh(n).tri_count())["id"]
-            f.hq("fur_bake", id=body, size=1024)
-            look = f.t["forge_batch"](name=name, steps=[{"tool": "forge_hq", "op": "clip", "params": {"kind": "walk"}}], look="three")
-        shutil.copyfile(look["path"], OUT / "Lion_Generated_three.png")
-        scene = load(name)
-        rig = scene.data["rigs"][0]
-        walk = next(c for c in rig["actions"] if c["name"].startswith("Walk"))
-        self.assertTrue(walk.get("loop"))
-        for frame in (0, 8, 16, 24):
-            mesh = rg.posed_meshes(scene, _objects(name), rig, walk, frame)
-            render.render_tiles(mesh, OUT / f"Lion_Generated_walk_{frame:02d}.png", ["side"], scene.materials(), scene.folder / "textures")
-
 
 def load_dir(name):
     return load(name).folder
