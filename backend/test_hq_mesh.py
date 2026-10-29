@@ -276,6 +276,11 @@ def test_hardsurface_kits():
         assert (top > 1.01) == (preset == "bolt"), (preset, top)  # bolts stand proud, cuts go in
         assert not [o for o in bpy.data.objects if o.name.startswith("hq_kit")]
         short(r)
+    fresh()  # Oct 29 2026: bolts unioned over a panel cut opened 4 edges when cleanup welded
+    ob = _cube(1.0)
+    hq.run("hardsurface", ob, {"preset": "panel", "at": [0, -1, 0], "size": 0.7, "depth": 0.006})
+    r = hq.run("hardsurface", ob, {"preset": "bolt", "at": [0, -1, 0], "size": 0.8, "depth": 0.01})
+    assert r["manifold"], r
     fresh()
     ob = _cube()  # a side face, picked by `at`
     hq.run("hardsurface", ob, {"preset": "vent", "at": [0, -3, 0], "size": 0.8, "depth": 0.05})

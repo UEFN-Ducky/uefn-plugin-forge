@@ -343,11 +343,13 @@ def cutter(spec, unit=1.0):
     return _object_from(bm, "hq_cutter")
 
 
-def clean(ob, dist=1e-5):
-    """Boolean cleanup: weld, drop slivers, consistent normals."""
+def clean(ob, dist=1e-7, weld=False):
+    """Boolean cleanup: drop slivers, consistent normals. No weld by default: exact-boolean output is
+    already closed, and welding its coincident vertices opened edges (panel then bolts, Oct 29 2026)."""
     bm = bmesh.new()
     bm.from_mesh(ob.data)
-    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=dist)
+    if weld:
+        bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=dist)
     bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges[:])
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.to_mesh(ob.data)

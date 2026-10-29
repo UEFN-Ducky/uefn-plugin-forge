@@ -363,7 +363,7 @@ def _tube(p, u, name, sag=0.0):
     bpy.data.curves.remove(cu)
     ob = bpy.data.objects.new(name, me)
     bpy.context.scene.collection.objects.link(ob)
-    clean(ob, 1e-6)
+    clean(ob, 1e-6, weld=True)  # curve-to-mesh caps come unwelded
     return ob, f"{name[3:].lower()} {len(pts)} points"
 
 
@@ -375,7 +375,7 @@ def procedural(p):
     if kind not in makers:
         raise ValueError("kind must be one of: %s" % ", ".join(KINDS))
     ob, what = makers[kind](p, u)
-    clean(ob, 1e-6)
+    clean(ob)
     if p.get("name"):
         ob.name = ob.data.name = p["name"]
     ob.location = Vector(p.get("at") or [0, 0, 0]) * u
