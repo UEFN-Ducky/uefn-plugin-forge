@@ -6,9 +6,10 @@ Lengths are Forge cm. Car frame: -Y is the front, +X the car's left, Z up, tyres
 Every part's origin is its mount point; node["sockets"] names it (Hub, Hinge, Mount, Column, Pivot).
 """
 import copy
+import functools
 import re
 
-from . import engine, op
+from . import HQ_OPS, engine, op
 from .mesh import lods as _lods
 from .qa import _pick, hull
 
@@ -304,3 +305,25 @@ def car_swap(scene, p):
     detail = ", ".join("%s=%s" % (k, over[k]) for k in ("spokes", "tire", "style", "kind") if k in over)
     return {"summary": "car_swap %s: %d x %s rebuilt%s, sockets kept" % (slot, len(ids), "/".join(kinds), (" (" + detail + ")") if detail else ""),
             "ids": ids}
+
+
+_qa_collision = HQ_OPS["collision"]
+
+
+@functools.wraps(_qa_collision)
+def _collision_op(scene, p):
+    """collision on a car group would hull every part (58 extra UCX); car() already made its hull, so skip it."""
+    ids = p.get("ids") or ([p["id"]] if p.get("id") else [])
+    cars = [n for n in map(scene.node, ids) if n and n.get("car")]
+    if not cars:
+        return _qa_collision(scene, p)
+    said = "; ".join("collision: car %s already has %d UCX hull(s), skipped" % (
+        g["name"], sum(1 for n in scene.data["nodes"] if n.get("parent") == g["id"] and n.get("layer") == "collision")) for g in cars)
+    rest = [i for i in ids if i not in {g["id"] for g in cars}]
+    if not rest:
+        return {"summary": said, "ids": []}
+    out = _qa_collision(scene, dict(p, id=None, ids=rest))
+    return dict(out, summary=said + "; " + out["summary"])
+
+
+HQ_OPS["collision"] = _collision_op

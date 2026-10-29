@@ -82,6 +82,8 @@ Run it with `forge_batch(steps=[...], look="three")`. For a showcase still, end 
 
 `car` makes one group (combine on), a rig `<name>_Rig` with `root`, `FL_wheel` `FR_wheel` `RL_wheel` `RR_wheel` (heads at the hub centres, for UE Chaos / UEFN vehicle wheel setups), `door_FL`…, `hood`, `trunk` bones at the hinges; every part is bound to its bone. LOD ratios 1/.5/.25/.1 come from the `lods` op and ride on every part; `UCX_<name>_01` is one convex hull of the body. Hero budget 40-120k tris.
 
+**Don't run `uv`, `lods` or `collision` on a car: it's done.** `car` ships every part unwrapped, with LODs and one UCX hull. `uv` and `lods` take a single part id (a lone `car_part`), not the car group. `collision(id=<car group>)` is a no-op: `collision: car Car_Limo already has 1 UCX hull(s), skipped`.
+
 `car_swap` slots: `wheel`/`rim`/`tire` (all four), `caliper`, `headlight`, `taillight`, `grille`, `mirror`, `bumper_front`, `bumper_rear`, `spoiler`, `diffuser`, `exhaust`, `seat`, `steering_wheel`, `dashboard`, `engine`, `license_plate`, `wiper`, or an exact slot like `mirror_L`. The new part keeps the old transform, parent, bone and LODs. Body panels (`body_*`) are the shell: rebuild the car to change them.
 
 **Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back, dark glass and paint in its own colour with no white patches (the `light` studio render shows the seats through the glass); the `car` summary is within 5 % of the target size and 40-120k tris; `qa(profile="uefn", budget="hero")` has 0 errors and 0 open edges (the limo: `uefn score 100: clean`, 72k tris, 5 materials).

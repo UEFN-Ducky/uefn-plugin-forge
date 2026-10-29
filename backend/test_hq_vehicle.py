@@ -4,6 +4,7 @@ Needs the engine (runtime.install()); the error-message tests run without it. Ru
 """
 import math
 import os
+import re
 import tempfile
 import unittest
 from collections import Counter
@@ -237,6 +238,13 @@ class Cars(_Engine):
         self.assertEqual(qa["errors"], 0, qa)
         scene = load(self.name)
         self.assertEqual(_zfight([scene.world_mesh(n) for n in hqv.car_nodes(scene, gid)], 0.1), 0)
+        out = self.hq("collision", id=gid)  # vehicles.md: the car ships its hull, a repeat is a no-op
+        self.assertEqual(out["summary"], "collision: car DocLimo already has 1 UCX hull(s), skipped")
+        self.assertEqual(out.get("ids"), [])
+        from . import hq
+        scene = load(self.name)
+        path = hq.run_hq(scene, "export", {"id": gid, "target": "ue5"})["path"]
+        self.assertEqual(set(re.findall(rb"UCX_DocLimo\w*", Path(path).read_bytes())), {b"UCX_DocLimo_01"})
 
     def test_kart(self):
         out, scene, gid, nodes = self.build("kart")
