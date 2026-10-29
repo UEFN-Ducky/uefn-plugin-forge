@@ -29,12 +29,48 @@ export function pushRecent(list, name) {
   return [name, ...(list || []).filter(n => n !== name)].slice(0, RECENT_MAX);
 }
 
-/** Picker rows: search text filters, recent projects float to the top. */
-export function pickerRows(projects, query, recent) {
+/** "just now", "5 min ago", "3 h ago", "2 d ago", "4 mo ago", "1 y ago" for epoch seconds; "" when unknown. */
+export function ago(seconds, now = Date.now() / 1000) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "";
+  const s = Math.max(0, now - seconds);
+  if (s < 60) return "just now";
+  for (const [size, unit] of [[31536000, "y"], [2592000, "mo"], [86400, "d"], [3600, "h"], [60, "min"]]) {
+    if (s >= size) return `${Math.floor(s / size)} ${unit} ago`;
+  }
+  return "just now";
+}
+
+/** Picker cards: search filters by name, newest first, then by name. */
+export function pickerCards(items, query) {
   const q = (query || "").trim().toLowerCase();
-  const rank = n => { const i = (recent || []).indexOf(n); return i < 0 ? 99 : i; };
-  return (projects || []).map(p => p.name).filter(n => !q || n.toLowerCase().includes(q))
-    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+  return (items || []).filter(i => !q || i.name.toLowerCase().includes(q))
+    .sort((a, b) => (b.modified || 0) - (a.modified || 0) || a.name.localeCompare(b.name));
+}
+
+/** The muted line under a card name: "Edited 5 min ago · 3 objects" (scenes) or "· 4 scenes" (projects). */
+export function cardFacts(item, now) {
+  const when = ago(item.modified, now);
+  const count = item.objects != null ? `${item.objects} object${item.objects === 1 ? "" : "s"}`
+    : item.scenes != null ? `${item.scenes} scene${item.scenes === 1 ? "" : "s"}` : "";
+  return [when && `Edited ${when}`, count].filter(Boolean).join(" · ");
+}
+
+/** True when `key` may run now; then blocks it for `ms`. One per scene keeps thumbnail uploads rare. */
+export function makeThrottle(ms = 30000) {
+  const last = new Map();
+  return (key, now = Date.now()) => {
+    if (now - (last.get(key) ?? -Infinity) < ms) return false;
+    last.set(key, now);
+    return true;
+  };
+}
+
+/** Arrow-key move in a grid of `count` cards laid out `cols` wide; stays put at the edges. */
+export function gridMove(index, key, count, cols) {
+  const step = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -cols, ArrowDown: cols, Home: -Infinity, End: Infinity }[key];
+  if (step === undefined || !count) return index;
+  const next = index + step;
+  return next < 0 ? (step === -Infinity ? 0 : index) : next >= count ? (step === Infinity ? count - 1 : index) : next;
 }
 
 /** Project → Scenes, then Library groups. `library` maps kind → items; missing kinds stay empty. */
@@ -66,6 +102,15 @@ export function makeBrowser(rpc, { onOpen } = {}) {
     async projects() { return call("forge_projects", { action: "list" }); },
     async openProject(name) { return call("forge_projects", { action: "open", name }); },
     async newProject(name) { return call("forge_projects", { action: "new", name }); },
+    /** Picker grids: cards carry modified, thumb (data URL or null), scenes / objects. */
+    async projectCards() { return call("forge_projects", { action: "list", cards: true }); },
+    async sceneCards(project) {
+      return (await call("forge_call", { op: "scene_list", name: "", params: { project, cards: true }, actor: "user" })).scenes || [];
+    },
+    async renameProject(name, newName) { return call("forge_projects", { action: "rename", name, new_name: newName }); },
+    async deleteProject(name) { return call("forge_projects", { action: "delete", name, confirm: true }); },
+    async deleteScene(project, name) { return call("forge_projects", { action: "delete_scene", scene: `${project}/${name}`, confirm: true }); },
+    async setThumb(name, dataUrl) { return call("scene_thumb_set", { name, data_url: dataUrl }); },
     /** Switching to the scene that is already open does nothing. */
     openScene(name) {
       if (!name || name === current) return false;

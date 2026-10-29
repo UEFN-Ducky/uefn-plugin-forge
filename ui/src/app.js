@@ -9,7 +9,7 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { TransformControls } from "three/addons/controls/TransformControls.js";
 import { createPresence } from "./presence.js";
 import { createShotsPanel } from "./shots-panel.js";
-import { LIBRARY_KINDS, buildTree, makeBrowser, nextSceneName, pickerRows, pushRecent } from "./project-browser.js";
+import { LIBRARY_KINDS, buildTree, cardFacts, gridMove, makeBrowser, makeThrottle, nextSceneName, pickerCards, pushRecent } from "./project-browser.js";
 
 document.getElementById("forge-version").textContent = `Forge ${version}`;
 
@@ -2065,22 +2065,321 @@ async function loadProjects() {
   browserUi.project = res.active || "";
   browserUi.projects = res.projects || [];
   document.getElementById("proj-btn").textContent = `${browserUi.project || "Project"} ▾`;
-  paintProjectList();
 }
 
-function paintProjectList() {
-  const box = document.getElementById("proj-list");
-  box.innerHTML = "";
-  for (const name of pickerRows(browserUi.projects, document.getElementById("proj-search").value, browserUi.recent)) {
-    const b = el("button", { type: "button", textContent: name, className: name === browserUi.project ? "on" : "" });
-    b.setAttribute("role", "menuitem");
-    b.onclick = () => chooseProject(name);
-    box.append(b);
+// Project ▾ opens the picker: Projects / Scenes-in-project tabs of thumbnail cards, delete confirmed inside the modal.
+const pk = { tab: "scenes", projects: [], scenes: [], sel: "", menu: "", confirm: "", rows: false, loading: false, error: "" };
+try { pk.rows = localStorage.getItem("forge.pickerRows") === "1"; } catch { /* no storage */ }
+const pkEl = id => document.getElementById(id);
+const thumbDue = makeThrottle(30000);
+
+/** The viewport as a 320x180 JPEG (center crop). Renders first: the WebGL buffer is cleared after each frame. */
+function captureThumb() {
+  const src = renderer.domElement;
+  if (!src.width || !src.height) return null;
+  renderer.render(scene3, camera);
+  const out = document.createElement("canvas");
+  out.width = 320;
+  out.height = 180;
+  const k = Math.max(320 / src.width, 180 / src.height), w = 320 / k, h = 180 / k;
+  out.getContext("2d").drawImage(src, (src.width - w) / 2, (src.height - h) / 2, w, h, 0, 0, 320, 180);
+  return out.toDataURL("image/jpeg", 0.7);
+}
+
+/** After a scene loads or changes: at most one upload per scene per 30 s (force: the picker is opening). */
+async function sendThumb(force) {
+  const name = state.name;
+  if (!name || state.payload?.name !== name || (!thumbDue(name) && !force)) return;
+  const url = captureThumb();
+  if (url) await browser.setThumb(name, url).catch(() => {});
+}
+
+const pkItems = () => pickerCards(pk.tab === "projects" ? pk.projects : pk.scenes, pkEl("pk-search").value);
+const pkCard = name => [...pkEl("pk-grid").children].find(c => c.dataset.name === name);
+const pkFocus = () => (pkCard(pk.sel) || pkEl("pk-grid")).focus();
+
+async function openPicker() {
+  pk.menu = pk.confirm = pk.error = "";
+  pk.sel = pk.tab === "projects" ? browserUi.project : state.name;
+  pkEl("pk-search").value = "";
+  pkEl("picker").hidden = false;
+  pkEl("proj-btn").setAttribute("aria-expanded", "true");
+  pkEl("pk-search").focus();
+  pk.loading = true;
+  paintPicker();
+  await sendThumb(true);
+  await loadPicker();
+}
+
+function closePicker() {
+  if (pkEl("picker").hidden) return;
+  pkEl("picker").hidden = true;
+  pkEl("files").hidden = true;
+  pkEl("proj-btn").setAttribute("aria-expanded", "false");
+  pkEl("proj-btn").focus();
+}
+
+async function loadPicker() {
+  pk.loading = true;
+  try {
+    const [res, scenes] = await Promise.all([browser.projectCards(), browser.sceneCards(browserUi.project)]);
+    pk.projects = res.projects || [];
+    pk.scenes = scenes;
+    pk.error = "";
+  } catch (err) {
+    pk.error = err.message || String(err);
   }
+  pk.loading = false;
+  paintPicker();
 }
 
-async function chooseProject(name) {
-  document.getElementById("proj-menu").hidden = true;
+function pkThumb(item) {
+  return item.thumb ? el("img", { className: "pk-thumb", src: item.thumb, alt: "" })
+    : el("span", { className: "pk-thumb", textContent: (item.name[0] || "?").toUpperCase() });
+}
+
+function pkText(item, kind) {
+  return el("span", { className: "pk-text" },
+    ...(kind ? [el("span", { className: "pk-kind", textContent: kind })] : []),
+    el("span", { className: "pk-name", textContent: item.name, title: item.name }),
+    el("span", { className: "pk-facts", textContent: cardFacts(item) }));
+}
+
+function paintPicker() {
+  const projects = pk.tab === "projects", list = pkItems(), grid = pkEl("pk-grid");
+  for (const [id, tab, label, n] of [["pk-tab-projects", "projects", "Projects", pk.projects.length], ["pk-tab-scenes", "scenes", `Scenes in ${browserUi.project || "project"}`, pk.scenes.length]]) {
+    const b = pkEl(id);
+    b.textContent = label;
+    b.append(el("span", { className: "n", textContent: String(n) }));
+    b.setAttribute("aria-selected", String(pk.tab === tab));
+  }
+  pkEl("pk-new-project").hidden = !projects;
+  for (const id of ["new", "save-file"]) pkEl(id).hidden = projects;
+  pkEl("open-file").parentElement.hidden = projects;
+  pkEl("pk-view").setAttribute("aria-pressed", String(pk.rows));
+  pkEl("pk-view").title = pk.rows ? "Grid view" : "List view";
+  grid.classList.toggle("pk-rows", pk.rows);
+  if (!list.some(i => i.name === pk.sel)) pk.sel = list[0]?.name || "";
+  grid.innerHTML = "";
+  if (pk.error) grid.append(el("div", { className: "dk-error", textContent: pk.error }));
+  else if (!list.length) {
+    grid.append(pk.loading ? el("div", { className: "dk-loading", textContent: "Loading…" })
+      : el("div", { className: "dk-empty", textContent: pkEl("pk-search").value ? "Nothing matches that search"
+        : projects ? "No projects yet. Make one with + New project" : "No scenes yet. Make one with + New scene" }));
+  }
+  for (const item of list) grid.append(pkCardEl(item, projects));
+  paintPickerFoot(list.find(i => i.name === pk.sel));
+}
+
+function pkCardEl(item, projects) {
+  const on = item.name === pk.sel;
+  const open = projects ? item.name === browserUi.project : item.name === state.name;
+  const c = el("div", { className: "pk-card", tabIndex: on ? 0 : -1 }, pkThumb(item), pkText(item, (projects ? "Project" : "Scene") + (open ? " · open" : "")));
+  c.dataset.name = item.name;
+  c.setAttribute("role", "option");
+  c.setAttribute("aria-selected", String(on));
+  c.onclick = () => { if (!on || pk.menu || pk.confirm) { pk.sel = item.name; pk.menu = pk.confirm = ""; paintPicker(); pkFocus(); } };
+  c.ondblclick = () => pickerOpen(item.name);
+  const more = el("button", { type: "button", className: "pk-more", textContent: "⋯", title: "More", tabIndex: -1 });
+  more.setAttribute("aria-label", `More for ${item.name}`);
+  more.setAttribute("aria-haspopup", "menu");
+  more.setAttribute("aria-expanded", String(pk.menu === item.name));
+  more.onclick = ev => { ev.stopPropagation(); pk.sel = item.name; pk.confirm = ""; pk.menu = pk.menu === item.name ? "" : item.name; paintPicker(); pkCard(item.name)?.querySelector(".pk-menu button")?.focus(); };
+  c.append(more);
+  if (pk.menu === item.name) {
+    const menu = el("div", { className: "pk-menu" });
+    menu.setAttribute("role", "menu");
+    for (const [label, run, cls] of [["Open", () => pickerOpen(item.name)], ["Rename", () => pickerRename(item.name)], ["Delete", () => pickerAskDelete(item.name), "danger"]]) {
+      const b = el("button", { type: "button", textContent: label, className: cls || "" });
+      b.setAttribute("role", "menuitem");
+      b.onclick = ev => { ev.stopPropagation(); pk.menu = ""; paintPicker(); run(); };
+      menu.append(b);
+    }
+    c.append(menu);
+  }
+  return c;
+}
+
+function paintPickerFoot(item) {
+  const foot = pkEl("pk-foot");
+  foot.innerHTML = "";
+  foot.classList.toggle("confirm", !!pk.confirm);
+  const button = (label, cls, run) => { const b = el("button", { type: "button", className: `dk-btn ${cls}`, textContent: label }); b.onclick = run; return b; };
+  if (pk.confirm) {
+    const name = pk.confirm;
+    foot.append(el("span", { className: "pk-text", textContent: `Delete ${name}? It moves to trash.` }),
+      button("Delete", "dk-btn--danger", () => pickerDelete(name)),
+      button("Cancel", "dk-btn--secondary", () => { pk.confirm = ""; paintPicker(); pkFocus(); }));
+    return;
+  }
+  if (item) foot.append(pkThumb(item), pkText(item, ""));
+  else foot.append(el("span", { className: "pk-text dk-muted", textContent: "Pick a card" }));
+  const open = button("Open", "dk-btn--primary", () => pickerOpen(item.name));
+  open.disabled = !item;
+  foot.append(button("Cancel", "dk-btn--secondary", closePicker), open);
+}
+
+/** A project opens into its scenes tab; a scene opens in the viewport and closes the picker. */
+async function pickerOpen(name) {
+  if (pk.tab === "projects") {
+    if (name !== browserUi.project) await chooseProject(name, true);
+    pk.tab = "scenes";
+    pk.sel = state.name;
+    await loadPicker();
+    pkFocus();
+    return;
+  }
+  browser.openScene(name);
+  closePicker();
+}
+
+function pickerAskDelete(name) {
+  pk.sel = pk.confirm = name;
+  pk.menu = "";
+  paintPicker();
+  pkEl("pk-foot").querySelector(".dk-btn--danger")?.focus();
+}
+
+async function pickerDelete(name) {
+  const projects = pk.tab === "projects";
+  const res = await (projects ? browser.deleteProject(name) : browser.deleteScene(browserUi.project, name)).catch(err => ({ ok: false, error: err.message }));
+  pk.confirm = "";
+  if (!res || res.ok === false) {
+    setStatus((res && res.error) || "Could not delete it", true);
+    paintPicker();
+    pkFocus();
+    return;
+  }
+  if (projects && name === browserUi.project) await chooseProject(res.active, true);
+  else if (projects) await loadProjects();
+  else {
+    browserUi.open = browserUi.open.filter(n => n !== name);
+    saveTabs();
+    if (name === state.name) { resetScene(); state.name = ""; }
+    await refreshScenes();
+    state.rev = -1;
+  }
+  setStatus(res.summary || `Deleted ${name} (in trash)`);
+  await loadPicker();
+  pkFocus();
+}
+
+/** Inline name edit in place of the card's name; Enter or leaving the field saves, Esc cancels. */
+function inlineName(target, value, label, done) {
+  const input = el("input", { className: "dk-input", value });
+  input.setAttribute("aria-label", label);
+  target.hidden = true;
+  target.after(input);
+  input.focus();
+  input.select();
+  let finished = false;
+  const finish = save => {
+    if (finished) return;
+    finished = true;
+    const next = input.value.trim();
+    input.remove();
+    target.hidden = false;
+    done(save && next && next !== value ? next : "");
+  };
+  input.onkeydown = ev => { ev.stopPropagation(); if (ev.key === "Enter") finish(true); else if (ev.key === "Escape") finish(false); };
+  input.onclick = ev => ev.stopPropagation();
+  input.onblur = () => finish(true);
+}
+
+function pickerRename(name) {
+  const label = pkCard(name)?.querySelector(".pk-name");
+  if (!label) return;
+  inlineName(label, name, "New name", async next => {
+    if (!next) { pkFocus(); return; }
+    const projects = pk.tab === "projects";
+    const res = await (projects ? browser.renameProject(name, next)
+      : rpc("forge_call", { op: "scene_rename", name, params: { name: next }, actor: "user" })).catch(err => ({ ok: false, error: err.message }));
+    if (!res || res.ok === false) setStatus((res && res.error) || "Could not rename it", true);
+    else {
+      pk.sel = String(res.name || next).split("/").pop();
+      if (projects) await loadProjects();
+      else {
+        browserUi.open = browserUi.open.map(n => n === name ? pk.sel : n);
+        if (state.name === name) state.name = pk.sel;
+        await refreshScenes(state.name);
+      }
+    }
+    await loadPicker();
+    pkFocus();
+  });
+}
+
+function wirePicker() {
+  const back = pkEl("picker"), grid = pkEl("pk-grid");
+  pkEl("proj-btn").onclick = () => (back.hidden ? openPicker() : closePicker());
+  pkEl("pk-close").onclick = closePicker;
+  pkEl("pk-search").oninput = paintPicker;
+  pkEl("pk-view").onclick = () => {
+    pk.rows = !pk.rows;
+    try { localStorage.setItem("forge.pickerRows", pk.rows ? "1" : "0"); } catch { /* no storage */ }
+    paintPicker();
+  };
+  for (const id of ["pk-tab-projects", "pk-tab-scenes"]) {
+    pkEl(id).onclick = () => {
+      pk.tab = pkEl(id).dataset.tab;
+      pk.menu = pk.confirm = "";
+      pk.sel = pk.tab === "projects" ? browserUi.project : state.name;
+      paintPicker();
+    };
+  }
+  pkEl("pk-new-project").onclick = () => inlineName(pkEl("pk-new-project"), "", "New project name", async name => {
+    if (!name) return;
+    const res = await browser.newProject(name).catch(err => ({ ok: false, error: err.message }));
+    if (!res || res.ok === false) { setStatus((res && res.error) || "Could not make the project", true); return; }
+    await chooseProject(res.active || name, true);
+    loadLibrary();
+    pk.tab = "scenes";
+    await loadPicker();
+  });
+  back.addEventListener("click", ev => {
+    if (ev.target === back) { closePicker(); return; }
+    if (pk.menu && !ev.target.closest(".pk-menu, .pk-more")) { pk.menu = ""; paintPicker(); }
+  });
+  back.addEventListener("keydown", ev => {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      if (!pkEl("files").hidden) pkEl("files").hidden = true;
+      else if (pk.menu || pk.confirm) { pk.menu = pk.confirm = ""; paintPicker(); pkFocus(); }
+      else closePicker();
+      return;
+    }
+    if (ev.key === "Tab") { // focus stays in the modal
+      const stops = [...back.querySelectorAll("button, input, [tabindex='0']")].filter(e => !e.disabled && e.tabIndex >= 0 && e.offsetParent);
+      const first = stops[0], last = stops[stops.length - 1];
+      if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+      else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+      return;
+    }
+    if (ev.target.id === "pk-search") {
+      if (ev.key === "ArrowDown") { ev.preventDefault(); pkFocus(); }
+      else if (ev.key === "Enter" && pk.sel) { ev.preventDefault(); pickerOpen(pk.sel); }
+      return;
+    }
+    if (!ev.target.closest("#pk-grid") || ev.target.closest(".pk-menu, input")) return;
+    const list = pkItems();
+    const i = list.findIndex(x => x.name === pk.sel);
+    if (ev.key === "Enter" && i >= 0) { ev.preventDefault(); pickerOpen(list[i].name); return; }
+    if (ev.key === "Delete" && i >= 0) { ev.preventDefault(); pickerAskDelete(list[i].name); return; }
+    if (ev.key === "F2" && i >= 0) { ev.preventDefault(); pickerRename(list[i].name); return; }
+    const cols = getComputedStyle(grid).gridTemplateColumns.split(" ").length || 1;
+    const j = gridMove(Math.max(i, 0), ev.key, list.length, cols);
+    if (list[j] && (j !== i || i < 0) && /^(Arrow|Home|End)/.test(ev.key)) {
+      ev.preventDefault();
+      pk.sel = list[j].name;
+      pk.menu = "";
+      paintPicker();
+      pkFocus();
+    }
+  });
+}
+
+async function chooseProject(name, keepOpen) {
+  if (!keepOpen) closePicker();
   const res = await browser.openProject(name).catch(err => ({ ok: false, error: err.message }));
   if (!res || res.ok === false) { setStatus((res && res.error) || "Could not open the project", true); return; }
   browserUi.recent = pushRecent(browserUi.recent, name);
@@ -2227,6 +2526,7 @@ async function poll() {
       rebuild(payload);
       if (switching) { restoreView(); saveSession(); }
       if (switching) hideLoading();
+      sendThumb();
       const last = (payload.activity || []).slice(-1)[0];
       if (last) setStatus((last.actor === "agent" ? "AI: " : "") + last.summary);
     } else {
@@ -2238,6 +2538,7 @@ async function poll() {
       state.mode = info.mode || "object";
       state.selectMode = info.select_mode || "face";
       syncSelection();
+      sendThumb();
     }
   } catch (err) {
     if (stale()) return;
@@ -3033,6 +3334,7 @@ function wire() {
     resetScene();
     await refreshScenes(made.name || name);
     state.rev = -1;
+    closePicker();
   };
   document.getElementById("save-file").onclick = async () => {
     const saved = await op("scene_save", {});
@@ -3055,6 +3357,7 @@ function wire() {
       b.textContent = file.name;
       b.onclick = async () => {
         box.hidden = true;
+        closePicker();
         showLoading(file.name);
         loadStep("read", "Opening the saved file. Objects, groups, and meshes are stored together, so a large file waits here before the meshes are packed.");
         const opened = await op("scene_open", { path: file.path });
@@ -3070,21 +3373,7 @@ function wire() {
     box.hidden = false;
   };
   document.getElementById("scene").onchange = (ev) => switchScene(ev.target.value);
-  const projMenu = document.getElementById("proj-menu");
-  const projBtn = document.getElementById("proj-btn");
-  const toggleMenu = open => { projMenu.hidden = !open; projBtn.setAttribute("aria-expanded", String(open)); if (open) { loadProjects(); document.getElementById("proj-search").focus(); } };
-  projBtn.onclick = () => toggleMenu(projMenu.hidden);
-  projMenu.addEventListener("keydown", ev => { if (ev.key === "Escape") { toggleMenu(false); projBtn.focus(); } });
-  document.addEventListener("click", ev => { if (!projMenu.hidden && !ev.target.closest(".add-wrap")) toggleMenu(false); });
-  document.getElementById("proj-search").oninput = paintProjectList;
-  document.getElementById("proj-new").onclick = async () => {
-    const name = (prompt("New project name") || "").trim();
-    if (!name) return;
-    const res = await browser.newProject(name).catch(err => ({ ok: false, error: err.message }));
-    if (!res || res.ok === false) { setStatus((res && res.error) || "Could not make the project", true); return; }
-    await chooseProject(res.active || name);
-    loadLibrary();
-  };
+  wirePicker();
   let libTimer = 0;
   // One search for everything: scenes and library here, objects in the Outliner.
   document.getElementById("lib-search").oninput = ev => {
@@ -3166,7 +3455,7 @@ function wire() {
   }
 
   window.addEventListener("keydown", (ev) => {
-    if (ev.target.matches("input, textarea, select")) return;
+    if (ev.target.matches("input, textarea, select") || !document.getElementById("picker").hidden) return;
     const k = ev.key.toLowerCase();
     if (!ev.repeat) held.add(k);
     if (k === "escape") endFly();

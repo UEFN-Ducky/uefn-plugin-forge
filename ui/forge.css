@@ -44,11 +44,40 @@ svg { display: block; flex: none; }
 #scene-tabs button:hover .x, #scene-tabs button.on .x { visibility: visible; }
 #scene-tabs .x:hover { color: var(--fg); background: var(--btn-hover); }
 #scene-tabs input { width: 110px; }
-#proj-menu { position: absolute; z-index: 6; top: 34px; left: 0; width: 240px; background: var(--dropdown-bg); border: 1px solid var(--border-light); border-radius: var(--radius-sm); box-shadow: var(--shadow-dropdown); padding: 5px; display: flex; flex-direction: column; gap: 2px; }
-#proj-menu button { text-align: left; background: transparent; border-color: transparent; }
-#proj-menu button:hover, #proj-menu button.on { background: var(--btn-hover); }
-#proj-menu hr { border: 0; border-top: 1px solid var(--border); width: 100%; margin: 3px 0; }
-#proj-menu #files { position: static; width: auto; box-shadow: none; }
+/* Project and scene picker: a compact take on Ducky's Projects modal. */
+.pk-back { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; padding: 16px; background: var(--overlay); }
+.pk { display: flex; flex-direction: column; gap: 8px; width: min(760px, 100%); max-height: min(560px, 100%); min-height: 0; padding: 10px; background: var(--bg-elevated); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-lg); }
+.pk-top, .pk-bar, .pk-foot { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.pk-search { flex: 1; min-width: 0; border-radius: 999px; padding-left: 12px; }
+.pk-sp { flex: 1; }
+.pk-bar .dk-tab { min-height: 26px; padding: 2px 10px; }
+.pk-bar .dk-tab .n { margin-left: 5px; color: var(--fg-dim); font-size: 11px; }
+.pk #files { left: auto; right: 0; }
+.pk-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; align-content: start; overflow-y: auto; min-height: 120px; padding: 3px; }
+.pk-grid > .dk-empty, .pk-grid > .dk-loading, .pk-grid > .dk-error { grid-column: 1 / -1; }
+.pk-card { position: relative; display: flex; flex-direction: column; gap: 2px; min-width: 0; padding: 4px 4px 6px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer; }
+.pk-card:hover { background: var(--bg-hover); }
+.pk-card[aria-selected="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.pk-thumb { display: grid; place-items: center; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: var(--radius-sm); background: var(--card); color: var(--fg-dim); font-size: 22px; font-weight: 600; overflow: hidden; }
+.pk-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }
+.pk-facts { color: var(--fg-dim); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 0 2px; }
+.pk-kind { color: var(--fg-dim); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; padding: 0 2px; }
+.pk-more { position: absolute; top: 6px; right: 6px; min-height: 22px; width: 24px; padding: 0; background: var(--panel-header); border-color: var(--border); opacity: 0; }
+.pk-card:hover .pk-more, .pk-card[aria-selected="true"] .pk-more, .pk-more:focus-visible, .pk-more[aria-expanded="true"] { opacity: 1; }
+.pk-menu { position: absolute; z-index: 2; top: 30px; right: 6px; display: flex; flex-direction: column; gap: 2px; min-width: 110px; padding: 4px; background: var(--dropdown-bg); border: 1px solid var(--border-light); border-radius: var(--radius-sm); box-shadow: var(--shadow-dropdown); }
+.pk-menu button { text-align: left; background: transparent; border-color: transparent; min-height: 26px; }
+.pk-menu button:hover { background: var(--btn-hover); }
+.pk-menu .danger { color: var(--red); }
+.pk-card input { width: 100%; }
+.pk-grid.pk-rows { grid-template-columns: 1fr; gap: 3px; }
+.pk-rows .pk-card { flex-direction: row; align-items: center; gap: 8px; padding: 3px 36px 3px 3px; }
+.pk-rows .pk-thumb { width: 64px; flex: none; font-size: 14px; }
+.pk-rows .pk-text { min-width: 0; flex: 1; }
+.pk-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pk-foot { padding-top: 8px; border-top: 1px solid var(--border); }
+.pk-foot .pk-thumb { width: 64px; flex: none; font-size: 14px; }
+.pk-foot .pk-text { flex: 1; }
+.pk-foot.confirm .pk-text { color: var(--red); }
 .simple #cam-speed, .simple #snap, .simple #rot-snap, .simple #scale-snap, .simple .view-help { display: none; }
 .rail { display: flex; flex-direction: column; gap: 4px; padding: 6px 4px; background: var(--sidebar); border-right: 1px solid var(--border); overflow-y: auto; }
 .rail button, .hud button.icon { width: 34px; min-height: 32px; padding: 0; display: grid; place-items: center; background: transparent; border-color: transparent; }

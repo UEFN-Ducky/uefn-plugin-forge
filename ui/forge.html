@@ -12,19 +12,7 @@
 <div class="app">
   <div class="top" role="toolbar" aria-label="Scene tools">
     <strong class="brand">FORGE</strong>
-    <div class="add-wrap">
-      <button id="proj-btn" class="menu" type="button" title="Projects, save and open" aria-haspopup="true" aria-expanded="false">Project ▾</button>
-      <div id="proj-menu" role="menu" aria-label="Project menu" hidden>
-        <input id="proj-search" type="search" placeholder="Find a project" aria-label="Find a project" />
-        <div id="proj-list"></div>
-        <button id="proj-new" type="button" role="menuitem">+ New project</button>
-        <hr />
-        <button id="new" type="button" role="menuitem" title="New scene">New scene</button>
-        <button id="save-file" type="button" role="menuitem" title="Save this scene, its groups, and its meshes as a .forge file">Save</button>
-        <button id="open-file" type="button" role="menuitem" title="Open a saved .forge file">Open…</button>
-        <div id="files" hidden></div>
-      </div>
-    </div>
+    <button id="proj-btn" class="menu" type="button" title="Projects and scenes" aria-haspopup="dialog" aria-expanded="false">Project ▾</button>
     <div id="scene-tabs" role="tablist" aria-label="Scenes"></div>
     <select id="scene" title="Scene" hidden></select>
     <select id="mode" title="Mode" aria-label="Mode">
@@ -164,6 +152,35 @@
     </aside>
   </div>
   <div class="status" id="status"><span id="forge-version" aria-label="Forge version"></span><span id="status-text" role="status" aria-live="polite">Opening Forge…</span><span id="scene-stats"></span></div>
+</div>
+<div id="picker" class="pk-back" hidden>
+  <div class="pk" role="dialog" aria-modal="true" aria-label="Projects and scenes">
+    <div class="pk-top">
+      <input id="pk-search" class="dk-input pk-search" type="search" placeholder="Search" aria-label="Search projects and scenes" />
+      <button id="pk-view" class="dk-btn dk-btn--ghost dk-btn--icon" type="button" title="List view" aria-pressed="false">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="4" y="4" width="7" height="7"/><rect x="13" y="4" width="7" height="7"/><rect x="4" y="13" width="7" height="7"/><rect x="13" y="13" width="7" height="7"/></svg>
+      </button>
+      <button id="pk-close" class="dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Close (Esc)" aria-label="Close">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="pk-bar">
+      <div class="dk-tabs" role="tablist" aria-label="Show">
+        <button id="pk-tab-projects" class="dk-tab" type="button" role="tab" data-tab="projects">Projects</button>
+        <button id="pk-tab-scenes" class="dk-tab" type="button" role="tab" data-tab="scenes">Scenes</button>
+      </div>
+      <span class="pk-sp"></span>
+      <span class="add-wrap">
+        <button id="open-file" class="dk-btn dk-btn--ghost" type="button" title="Open a saved .forge file">Open file…</button>
+        <div id="files" hidden></div>
+      </span>
+      <button id="save-file" class="dk-btn dk-btn--ghost" type="button" title="Save this scene, its groups, and its meshes as a .forge file">Save</button>
+      <button id="pk-new-project" class="dk-btn dk-btn--secondary" type="button">+ New project</button>
+      <button id="new" class="dk-btn dk-btn--secondary" type="button" title="New scene">+ New scene</button>
+    </div>
+    <div id="pk-grid" class="pk-grid" role="listbox" aria-label="Projects and scenes" tabindex="0"></div>
+    <div id="pk-foot" class="pk-foot"></div>
+  </div>
 </div>
 <script src="forge.bundle.js"></script>
 </body>
