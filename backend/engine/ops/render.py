@@ -54,15 +54,16 @@ def _world():
     sky = world.node_tree.nodes.new("ShaderNodeTexSky")  # soft studio-like sky, no HDRI file needed
     sky.sun_disc = False
     world.node_tree.links.new(sky.outputs["Color"], bg.inputs["Color"])
-    bg.inputs["Strength"].default_value = 0.6
+    bg.inputs["Strength"].default_value = 0.35
     bpy.context.scene.world = world
 
 
 def _rig(center, radius, cam_dir, right, up):
     """Key over the camera's left shoulder, fill from the right, rim from behind."""
     forward = -cam_dir
-    for name, vec, energy in (("key", up * 0.8 - forward - right * 0.4, 3.5), ("fill", right * 0.9 - forward * 0.6, 1.2),
-                              ("rim", forward * 0.8 + up * 0.7 - right * 0.3, 2.5)):
+    # Oct 28 2026: 3.5 + 1.2 + 2.5 under the Standard view transform clipped a golden lion to near white.
+    for name, vec, energy in (("key", up * 0.8 - forward - right * 0.4, 2.0), ("fill", right * 0.9 - forward * 0.6, 0.55),
+                              ("rim", forward * 0.8 + up * 0.7 - right * 0.3, 1.0)):
         light = bpy.data.objects.new(name, bpy.data.lights.new(name, "SUN"))
         light.data.energy = energy
         light.data.angle = math.radians(12)  # wide sun = soft shadows
