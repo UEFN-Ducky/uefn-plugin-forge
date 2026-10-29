@@ -9,7 +9,7 @@ from pathlib import Path
 import bpy
 from mathutils import Vector
 
-from . import bridge
+from . import bridge, toon
 
 _DIRS = {"three": (1.3, -1.6, 0.9), "front": (0.0, -2.2, 0.45), "top": (0.0, -0.01, 2.4), "side": (2.2, 0.0, 0.45)}
 _QUALITY = {"look": 16, "final": 64}
@@ -80,6 +80,7 @@ def op_render(p):
     if not meshes:
         raise ValueError("Nothing to render: the asked ids have no meshes")
     _cutouts()
+    toon.apply(p)
     lo, hi = _bounds(meshes)
     center = (lo + hi) / 2
     radius = max((hi - lo).length / 2, 1e-4)
@@ -92,7 +93,10 @@ def op_render(p):
     w, h = [int(v) for v in p["size"]]
     scene.render.resolution_x, scene.render.resolution_y, scene.render.resolution_percentage = w, h, 100
     _world()
-    _ground(lo, hi, radius)
+    if p.get("style") == "toon":
+        toon.flat_world()
+    if p.get("style") != "toon":  # a toon render is lines and bands on a flat backdrop, no floor to outline
+        _ground(lo, hi, radius)
     cam_data = bpy.data.cameras.new("look")
     cam_data.lens = 50
     cam_data.sensor_fit = "AUTO"

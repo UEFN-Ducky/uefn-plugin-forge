@@ -95,7 +95,7 @@ def render_mesh(mesh: Mesh, view: str = "three", size: tuple[int, int] = (320, 2
 
 
 def _engine_views(mesh: Mesh, views: list[str], size: tuple[int, int], materials: dict | None, textures: Path | None,
-                  quality: str = "look", cold_ok: bool = True) -> list[Path] | None:
+                  quality: str = "look", cold_ok: bool = True, style: str = "") -> list[Path] | None:
     """Eevee PNGs (one per view, in a temp folder the caller deletes), or None when the engine is missing or fails.
 
     cold_ok=False only uses an already-running worker (and starts it in the background), so a cold call never waits.
@@ -148,7 +148,7 @@ def _engine_views(mesh: Mesh, views: list[str], size: tuple[int, int], materials
         payload = {"unit": 0.01, "folder": str(folder), "materials": mats, "rigs": [],
                    "objects": [{"id": "look", "name": "look", "matrix": identity, "smooth": mesh.smooth, "mats": slots, "arrays": arrays}]}
         result = client.call("render", {"scene": payload, "views": views, "size": list(size), "quality": quality,
-                                        "out_dir": str(folder), "stem": "v"}, timeout=120.0)
+                                        "out_dir": str(folder), "stem": "v", "style": style}, timeout=120.0)
         paths = [Path(p) for p in result["paths"]]
         if len(paths) != len(views) or not all(p.is_file() for p in paths):
             raise ValueError("engine wrote no image")
@@ -167,11 +167,11 @@ def _stamp(im: Image.Image) -> Image.Image:
 
 
 def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials: dict | None = None,
-               textures: Path | None = None) -> list[str]:
+               textures: Path | None = None, style: str = "") -> list[str]:
     views = views or ["three"]
     path.parent.mkdir(parents=True, exist_ok=True)
     out = []
-    shots = _engine_views(mesh, views, (480, 360), materials, textures, cold_ok=False)  # ponytail: first png call is the soft one
+    shots = _engine_views(mesh, views, (480, 360), materials, textures, cold_ok=False, style=style)  # ponytail: first png call is the soft one
     for i, view in enumerate(views):
         dest = path if len(views) == 1 else path.with_name(f"{path.stem}_{view}{path.suffix}")
         if shots:
@@ -185,7 +185,7 @@ def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials
 
 
 def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | None = None,
-                 textures: Path | None = None, long_side: int = 768, quality: str = "look") -> str:
+                 textures: Path | None = None, long_side: int = 768, quality: str = "look", style: str = "") -> str:
     """One PNG, long side long_side px: a single view, or the views tiled two across.
 
     quality="final" is 64 samples at 1024 px for marketing shots; the default look is 16 samples.
@@ -199,7 +199,7 @@ def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | Non
     if th * rows > long_side:
         th = long_side // rows
     sheet = Image.new("RGB", (tw * cols, th * rows), (22, 22, 26))
-    shots = _engine_views(mesh, views, (tw, th), materials, textures, quality)
+    shots = _engine_views(mesh, views, (tw, th), materials, textures, quality, style=style)
     for i, view in enumerate(views):
         if shots:
             with Image.open(shots[i]) as tile:
