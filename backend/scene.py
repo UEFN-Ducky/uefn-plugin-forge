@@ -839,10 +839,12 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
             from .blend_import import import_blend
             return import_blend(str(params.get("path") or ""), preview=True, scale=params.get("scale", 1))
         if op == "scene_list":
-            return {"scenes": list_scenes()}
+            return {"scenes": list_scenes(params.get("project") or None)}
         if op == "scene_new":
-            scene = create(str(params.get("name") or "Scene"))
-            return scene.summary()
+            project = str(params.get("project") or "")
+            short = str(params.get("name") or "Scene")
+            summary = create(f"{project}/{short}" if project else short).summary()
+            return {**summary, "name": f"{projects.require(project)}/{summary['name']}"} if project else summary
         scene = load(name)
         fn = _OPS.get(op)
         if fn is None:

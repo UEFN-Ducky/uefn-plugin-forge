@@ -257,6 +257,41 @@ def move_scene(scene: str, to_project: str) -> str:
     return "%s/%s" % (dst_proj, short)
 
 
+def act(action: str = "list", name: str = "", new_name: str = "", scene: str = "", targets=None,
+        confirm: bool = False, project: str = "") -> dict[str, Any]:
+    """forge_project tool and the panel RPC share this. Results stay small: names and counts only."""
+    action = (action or "list").strip().lower()
+    name = name or project
+    acts = ("list", "new", "open", "rename", "delete", "move_scene", "active")
+    if action not in acts:
+        raise ValueError("Unknown action %r. Actions: %s" % (action, ", ".join(acts)))
+    if action in ("list", "active"):
+        rows = list_projects()
+        shown = [{"name": p["name"], "scenes": p["scenes"], "targets": p["targets"]} for p in rows[:12]]
+        out: dict[str, Any] = {"active": active(), "projects": shown}
+        if len(rows) > 12:
+            out["more"] = len(rows) - 12
+        return out
+    if action == "new":
+        out = new_project(name, targets)
+        set_active(out["name"])
+        return {**out, "active": out["name"], "summary": "Created project %s" % out["name"]}
+    if action == "open":
+        return {"active": set_active(name), "scenes": [s["name"] for s in list_scenes(name)][:20]}
+    if action == "rename":
+        if not new_name:
+            raise ValueError("Pass new_name for rename")
+        return {"name": rename_project(name, new_name), "active": active()}
+    if action == "delete":
+        require(name)
+        if not confirm:
+            raise ValueError("Deleting project %r moves it to the trash; pass confirm=true to do it" % name)
+        return {"trashed": safe_project(name), "to": delete_project(name), "active": active()}
+    if not scene or not (name or new_name):
+        raise ValueError("move_scene needs scene (\"Project/Scene\" or a plain name) and name = the destination project")
+    return {"scene": move_scene(scene, name or new_name)}
+
+
 def _safe_scene(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (name or "").strip())[:64] or _bad()
 

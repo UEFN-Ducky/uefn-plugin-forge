@@ -173,14 +173,24 @@ def register_tools(api: Any) -> None:
         return forge_import_mesh(str(params.get("path") or ""), str(params.get("name") or ""), str(params.get("destination") or ""), float(params.get("scale", 1)), bool(params.get("preview", False)))
 
     @api.tool(**host)
-    def forge_scene_list() -> dict:
-        """List Forge scenes."""
-        return _run(api, "", "scene_list")
+    def forge_scene_list(project: str = "") -> dict:
+        """List Forge scenes of a project (default: the active one)."""
+        return _run(api, "", "scene_list", {"project": project})
 
     @api.tool(**host)
-    def forge_scene_new(name: str) -> dict:
-        """Create an empty Forge scene."""
-        return _run(api, name, "scene_new", {"name": name})
+    def forge_scene_new(name: str, project: str = "") -> dict:
+        """Create an empty Forge scene (in project, default the active one)."""
+        return _run(api, name, "scene_new", {"name": name, "project": project})
+
+    @api.tool(**host)
+    def forge_project(action: str = "list", name: str = "", new_name: str = "", scene: str = "",
+                      targets: list[str] | None = None, confirm: bool = False) -> dict:
+        """Projects hold scenes and a shared library: action=list|new|open|rename|delete(confirm=true)|move_scene."""
+        from . import projects
+        try:
+            return projects.act(action, name, new_name, scene, targets, confirm)
+        except ValueError as exc:
+            return {"error": str(exc)[:280]}
 
     @api.tool(**host)
     def forge_scene_get(name: str = "") -> dict:

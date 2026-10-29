@@ -7,7 +7,22 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from backend import projects, scene
+from unittest.mock import MagicMock
+
+from backend import panel_rpc, projects, scene, tools
+
+
+class _Api:
+    def __init__(self):
+        self.fns = {}
+        self.changeset = MagicMock()
+        self.listener = None
+
+    def tool(self, **_):
+        return lambda fn: self.fns.setdefault(fn.__name__, fn)
+
+    def __getattr__(self, _):
+        return lambda *a, **k: (lambda fn: fn)
 
 
 def _env(tmp, **extra):
@@ -83,6 +98,35 @@ class ProjectStorage(unittest.TestCase):
         self.assertEqual(len(out), 50)
         self.assertEqual(out[7], {"name": "S07", "rev": 7})
         self.assertLess(ms, 100)
+
+    def test_project_tool_round_trip(self):
+        api = _Api()
+        tools.register_tools(api)
+        t = api.fns
+        out = t["forge_project"](action="new", name="LimoRide", targets=["uefn", "roblox"])
+        self.assertEqual(out["active"], "LimoRide")
+        made = t["forge_scene_new"](name="Limo_Body", project="LimoRide")
+        self.assertEqual(made["name"], "LimoRide/Limo_Body")
+        self.assertEqual([s["name"] for s in t["forge_scene_list"](project="LimoRide")["scenes"]], ["Limo_Body"])
+        self.assertEqual(t["forge_scene_list"]()["scenes"][0]["name"], "Limo_Body")  # active project
+        rows = {p["name"]: p for p in t["forge_project"](action="list")["projects"]}
+        self.assertEqual(rows["LimoRide"]["scenes"], 1)
+        self.assertEqual(rows["LimoRide"]["targets"], ["uefn", "roblox"])
+        self.assertEqual(t["forge_project"](action="rename", name="LimoRide", new_name="Limo")["name"], "Limo")
+        self.assertEqual(scene.load("Limo/Limo_Body").data["name"], "Limo_Body")
+        moved = t["forge_project"](action="move_scene", scene="Limo/Limo_Body", name="My Scenes")
+        self.assertEqual(moved["scene"], "My Scenes/Limo_Body")
+        self.assertEqual(scene.list_scenes("Limo"), [])
+        self.assertIn("confirm", t["forge_project"](action="delete", name="Limo")["error"])
+        gone = t["forge_project"](action="delete", name="Limo", confirm=True)
+        self.assertTrue(Path(gone["to"]).is_dir() and ".trash" in gone["to"])
+        self.assertNotIn("Limo", [p["name"] for p in projects.list_projects()])
+        self.assertEqual(projects.active(), "My Scenes")
+        self.assertIn("Projects:", t["forge_project"](action="open", name="Nope")["error"])
+        for out in (t["forge_project"](action="list"), gone):
+            self.assertLessEqual(len(json.dumps(out)), 300)
+        rpc = panel_rpc.forge_projects(action="active")
+        self.assertTrue(rpc["ok"] and rpc["active"] == "My Scenes")
 
     def test_flat_override_still_works(self):
         with patch.dict(os.environ, {"FORGE_SCENES_DIR": str(self.root / "flat")}):
