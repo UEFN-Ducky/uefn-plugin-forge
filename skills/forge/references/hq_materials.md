@@ -36,6 +36,12 @@ Layers: base, noise (`target` color|roughness|bump), edge_wear (`metal: true` sh
 
 `textures: "<folder>"` wires a downloaded set by file name: `_diff/_Color/_BaseColor/_BC`, `_nor_gl/_NormalGL/_NormalDX/_N`, `_rough/_Roughness`, `_metal/_Metalness`, `_ao/_AmbientOcclusion`, `_arm/_ORM`, `_Emissive`, `_Opacity`. It copies them in as `T_<material>_BC/N/ORM/E/O.png`, packs separate AO, roughness and metallic into ORM, and flips the normal to the `target` convention (ue = DirectX). Height and displacement are skipped (warned).
 
+## Emissive vertex mask
+
+One `emissive` slot can glow in several colours: paint a `col:color` point attribute (COLOR_0 on export), white where the lamp keeps its own colour, `[1, 0.05, 0.02]` for red tail lamps. In Blender (`look`, `light`, `bake`) the emission is multiplied by that attribute when every mesh using the material has it. Keep `emissive_strength` at 2-4: higher clips the green channel and red reads orange.
+
+UE side: in the master material, `VertexColor.RGB × EmissiveColor × EmissiveStrength` → Emissive Color. Without that multiply, UEFN shows every lamp white.
+
 ## PBR lint and ranges
 
 The result warns when: metallic is between 0 and 1, a metal's albedo is under sRGB 180, a non-metal's albedo is outside sRGB 30-240, or a map file feeds the wrong slot (a normal map as colour).

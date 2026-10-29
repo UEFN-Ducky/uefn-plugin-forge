@@ -300,7 +300,39 @@ def build_all(folder=None):
         spec = json.loads(mat.get("forge") or "{}").get("spec")
         if spec:
             built[mat.name] = build(mat, graph(spec["layers"]), folder)
+    tint_emission()
     return built
+
+
+def tint_emission(attr="color"):
+    """Emissive materials glow in the COLOR_0 vertex mask (col:color): one lamp slot, red tail lamps.
+    Only when every mesh using the material has the attribute: a missing one reads black and kills the glow."""
+    import bpy
+    users = {}
+    for ob in bpy.data.objects:
+        if ob.type == "MESH":
+            for mat in ob.data.materials:
+                if mat is not None:
+                    users.setdefault(mat.name, []).append(ob.data)
+    for mat in bpy.data.materials:
+        tree = mat.node_tree if mat.use_nodes else None
+        bsdf = next((n for n in tree.nodes if n.type == "BSDF_PRINCIPLED"), None) if tree else None
+        if bsdf is None or not users.get(mat.name) or any(n.label == "vertex_glow" for n in tree.nodes):
+            continue
+        strength, color = bsdf.inputs["Emission Strength"], bsdf.inputs["Emission Color"]
+        if strength.is_linked or strength.default_value <= 0 or not all(attr in me.color_attributes for me in users[mat.name]):
+            continue
+        node = tree.nodes.new("ShaderNodeAttribute")
+        node.attribute_name, node.label = attr, "vertex_glow"
+        mix = tree.nodes.new("ShaderNodeMix")
+        mix.data_type, mix.blend_type = "RGBA", "MULTIPLY"
+        mix.inputs["Factor"].default_value = 1.0
+        if color.is_linked:
+            tree.links.new(color.links[0].from_socket, mix.inputs["A"])
+        else:
+            mix.inputs["A"].default_value = color.default_value
+        tree.links.new(node.outputs["Color"], mix.inputs["B"])
+        tree.links.new(mix.outputs["Result"], color)
 
 
 def op_material_check(p):

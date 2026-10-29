@@ -283,6 +283,22 @@ class BakeTests(SceneCase):
         bumpy = [px[0] for px in _pixels(scene.folder / "textures" / "T_Hull_N.png") if px[2] > 128]
         self.assertGreater(statistics.pstdev(bumpy), 4, r)
 
+    def test_emission_reads_vertex_mask(self):
+        scene, nid = self.scene("box", w=100, d=100, h=100)
+        hq.HQ_OPS["material"](scene, {"material": "Lamp", "layers": [{"type": "base", "color": [0.05, 0.05, 0.05], "emissive": [1, 1, 1], "emissive_strength": 2}], "id": nid})
+        node = scene.node(nid)
+        mesh = scene.local_mesh(node)
+        mesh.attrs["col:color"] = [[1.0, 0.05, 0.02, 1.0] if v[0] > 0 else [1.0, 1.0, 1.0, 1.0] for v in mesh.verts]  # red tail lamp half
+        scene.write_mesh(node, mesh)
+        scene.touch_geom()
+        r = hq.HQ_OPS["light"](scene, {"id": nid, "preset": "dramatic", "transform": "standard", "size": [320, 240]})
+        px = _pixels(r["path"])
+        red = [p for p in px if p[0] > 150 and p[0] > 2 * p[1]]
+        white = [p for p in px if min(p) > 150]
+        self.assertGreater(len(red), len(px) * 0.01, r)
+        self.assertGreater(len(white), len(px) * 0.01, r)
+        self.assertGreater(statistics.mean(p[0] for p in red), 2 * statistics.mean(p[1] for p in red))
+
     def test_bake_speed(self):
         import time
         scene, nid = self.scene()
