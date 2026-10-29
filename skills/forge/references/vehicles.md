@@ -13,7 +13,7 @@ Three `forge_hq` ops, all cm. Car frame: **-Y is the front, +X the car's left, Z
 | op | params (defaults) | Result |
 |---|---|---|
 | `car_part` | `kind`, `style` sedan, `tire` by style, `spokes`, `tread` 64, `disc` mm, `side` left, `width`/`height`/`length` cm, `text`, `region` eu\|us, `at`, `name`, `paint` | `car_part tire sedan 225/45R17 r=31.7cm, tread 64, 10.9k tris, socket Hub` |
-| `car` | `body` sedan, `style` (from body), `length_cm`, `wheelbase_cm`, `track_cm`, `doors`, `parts` {}, `interior` true, `paint`, `name`, `at` | `car limo 717x190x149cm, 58 parts, 4 wheels rigged, 112k tris, LOD x4, UCX 1` |
+| `car` | `body` sedan, `style` (from body), `length_cm`, `wheelbase_cm`, `track_cm`, `doors`, `parts` {}, `interior` true, `paint`, `name`, `at` | `car limo 717x190x149cm, 58 parts, 4 wheels rigged, 90.1k tris, LOD x4, UCX 1` |
 | `car_swap` | `car` group id, `slot`, then any `car_part` param | `car_swap rim: 4 x wheel rebuilt (spokes=mesh), sockets kept` |
 
 Styles: `sport` `sedan` `suv` `truck` `classic` `scifi`. Bodies: `sedan` `coupe` `hatch` `suv` `pickup` `limo` `sports` `van` `classic` `kart`.
@@ -23,7 +23,7 @@ Styles: `sport` `sedan` `suv` `truck` `classic` `scifi`. Bodies: `sedan` `coupe`
 | kind | socket | what is in it |
 |---|---|---|
 | `wheel` | Hub | tire + rim + brake disc, face on +X (right side turned, so sidewall text reads) |
-| `tire` | Hub | ISO size code: 225/45R17 = 22.5 cm wide, sidewall 45 % = 10.1 cm, rim 17 in, r = 31.7 cm. Tread blocks by style, embossed sidewall text |
+| `tire` | Hub | ISO size code: 225/45R17 = 22.5 cm wide, sidewall 45 % = 10.1 cm, rim 17 in, r = 31.7 cm. Tread blocks by style, embossed sidewall text (`label`, "" for none; `car` wheels have none and 48 blocks) |
 | `rim` | Hub | barrel, lip, hub, lug nuts; `spokes` 5\|10\|mesh\|dish\|2-20 |
 | `brake_disc` / `caliper` | Hub | disc 280-380 mm (rim in × 25.4 − 110), 28 mm thick, hat; caliper on the rear-upper arc |
 | `headlight` / `taillight` | Mount | housing, chrome reflector bowls, projector, emissive DRL, lens (`glass` / `lens_red`) |
@@ -54,7 +54,16 @@ Left-side parts sit on +X; `side=right` mirrors them. Material slots are shared 
 ]
 ```
 
-Run it with `forge_batch(steps=[...], look="three")`. One part alone: `{"tool": "forge_hq", "op": "car_part", "params": {"kind": "wheel", "tire": "245/40R18", "spokes": "10"}}`.
+Run it with `forge_batch(steps=[...], look="three")`. One part alone, checked as a game part:
+
+```json
+[
+  {"tool": "forge_hq", "op": "car_part", "params": {"kind": "wheel", "tire": "225/45R17", "spokes": "10"}},
+  {"tool": "forge_hq", "op": "qa", "params": {"id": "$0", "profile": "uefn", "budget": "vehicle"}}
+]
+```
+
+→ `uefn score 97: SM_Wheel pivot not at base`, 0 errors. Every kind passes this alone. The pivot warning is expected: a part's origin is its socket (hub, hinge, mount), not its base. So are the shared `mcar_*` slots: a wheel uses 4 of them (rubber, chrome, metal, plastic), within the vehicle budget's 5.
 
 `parts` keys are part kinds: a style word (`"spoiler": "sport"`), a dict of `car_part` params (`"wheel": {"tread": 48}`), `false` to leave one out (`"engine": false`), `rim` takes a spoke pattern, `tire` a size code.
 
@@ -64,7 +73,7 @@ Run it with `forge_batch(steps=[...], look="three")`. One part alone: `{"tool": 
 
 `car_swap` slots: `wheel`/`rim`/`tire` (all four), `caliper`, `headlight`, `taillight`, `grille`, `mirror`, `bumper_front`, `bumper_rear`, `spoiler`, `diffuser`, `exhaust`, `seat`, `steering_wheel`, `dashboard`, `engine`, `license_plate`, `wiper`, or an exact slot like `mirror_L`. The new part keeps the old transform, parent, bone and LODs. Body panels (`body_*`) are the shell: rebuild the car to change them.
 
-**Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back and glass you can see the seats through; the `car` summary is within 5 % of the target size and 40-120k tris; `qa` has no errors.
+**Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back and glass you can see the seats through; the `car` summary is within 5 % of the target size and 40-120k tris; `qa(profile="uefn", budget="hero")` has 0 errors (the limo: 90k tris, pass). Its warnings are the hinge and hub pivots on purpose.
 
 ---
 Dimensions from ISO tyre size codes and typical OEM specs. Workflow ideas adapted from Blender Agent Skills (hardsurface-modeling, optimization) by EL4CTEO, MIT licence.

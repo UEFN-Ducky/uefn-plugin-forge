@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from . import tools
+from .check import check_mesh
 from .engine import client, runtime
 from .hq import vehicle as hqv
 from .scene import dispatch, forget, load
@@ -85,7 +86,15 @@ class Parts(_Engine):
                 self.assertGreater(mesh.tri_count(), 50)
                 if kind in SOLID:
                     self.assertEqual(open_edges(mesh), 0, "%s has open edges" % kind)
+                errors = [i["message"] for i in check_mesh(scene.world_mesh(node), node["id"], has_collision=True, pivot_is_base=True)
+                          if i["severity"] == "error"]
+                self.assertEqual(errors, [], "%s: non-manifold or zero-area faces" % kind)
                 x += 300
+
+    def test_documented_part_qa(self):  # the call vehicles.md gives for one part
+        part = self.hq("car_part", kind="wheel", tire="225/45R17", spokes="10")
+        out = self.t["forge_hq"](name=self.name, op="qa", params={"id": part["ids"][0], "profile": "uefn", "budget": "vehicle"})
+        self.assertEqual(out["errors"], 0, out)
 
     def test_tire_radius_matches_code(self):
         out = self.hq("car_part", kind="tire", tire="225/45R17")
@@ -156,6 +165,9 @@ class Cars(_Engine):
 
     def test_limo_and_swap(self):
         out, scene, gid, nodes = self.check_dims("limo", (720, 190, 148))
+        qa = self.t["forge_hq"](name=self.name, op="qa", params={"id": gid, "profile": "uefn", "budget": "hero"})
+        self.assertEqual(qa["errors"], 0, qa)
+        self.assertTrue(qa["pass"], qa)
         before = {n["car_slot"]: dict(n["transform"]) for n in nodes if n.get("car_slot", "").startswith("wheel_")}
         swap = self.hq("car_swap", car=gid, slot="rim", spokes="mesh")
         self.assertIn("4 x wheel", swap["summary"])

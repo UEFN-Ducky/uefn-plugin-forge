@@ -221,7 +221,8 @@ def ring_prism(g, outer, inner, y0, y1, slot, z=0.0):
 def text(g, body, size, depth, place, slot):
     """Embossed text: a font mesh in (u, v, w) mapped through place(u, v, w) -> Vector."""
     cu = bpy.data.curves.new("forge_txt", "FONT")
-    cu.body, cu.size, cu.extrude, cu.resolution_u = body, size, depth / 2, 2
+    # resolution 1: glyph outlines at control points only; finer curves give sub-2 mm tris that qa's z-fight cells pair up
+    cu.body, cu.size, cu.extrude, cu.resolution_u = body, size, depth / 2, 1
     cu.align_x, cu.align_y = "CENTER", "CENTER"
     ob = bpy.data.objects.new("forge_txt", cu)
     bpy.context.scene.collection.objects.link(ob)
@@ -230,7 +231,8 @@ def text(g, body, size, depth, place, slot):
     src = bmesh.new()
     src.from_mesh(me)
     bpy.data.meshes.remove(me)
-    bmesh.ops.remove_doubles(src, verts=src.verts[:], dist=1e-4)
+    bmesh.ops.remove_doubles(src, verts=src.verts[:], dist=0.06)  # above qa's 0.05 cm weld, or glyph corners turn non-manifold
+    bmesh.ops.dissolve_degenerate(src, dist=0.06, edges=src.edges[:])
     vmap = {v: g.bm.verts.new(place(*v.co)) for v in src.verts}
     mi = g.mi(slot)
     for f in src.faces:
@@ -325,7 +327,7 @@ def tire(g, code, style, tread=64, label="FORGE"):
         return w / 2
 
     rmid, size = rim + side * 0.5, max(0.6, side * 0.2)
-    for start in (math.pi / 2, -math.pi / 2):
+    for start in ((math.pi / 2, -math.pi / 2) if label else ()):
         def place(u, v, z, start=start):
             r = rmid + v
             a = start - u / rmid
@@ -487,7 +489,7 @@ def grille(g, q):
     else:
         n = {"sedan": 5, "suv": 3, "truck": 3}[style]
         for k in range(n):
-            box(g, (iw, 2.6, ih / (n * 2.2)), (0, -2.0, -ih / 2 + ih * (k + 0.5) / n), frame, 0.3)
+            box(g, (iw, 2.6, ih / (n * 2.2)), (0, -1.9, -ih / 2 + ih * (k + 0.5) / n), frame, 0.3)  # sunk 1 mm into the backing, not flush
         if style in ("suv", "truck"):
             box(g, (ih / 3, 2.8, ih), (0, -2.2, 0), frame, 0.3)
     return {"w": w, "h": h}
@@ -582,6 +584,8 @@ def fender(g, q):
             v.co.y, v.co.z = v.co.y * ra / dist, v.co.z * ra / dist
         dist = math.hypot(v.co.y, v.co.z)
         v.co.x = 14 + 2.5 * math.exp(-max(0.0, dist - ra) / 6) + 1.5 * math.sin(math.pi * (v.co.z - z0) / (z1 - z0))
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=0.3)  # the arch snap stacks neighbours on one point
+    bmesh.ops.dissolve_degenerate(bm, dist=0.3, edges=bm.edges[:])
     for f in bm.faces:
         f.material_index = g.mi("paint")
     append_mesh(g, solidify(bm, 1.0, 0.25))
@@ -701,7 +705,7 @@ def seat(g, q):
     style = q["style"]
     w = float(q.get("width") or (130 if style == "classic" else 50))
     box(g, (w * 0.8, 40, 14), (0, 0, 7), "plastic", 1.0)
-    box(g, (w, 50, 12), (0, 0, 20), "leather", 4.0)
+    box(g, (w, 50, 12), (0, 0, 19.5), "leather", 4.0)  # 5 mm into the base: flush faces z-fight
     back = Matrix.Translation((0, 24, 20)) @ _rot("X", -15)
     tall = 75 if style in ("sport", "scifi") else 58
     box(g, (w, 12, tall), (0, 0, tall / 2), "leather", 4.0, back)
@@ -763,7 +767,7 @@ def engine_block(g, q):
     style = q["style"]
     v8 = style != "sedan"
     box(g, (40, 55, 30), (0, 0, 25), "metal", 1.0)
-    box(g, (32, 45, 10), (0, 2, 5), "metal", 1.0)
+    box(g, (32, 45, 10.5), (0, 2, 5.25), "metal", 1.0)  # stacked boxes overlap 5 mm: flush faces z-fight
     if v8:
         for s in (-1, 1):
             rot = _rot("Y", s * 40)
@@ -775,8 +779,8 @@ def engine_block(g, q):
         else:
             box(g, (20, 16, 8), (0, -18, 56), "plastic", 2.0)
     else:
-        box(g, (24, 50, 10), (0, 0, 45), "metal", 1.0)
-        box(g, (22, 48, 6), (0, 0, 53), "accent", 2.0)
+        box(g, (24, 50, 10), (0, 0, 44.5), "metal", 1.0)
+        box(g, (22, 48, 6), (0, 0, 52), "accent", 2.0)
         for i in range(4):
             tube(g, [(-10, -18 + 12 * i, 47), (-20, -18 + 12 * i, 52), (-24, -10 + 6 * i, 58)], 1.6, "metal", 8)
     for r, z in ((7, 20), (5, 35), (4, 12)):
@@ -869,11 +873,38 @@ PARTS = {
 STYLE_TIRE = {"sport": "255/35R19", "sedan": "225/45R17", "suv": "255/55R19", "truck": "265/70R17", "classic": "205/70R15", "scifi": "245/40R20"}
 
 
+def _collapse_slivers(bm, at, cell=0.1):
+    """Parallel faces whose world centres (at = placement, cm) share one qa z-fight cell: collapse the shortest edge."""
+    at = Vector(at)
+    for _ in range(4):
+        bm.normal_update()
+        seen, edges = {}, set()
+        for f in bm.faces:
+            key = tuple(round(c / cell) for c in f.calc_center_median() + at)
+            o = next((o for o in seen.get(key, ()) if abs(f.normal.dot(o.normal)) > 0.99), None)
+            if o is not None:
+                edges.add(min((e for x in (f, o) for e in x.edges), key=lambda e: e.calc_length()))
+            seen.setdefault(key, []).append(f)
+        if not edges:
+            return
+        bmesh.ops.collapse(bm, edges=list(edges), uvs=False)
+        bmesh.ops.dissolve_degenerate(bm, dist=1e-4, edges=bm.edges[:])
+
+
 def _emit(g, name, u, at=(0, 0, 0), smooth=True):
     bm = g.bm
-    big = [f for f in bm.faces if len(f.verts) > 4]
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=0.06)  # cm, before the unit scale: what qa welds, welded here
+    bmesh.ops.dissolve_degenerate(bm, dist=0.06, edges=bm.edges[:])
+    # ngons, and quads under 0.1 cm2 (the scene splits those into 2 tris in one qa z-fight cell, so split them here)
+    big = [f for f in bm.faces if len(f.verts) > 4 or (len(f.verts) == 4 and f.calc_area() < 0.1)]
     if big:
         bmesh.ops.triangulate(bm, faces=big, quad_method="BEAUTY", ngon_method="BEAUTY")
+    _collapse_slivers(bm, at)
+    # sub-mm solidify/bevel folds leave edges with 3+ faces: keep the two biggest, the rest are slivers
+    extra = {f for e in bm.edges if len(e.link_faces) > 2 for f in sorted(e.link_faces, key=lambda f: -f.calc_area())[2:]}
+    if extra:
+        bmesh.ops.delete(bm, geom=list(extra), context="FACES_ONLY")
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.transform(Matrix.Scale(u, 4))
     me = bpy.data.meshes.new(name)
@@ -1156,6 +1187,7 @@ def _body(B, u):
             pb.free()
             continue
         pb.normal_update()
+        before = {f: f.normal.copy() for f in pb.faces}
         moves = {}
         for v in {v for e in pb.edges if len(e.link_faces) == 1 for v in e.verts}:
             c = sum((f.calc_center_median() for f in v.link_faces), Vector()) / len(v.link_faces)
@@ -1165,6 +1197,11 @@ def _body(B, u):
                 moves[v] = d.normalized() * GAP / 2
         for v, d in moves.items():
             v.co += d
+        pb.normal_update()  # strips narrower than the gap fold over: drop them, or solidify welds them non-manifold
+        folded = [f for f in pb.faces if f.calc_area() < 0.05 or f.normal.dot(before[f]) < 0.2]
+        if folded and len(folded) < len(pb.faces):
+            bmesh.ops.delete(pb, geom=folded, context="FACES_ONLY")
+            bmesh.ops.delete(pb, geom=[v for v in pb.verts if not v.link_faces], context="VERTS")
         glass = name.startswith(("Window", "Windshield", "RearWindow"))
         slot = "glass" if glass else "plastic" if name.startswith(("Underbody", "Rocker")) else "paint"
         for f in pb.faces:
@@ -1183,8 +1220,9 @@ def _well(B, x_sign, yh):
     xin, xout = B.W / 2 - 32, B.W / 2 - 4
     dz = math.asin(min(0.99, (B.R - B.clr) / B.ra))
     m = Matrix.Translation((0, yh, B.R)) @ Matrix.Diagonal((x_sign, 1, 1, 1))
-    lathe(g, [(xin, B.ra), (xout, B.ra), (xout, B.ra + 1), (xin, B.ra + 1)], 24, "plastic", m, a0=-dz, a1=math.pi + dz)
-    lathe(g, [(xin - 1, 0), (xin - 1, B.ra + 1), (xin, B.ra + 1), (xin, 0)], 24, "plastic", m, a0=-dz, a1=math.pi + dz)
+    # liner + inner wall as one L profile: two lathes would share the wall at xin (non-manifold once welded)
+    lathe(g, [(xin - 1, 0), (xin - 1, B.ra + 1), (xout, B.ra + 1), (xout, B.ra), (xin, B.ra), (xin, 0)], 24, "plastic", m,
+          a0=-dz, a1=math.pi + dz)
     if x_sign < 0:
         bmesh.ops.reverse_faces(g.bm, faces=g.bm.faces[:])
     return g
@@ -1248,7 +1286,8 @@ def car(p):
     tx = B.track / 2
     for tag, yh, x in (("FL", B.yf, tx), ("FR", B.yf, -tx), ("RL", B.yr, tx), ("RR", B.yr, -tx)):
         side = "left" if x > 0 else "right"
-        part("wheel", "wheel_" + tag, (x, yh, B.R), side, tag + "_wheel")
+        # 48 blocks, no sidewall text: a limo stays under hero 100k, and glyph slivers would read as qa z-fight pairs
+        part("wheel", "wheel_" + tag, (x, yh, B.R), side, tag + "_wheel", tread=48, label="")
         if B.kind != "kart":
             part("caliper", "caliper_" + tag, (x, yh, B.R), side)
     bones = [{"name": "root", "parent": None, "head": [0, 0, 0], "tail": [0, 0, 30]}]
