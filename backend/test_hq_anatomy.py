@@ -255,7 +255,8 @@ def test_cartoon_body_lion_sit():
     bm.free()
     low = paw_islands(ob)
     assert len(low) == 4 and max(low) < 1e-3, "paw islands touching the ground: %s" % low
-    assert ob.dimensions.z <= 60 * 0.9 and ob.dimensions.z > 40, tuple(ob.dimensions)
+    assert 0.40 < ob.dimensions.z <= 0.60 * 0.9, tuple(ob.dimensions)  # metre-scale bridge
+    assert max(ob.dimensions) < 1.0, tuple(ob.dimensions)
     assert [m.name for m in ob.data.materials] == ["body", "belly", "paw", "ear_inner"]
     assert any(q.material_index == 1 for q in ob.data.polygons), "no belly faces"
     assert all(q.use_smooth for q in ob.data.polygons)
@@ -267,7 +268,7 @@ def test_cartoon_body_sockets_and_result():
     ob = body(kind="lion", pose="sit", height=60)
     head, tip = list(ob["head_socket"]), list(ob["tail_tip"])
     assert 0.75 * 60 <= head[2] <= 60 and abs(head[0]) < 1 and head[1] <= 0, head
-    assert tip[1] > 10 and tip[2] > 0, tip  # tail points back and up
+    assert tip[1] > 10 and tip[2] > 0, tip  # tail points back and up (still cm)
     with tempfile.TemporaryDirectory() as tmp:
         bpy.ops.wm.read_factory_settings(use_empty=True)
         _BODIES.clear()

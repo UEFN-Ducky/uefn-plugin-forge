@@ -405,10 +405,11 @@ def _parts(kind, pose, head_ratio):
 
 
 def build_cartoon_body(p):
-    """One quad mesh (cm, feet on z=0, front toward -Y) with slots body, belly, paw, ear_inner."""
+    """One quad mesh (bridge metres from cm height, feet on z=0, front toward -Y) with slots body, belly, paw, ear_inner."""
     kind = p.get("kind", "lion")
     pose = p.get("pose", "sit")
     height = float(p.get("height", 60.0))
+    unit = float(p.get("unit", 0.01))  # height is cm; the bridge is metres
     head_ratio = float(p.get("head_ratio") or KINDS[kind][4])
     parts, head, tip = _parts(kind, pose, head_ratio)
     verts, faces, slots = [], [], []
@@ -416,7 +417,7 @@ def build_cartoon_body(p):
         v = v.copy()
         v[:, 2] = np.maximum(v[:, 2], 0.0)  # sitting weight rests flat on the ground plane
         base = len(verts)
-        verts.extend((v * height).tolist())
+        verts.extend((v * height * unit).tolist())
         faces.extend([[i + base for i in face] for face in f])
         if name == "torso":  # slot is a per-vertex belly mask here
             slots.extend([1 if all(slot[i] for i in face) else 0 for face in f])
