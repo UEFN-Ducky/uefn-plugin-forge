@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as THREE from "three";
 import { materialFor } from "../ui/src/material-display.js";
-import { loadView, saveView, shadingKey, shadingSettings, statsText } from "../ui/src/viewport.js";
+import { loadView, saveView, shadingKey, shadingSettings, snapLabel, statsText } from "../ui/src/viewport.js";
 
 const memory = () => { const m = new Map(); return { getItem: k => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)) }; };
 
@@ -46,6 +46,12 @@ test("modes map to materials: wireframe on black, solid grey, material without P
   assert.ok(flat.isMeshLambertMaterial && flat.map && !flat.normalMap);
   const lit = materialFor("fur", mats, { mode: "rendered" }, tex, cache);
   assert.ok(lit.isMeshStandardMaterial && lit.map && lit.normalMap);
+});
+
+test("Snap button sums up the active snaps", () => {
+  assert.equal(snapLabel(512, 90, 0), "512 · 90°");
+  assert.equal(snapLabel(0, 0, 0.25), "×0.25");
+  assert.equal(snapLabel(0, 0, 0), "off");
 });
 
 test("stats read like Blender's overlay", () => {

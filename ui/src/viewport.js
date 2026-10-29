@@ -39,6 +39,12 @@ export function shadingKey(key, { shift = false, armed = false, current = "rende
   return { mode: null, armed: false };
 }
 
+/** Snap ▾ button summary: the active snaps, or "off". */
+export function snapLabel(grid = 0, rot = 0, scale = 0) {
+  const parts = [grid && String(grid), rot && `${rot}°`, scale && `×${scale}`].filter(Boolean);
+  return parts.length ? parts.join(" · ") : "off";
+}
+
 export function statsText({ tris = 0, verts = 0, objects = 0 } = {}) {
   const n = v => Number(v || 0).toLocaleString("en-US");
   return `${n(tris)} tris · ${n(verts)} verts · ${n(objects)} object${objects === 1 ? "" : "s"}`;

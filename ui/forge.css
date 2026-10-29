@@ -78,7 +78,7 @@ svg { display: block; flex: none; }
 .pk-foot .pk-thumb { width: 64px; flex: none; font-size: 14px; }
 .pk-foot .pk-text { flex: 1; }
 .pk-foot.confirm .pk-text { color: var(--red); }
-.simple #cam-speed, .simple #snap, .simple #rot-snap, .simple #scale-snap, .simple .view-help { display: none; }
+.simple #cam-speed, .simple .snap-wrap, .simple .view-help { display: none; }
 .rail { display: flex; flex-direction: column; gap: 4px; padding: 6px 4px; background: var(--sidebar); border-right: 1px solid var(--border); overflow-y: auto; }
 .rail button, .hud button.icon { width: 34px; min-height: 32px; padding: 0; display: grid; place-items: center; background: transparent; border-color: transparent; }
 .rail button:nth-child(5), .rail button:nth-child(11) { margin-top: 12px; }
@@ -88,6 +88,12 @@ button.on, .rail button.on, .hud button.on { background: var(--select); border-c
 #view canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 .hud { position: absolute; z-index: 2; top: 8px; left: 8px; right: 8px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; padding: 4px 6px; background: var(--panel-header); border: 1px solid var(--border); border-radius: min(4px, var(--radius-sm)); box-shadow: var(--shadow-sm); }
 .view-label { margin-right: auto; font-weight: 600; }
+.hud-group { display: inline-flex; align-items: center; gap: 4px; padding-right: 6px; border-right: 1px solid var(--border); }
+.hud-group:last-child { border-right: 0; padding-right: 0; }
+.hud .dk-btn, .hud .dk-select { min-height: 26px; font-size: 12px; }
+.hud .dk-btn--icon, .shading button.icon { width: 28px; min-height: 26px; padding: 0; }
+.snap-row { display: grid; grid-template-columns: 64px 1fr; align-items: center; gap: 6px; color: var(--fg-dim); }
+.snap-wrap .overlay-menu { left: 0; right: auto; }
 .shading { display: inline-flex; gap: 1px; padding: 1px; border: 1px solid var(--border); border-radius: min(4px, var(--radius-sm)); }
 .shading button.icon { width: 28px; min-height: 26px; }
 .overlay-wrap { position: relative; }

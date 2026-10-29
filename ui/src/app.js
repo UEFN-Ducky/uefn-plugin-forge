@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import * as Brush from "./brush.js";
 import { colorOf, materialFor as buildMaterial } from "./material-display.js";
-import { OVERLAYS, OVERLAY_LABEL, SHADING, SHADING_LABEL, loadView, saveView, shadingKey, shadingSettings, statsText } from "./viewport.js";
+import { OVERLAYS, OVERLAY_LABEL, SHADING, SHADING_LABEL, loadView, saveView, shadingKey, shadingSettings, snapLabel, statsText } from "./viewport.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { runMeshTask as compatibleMeshTask, setSimplified, isSimplified } from "./mesh-engine.js";
 import { drawGroups, sceneTris, SIMPLIFY_TRIS } from "./project-browser.js";
@@ -1390,6 +1390,8 @@ function applySnap() {
   const grid = Number(document.getElementById("snap").value) || 0;
   const rot = Number(document.getElementById("rot-snap").value) || 0;
   const scale = Number(document.getElementById("scale-snap").value) || 0;
+  const snapBtn = document.getElementById("snap-btn");
+  if (snapBtn) snapBtn.textContent = `Snap ${snapLabel(grid, rot, scale)} ▾`;
   gizmo.setTranslationSnap(grid || null);
   gizmo.setRotationSnap(rot ? THREE.MathUtils.degToRad(rot) : null);
   gizmo.setScaleSnap(scale || null);
@@ -1723,7 +1725,7 @@ renderer.domElement.addEventListener("wheel", (ev) => {
   ev.stopImmediatePropagation();
   camSpeed = Math.max(1, Math.min(8, camSpeed + (ev.deltaY < 0 ? 1 : -1)));
   const chip = document.getElementById("cam-speed");
-  if (chip) chip.textContent = "Speed " + camSpeed;
+  if (chip) chip.value = String(camSpeed);
 }, { capture: true, passive: false });
 
 const raycaster = new THREE.Raycaster();
@@ -3380,6 +3382,10 @@ function wire() {
   for (const id of ["snap", "rot-snap", "scale-snap"]) {
     document.getElementById(id).onchange = () => applySnap();
   }
+  const snapMenu = document.getElementById("snap-menu");
+  document.getElementById("snap-btn").onclick = () => { snapMenu.hidden = !snapMenu.hidden; };
+  const speed = document.getElementById("cam-speed");
+  speed.onchange = () => { camSpeed = Number(speed.value) || 4; speed.blur(); };
   document.getElementById("undo").onclick = () => op("undo", {});
   document.getElementById("redo").onclick = () => op("redo", {});
   document.getElementById("extrude").onclick = () => op("mesh_op", { op: "extrude", distance: 64 });
@@ -3463,10 +3469,11 @@ function wire() {
     ev.preventDefault();
     linkItem(JSON.parse(raw));
   });
-  const simplify = document.getElementById("simplify");
-  try { simplify.checked = localStorage.getItem("forge.simple") === "1"; } catch { /* no storage */ }
-  const applySimple = () => { document.body.classList.toggle("simple", simplify.checked); try { localStorage.setItem("forge.simple", simplify.checked ? "1" : "0"); } catch { /* no storage */ } };
-  simplify.onchange = applySimple;
+  // Compact hides speed, snap and help; Simplify (the HUD button) is the preview mesh. They used to share id="simplify".
+  const compact = document.getElementById("compact-ui");
+  try { compact.checked = localStorage.getItem("forge.simple") === "1"; } catch { /* no storage */ }
+  const applySimple = () => { document.body.classList.toggle("simple", compact.checked); try { localStorage.setItem("forge.simple", compact.checked ? "1" : "0"); } catch { /* no storage */ } };
+  compact.onchange = applySimple;
   applySimple();
   loadProjects();
   loadLibrary();
@@ -3532,7 +3539,7 @@ function wire() {
       if (k === "w" || k === "a" || k === "s" || k === "d" || k === "q" || k === "e") ev.preventDefault();
       return;
     }
-    if (k === "escape") { endFly(); document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; document.getElementById("overlay-menu").hidden = true; return; }
+    if (k === "escape") { endFly(); document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; for (const menu of document.querySelectorAll(".hud .overlay-menu")) menu.hidden = true; return; }
     if ((ev.ctrlKey || ev.metaKey) && ["z", "b", "r", "j"].includes(k)) ev.preventDefault();
     if (!ev.ctrlKey && !ev.metaKey && !ev.altKey && (k === "z" || (shadingArmed > performance.now() && /^[1-4]$/.test(k)))) {
       const pick = shadingKey(k, { shift: ev.shiftKey, armed: shadingArmed > performance.now(), current: view.shading, last: lastShading });
@@ -3617,7 +3624,7 @@ call("theme.get").then(theme => { if (requestedThemeVersion === themeVersion) ap
 wire();
 document.addEventListener("click", ev => {
   if (!ev.target.closest(".add-wrap")) { document.getElementById("prims").hidden = true; document.getElementById("files").hidden = true; }
-  if (!ev.target.closest(".overlay-wrap")) document.getElementById("overlay-menu").hidden = true;
+  for (const menu of document.querySelectorAll(".hud .overlay-menu")) if (!menu.parentElement.contains(ev.target)) menu.hidden = true;
 });
 window.addEventListener("unhandledrejection", ev => { setStatus(ev.reason?.message || "Operation failed", true); });
 restoreSession().then(() => refreshScenes()).then(() => { state.rev = -1; poll(); setInterval(poll, 250); setInterval(saveSession, 500); }).catch((err) => setStatus(err.message || String(err), true));

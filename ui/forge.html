@@ -28,14 +28,14 @@
       <div id="prims" hidden></div>
     </div>
     <span class="sp"></span>
-    <button id="undo" class="icon" type="button" title="Undo">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 8H4v4"/><path d="M4 12a8 8 0 1 0 2.3-5.7L4 8"/></svg>
+    <button id="undo" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Undo (Ctrl+Z)" aria-label="Undo">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
     </button>
-    <button id="redo" class="icon" type="button" title="Redo">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M16 8h4v4"/><path d="M20 12a8 8 0 1 1-2.3-5.7L20 8"/></svg>
+    <button id="redo" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/></svg>
     </button>
-    <label class="row"><input id="follow" type="checkbox" /> Follow AI</label>
-    <label class="row" title="Hide the snap controls and help text"><input id="simplify" type="checkbox" /> Simplify</label>
+    <label class="row" title="Follow the AI's edits with the camera"><input id="follow" type="checkbox" /> Follow AI</label>
+    <label class="row" title="Hide the speed and snap controls and the help text"><input id="compact-ui" type="checkbox" /> Compact</label>
     <span id="ai" hidden>AI editing</span>
   </div>
   <div class="main">
@@ -89,64 +89,87 @@
       </button>
     </nav>
     <div id="view">
-      <div class="hud" role="toolbar" aria-label="Viewport tools"><span class="view-label">Perspective · Rendered</span>
-        <span class="shading" role="group" aria-label="Viewport shading">
-          <button id="shade-wireframe" class="icon" type="button" title="Wireframe (Z 1, Shift+Z toggles)">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/></svg>
+      <div class="hud" role="toolbar" aria-label="Viewport tools">
+        <span class="hud-group" role="group" aria-label="View">
+          <span class="view-label">Perspective · Rendered</span>
+          <select id="cam-speed" class="dk-select" title="Fly speed: hold right mouse and use WASD. Scroll while flying changes it." aria-label="Fly speed">
+            <option value="1">Speed 1</option><option value="2">Speed 2</option><option value="3">Speed 3</option><option value="4" selected>Speed 4</option>
+            <option value="5">Speed 5</option><option value="6">Speed 6</option><option value="7">Speed 7</option><option value="8">Speed 8</option>
+          </select>
+        </span>
+        <span class="hud-group snap-wrap overlay-wrap" role="group" aria-label="Snapping">
+          <button id="snap-btn" class="dk-btn dk-btn--ghost" type="button" title="Snapping: grid, rotation and scale" aria-label="Snapping" aria-haspopup="true">Snap ▾</button>
+          <div id="snap-menu" class="overlay-menu" hidden>
+            <label class="snap-row">Grid
+              <select id="snap" class="dk-select" title="Grid snap in Fortnite units. One tile is 512." aria-label="Grid snap">
+                <option value="0">Off</option>
+                <option value="1">1</option>
+                <option value="8">8</option>
+                <option value="16">16</option>
+                <option value="32">32</option>
+                <option value="64">64</option>
+                <option value="128">128</option>
+                <option value="256">256</option>
+                <option value="512" selected>512 (tile)</option>
+                <option value="1024">1024</option>
+                <option value="2048">2048</option>
+              </select>
+            </label>
+            <label class="snap-row">Rotation
+              <select id="rot-snap" class="dk-select" title="Rotation snap" aria-label="Rotation snap">
+                <option value="0">Off</option>
+                <option value="5">5°</option>
+                <option value="10">10°</option>
+                <option value="15">15°</option>
+                <option value="45">45°</option>
+                <option value="90" selected>90°</option>
+              </select>
+            </label>
+            <label class="snap-row">Scale
+              <select id="scale-snap" class="dk-select" title="Scale snap" aria-label="Scale snap">
+                <option value="0" selected>Off</option>
+                <option value="0.125">1/8</option>
+                <option value="0.25">1/4</option>
+                <option value="0.5">1/2</option>
+                <option value="1">1</option>
+              </select>
+            </label>
+          </div>
+        </span>
+        <span class="hud-group" role="group" aria-label="Edit select mode">
+          <button id="sm-face" class="icon on dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Select faces (edit mode)" aria-label="Select faces">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 18L12 4l8 14z"/></svg>
           </button>
-          <button id="shade-solid" class="icon" type="button" title="Solid: flat grey to read the form (Z 2)">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
+          <button id="sm-edge" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Select edges (edit mode)" aria-label="Select edges">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 18L12 6l7 12"/></svg>
           </button>
-          <button id="shade-material" class="icon" type="button" title="Material: base colours and textures (Z 3)">
-            <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
-          </button>
-          <button id="shade-rendered" class="icon" type="button" title="Rendered: lit with reflections, normal and ORM maps (Z 4)">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/><path d="M8.5 9.5a4 4 0 0 1 4-2.5" stroke-linecap="round"/></svg>
+          <button id="sm-vert" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Select vertices (edit mode)" aria-label="Select vertices">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="6" cy="17" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="18" cy="17" r="2"/></svg>
           </button>
         </span>
-        <span class="overlay-wrap">
-          <button id="overlay-btn" type="button" title="Overlays: wireframe on top, face orientation, normals, grid, stats" aria-haspopup="true">Overlays ▾</button>
-          <div id="overlay-menu" class="overlay-menu" hidden></div>
+        <span class="hud-group" role="group" aria-label="Viewport shading">
+          <span class="shading">
+            <button id="shade-wireframe" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Wireframe (Z 1, Shift+Z toggles)" aria-label="Wireframe shading">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.5" ry="8"/><path d="M4 12h16"/></svg>
+            </button>
+            <button id="shade-solid" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Solid: flat grey to read the form (Z 2)" aria-label="Solid shading">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
+            </button>
+            <button id="shade-material" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Material: base colours and textures (Z 3)" aria-label="Material shading">
+              <svg viewBox="0 0 24 24" width="16" height="16"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
+            </button>
+            <button id="shade-rendered" class="icon dk-btn dk-btn--ghost dk-btn--icon" type="button" title="Rendered: lit with reflections, normal and ORM maps (Z 4)" aria-label="Rendered shading">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/><path d="M8.5 9.5a4 4 0 0 1 4-2.5" stroke-linecap="round"/></svg>
+            </button>
+          </span>
+          <span class="overlay-wrap">
+            <button id="overlay-btn" class="dk-btn dk-btn--ghost" type="button" title="Overlays: wireframe on top, face orientation, normals, grid, stats" aria-label="Overlays" aria-haspopup="true">Overlays ▾</button>
+            <div id="overlay-menu" class="overlay-menu" hidden></div>
+          </span>
         </span>
-        <button id="sm-face" class="icon on" type="button" title="Faces">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M4 18L12 4l8 14z"/></svg>
-        </button>
-        <button id="sm-edge" class="icon" type="button" title="Edges">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 18L12 6l7 12"/></svg>
-        </button>
-        <button id="sm-vert" class="icon" type="button" title="Vertices">
-          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><circle cx="6" cy="17" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="18" cy="17" r="2"/></svg>
-        </button>
-        <button id="simplify" type="button" title="Preview with fewer triangles. Picks and saves keep full detail. Turns on by itself above 300k triangles.">Simplify</button>
-        <span id="cam-speed" class="dim" title="Hold right mouse to fly. Scroll changes speed.">Speed 4</span>
-        <select id="snap" title="Grid snap in Fortnite units. One tile is 512.">
-          <option value="0">Grid off</option>
-          <option value="1">1</option>
-          <option value="8">8</option>
-          <option value="16">16</option>
-          <option value="32">32</option>
-          <option value="64">64</option>
-          <option value="128">128</option>
-          <option value="256">256</option>
-          <option value="512" selected>512 tile</option>
-          <option value="1024">1024</option>
-          <option value="2048">2048</option>
-        </select>
-        <select id="rot-snap" title="Rotation snap">
-          <option value="0">Rot off</option>
-          <option value="5">5°</option>
-          <option value="10">10°</option>
-          <option value="15">15°</option>
-          <option value="45">45°</option>
-          <option value="90" selected>90°</option>
-        </select>
-        <select id="scale-snap" title="Scale snap">
-          <option value="0" selected>Scale off</option>
-          <option value="0.125">1/8</option>
-          <option value="0.25">1/4</option>
-          <option value="0.5">1/2</option>
-          <option value="1">1</option>
-        </select>
+        <span class="hud-group" role="group" aria-label="Preview detail">
+          <button id="simplify" class="dk-btn dk-btn--ghost" type="button" title="Preview with fewer triangles. Picks and saves keep full detail. Turns on by itself above 300k triangles." aria-label="Simplify preview">Simplify</button>
+        </span>
       </div>
       <div id="brush-bar" class="hud brush-bar" role="toolbar" aria-label="Brush" hidden>
         <select id="brush-kind" title="Brush" aria-label="Brush"></select>
