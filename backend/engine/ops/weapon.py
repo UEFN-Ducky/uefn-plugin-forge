@@ -17,6 +17,7 @@ from mathutils import Euler, Matrix, Vector
 from . import bridge
 from .mesh import _ctx, _object_from, _shape, _tris, boolean, hardsurface, manifold
 from .uv import _edit, _pack, _unwrap
+from .vehicle import _collapse_slivers
 
 # slot: (realistic rgba, stylized rgba, metallic, roughness). Gun finishes are dielectric coats over metal
 # (hard anodise, phosphate): dark, satin vs matte; the bare metal shows only where the edge wear cuts through.
@@ -484,7 +485,7 @@ _MELEE = {"knife": _knife, "sword": _sword, "axe": _axe, "hammer": _hammer}
 # ---- finish -------------------------------------------------------------------------------------
 
 
-def _finish(ob, scale, weld):
+def _finish(ob, scale, weld, at):
     """Slivers out, to final size, smooth + weighted normals (the midpoly game look), smart UVs.
 
     Planar caps stay n-gons: UE triangulates on import, and fanning a 3 mm bolt hole into slivers
@@ -507,6 +508,7 @@ def _finish(ob, scale, weld):
     if slivers:  # collapse each sliver's shortest edge
         short = {min(f.edges, key=lambda e: e.calc_length()) for f in slivers}
         bmesh.ops.collapse(bm, edges=list(short), uvs=False)
+    _collapse_slivers(bm, at, cell=0.1 * weld / 0.06)  # qa's world-anchored 0.1 cm z-fight cells, in scene units
     for face in [f for f in bm.faces if len(f.verts) > 3 and corner(list(f.verts), 0) < thr]:
         vs = list(face.verts)  # a boolean T-junction first: start the face on a real corner (qa reads corner 0)
         best = max(range(len(vs)), key=lambda i: corner(vs, i))
@@ -548,8 +550,8 @@ def weapon(p):
     length = float(p["length"])
     f = length / (max(xs) - min(xs))  # fit the asked overall length; the grip origin stays put
     sy, sz = (1.25, 1.2) if style == "stylized" else (1.0, 1.0)  # stylized: chunkier cross-sections
-    _finish(ob, Matrix.Diagonal((f * u, f * sy * u, f * sz * u, 1.0)), 0.06 * u)  # qa welds at 0.05 cm
     ob.location = Vector(p.get("at") or [0, 0, 0]) * u
+    _finish(ob, Matrix.Diagonal((f * u, f * sy * u, f * sz * u, 1.0)), 0.06 * u, ob.location)  # qa welds at 0.05 cm
     sockets = {name: [round(c, 1) for c in (v[0] * f, v[1] * f * sy, v[2] * f * sz)] for name, v in sorted(k.sockets.items())}
     tris = _tris(ob)
     summary = "%s %s %g cm, %d parts, %.1fk tris, sockets %s" % (kind, style, round(length, 1), count, tris / 1000.0,

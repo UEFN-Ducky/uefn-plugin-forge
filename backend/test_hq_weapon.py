@@ -101,6 +101,29 @@ class Build(unittest.TestCase):
         self.check({"kind": "pistol", "parts": {"sight": "red_dot", "muzzle": "suppressor"}}, 20.2)
         self.check({"kind": "sword", "style": "stylized", "seed": 2}, 100)
 
+    def test_no_zfight_any_kind(self):
+        """Every kind (and the stylized/parts combos): 0 z-fight pairs at qa's 0.1 cm cell, qa >= 90."""
+        from .hq.qa import _zfight
+        cases = [{"kind": k} for k in hq_weapon.LENGTHS] + [
+            {"kind": "rifle", "style": "stylized", "parts": {"stock": "ar", "sight": "scope"}},
+            {"kind": "rifle", "parts": {"sight": "red_dot", "muzzle": "suppressor"}},
+            {"kind": "smg", "parts": {"sight": "holo", "muzzle": "brake", "mag": "extended", "stock": "ar"}},
+            {"kind": "pistol", "parts": {"sight": "red_dot", "muzzle": "suppressor"}}]
+        for params in cases:
+            with self.subTest(**{k: str(v) for k, v in params.items()}):
+                out, scene, node = self.build(params)
+                mesh = scene.world_mesh(node)
+                seen, where = {}, []
+                for fi in range(len(mesh.faces)):
+                    c, n = mesh.face_center(fi), mesh.face_normal(fi)
+                    key = tuple(round(v / 0.1) for v in c)
+                    if any(abs(sum(a * b for a, b in zip(n, o))) > 0.99 for o in seen.get(key, ())):
+                        where.append([round(v, 2) for v in c])
+                    seen.setdefault(key, []).append(n)
+                self.assertEqual(_zfight([mesh], 0.1), 0, where)
+                qa = hq_qa.qa(scene, {"id": node["id"], "profile": "uefn", "budget": "weapon"})
+                self.assertGreaterEqual(qa["score"], 90, qa["summary"])
+
     def test_doc_wear_keeps_slots(self):
         """The weapons.md wear block (edit slots by name, no id) leaves the rifle's 3 slots and the metal colour alone."""
         import re
