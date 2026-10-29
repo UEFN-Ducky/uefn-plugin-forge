@@ -83,7 +83,7 @@ def _raw(p, k):
     rx = 0.31 * k["width"] * (1 - k["taper"] * low ** 2 + 0.09 * up + gonial)
     x = np.sign(dx) * np.abs(dx) ** (0.9 - 0.3 * up) * rx                      # upper skull: round crown, not an egg
     y = np.sign(dy) * np.abs(dy) ** 0.85 * np.where(dy < 0, 0.35, 0.385 * k["depth"])
-    z = np.sign(dz) * np.abs(dz) ** np.where(dz > 0, 1.2, 0.95) * np.where(dz > 0, 0.53, 0.47)
+    z = np.sign(dz) * np.abs(dz) ** (0.95 + 0.3 * up) * np.where(dz > 0, 0.53, 0.47)  # exponent blends: no squashed band
     y = y - k["jaw_fwd"] * low ** 1.5 * front                                   # mandible and chin come forward
     z = z + low ** 1.5 * (0.16 * _smooth(-0.55, 0.3, dy) + 0.30 * back)       # under-jaw rises to the skull base
     y = y + 0.03 * up ** 3 * front                                             # forehead slopes to the crown
@@ -240,8 +240,28 @@ def _patch(bm, k, n, box):
     return out
 
 
-def _angles(cyc, cx, cz, hx, hz):
-    return np.array([math.atan2((v.co.z - cz) / hz, (v.co.x - cx) / hx) for v in cyc])
+def _even(th, curve):
+    """Angles re-spaced so curve(angle) points sit at equal arc length (same order, 0 stays 0): an almond's
+    tips would otherwise crowd (qa welds points under 0.05 cm)."""
+    fine = np.linspace(-math.pi, math.pi, 2001)
+    pts = curve(fine)
+    arc = np.concatenate([[0], np.cumsum(np.linalg.norm(np.diff(pts, axis=0), axis=1))])
+    total, zero = arc[-1], np.interp(0.0, fine, arc)
+    want = (zero + th / (2 * math.pi) * total) % total
+    return np.interp(want, arc, fine)
+
+
+def _angles(cyc, cx, cz):
+    """Ring angle per boundary vertex from its arc length (even spacing, monotonic), 0 at the vertex furthest
+    toward +x, counter-clockwise seen from the front. atan2 on the warped patch bunched points together."""
+    co = np.array([(v.co.x, v.co.z) for v in cyc])
+    seg = np.linalg.norm(np.roll(co, -1, 0) - co, axis=1)
+    s = np.concatenate([[0], np.cumsum(seg)[:-1]]) / seg.sum() * 2 * math.pi
+    i0 = int(np.argmax(co[:, 0] - cx - 0.3 * np.abs(co[:, 1] - cz)))
+    th = s - s[i0]
+    if co[(i0 + 1) % len(co), 1] < co[i0, 1]:  # walking down at +x: clockwise
+        th = -th
+    return (th + math.pi) % (2 * math.pi) - math.pi
 
 
 def build_shell(k):
@@ -252,7 +272,8 @@ def build_shell(k):
     bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=RES - 1, use_grid_fill=True)
     f, ex, R = k["f"], k["ex"], k["R"]
     ez, mz = 0.5 * f, 0.205 * f
-    eye_box = lambda s: tuple(sorted((s * (ex - 0.095), s * (ex + 0.095)))) + (ez - 0.06, ez + 0.07)  # noqa: E731
+    e = k["eye"]  # the patch grows with the eye; its inner edge keeps a grid column for the nose bridge
+    eye_box = lambda s: tuple(sorted((s * max(ex - 0.095 * e, 0.03), s * (ex + 0.095 * e)))) + (ez - 0.06 * e, ez + 0.07 * e)  # noqa: E731
     mouth_box = (-0.15 * k["mw"], 0.15 * k["mw"], 0.135 * f, 0.28 * f)
     patches = {"eye_L": _patch(bm, k, n, eye_box(1)), "eye_R": _patch(bm, k, n, eye_box(-1)), "mouth": _patch(bm, k, n, mouth_box)}
     cycles = {name: _hole(bm, faces) for name, faces in patches.items()}
@@ -272,41 +293,55 @@ def build_shell(k):
     for name, s in (("eye_L", 1), ("eye_R", -1)):
         cyc = cycles[name]
         cx = s * ex
-        th = _angles(cyc, cx, ez, 0.095, 0.065)
-        c, sn = np.cos(th), np.sin(th)
         a = 0.0625 * k["eye"]
-        out_c = c * s  # + = toward the temple
-        lid_z = np.where(sn > 0, 0.022 * k["eye"] * (1 - 0.15 * out_c), 0.016 * k["eye"])
-        target = np.column_stack([cx + a * c, ez + lid_z * sn + k["tilt"] * out_c])
-        start = np.array([(v.co.x, v.co.z) for v in cyc])
+
+        def almond(th, d=0.0, cx=cx, s=s, a=a):
+            """Lid outline grown by d (H) all round: rings are offset almonds, so they never cross."""
+            c, sn = np.cos(th), np.sin(th)
+            out_c = c * s  # + = toward the temple
+            lid_z = np.where(sn > 0, 0.022 * k["eye"] * (1 - 0.15 * out_c), 0.016 * k["eye"]) + d
+            return np.column_stack([cx + (a + d) * c, ez + lid_z * sn + k["tilt"] * out_c])
+
+        th = _even(_angles(cyc, cx, ez), almond)
+        xz = [np.array([(v.co.x, v.co.z) for v in cyc])] + [almond(th, 0.009 * (EYE_RINGS - r)) for r in range(1, EYE_RINGS + 1)]
+        xz[1] = (xz[0] + xz[2]) / 2  # ring 1 bridges to the grid patch, whose edge may sit inside the nominal box
         prev, rings = cyc, []
         for r in range(1, EYE_RINGS + 1):
-            t = 1 - (1 - r / EYE_RINGS) ** 1.4
             lid = 0.0012 if r == EYE_RINGS else 0.003 if r == EYE_RINGS - 1 else 0.004
-            pts = _surface(start + (target - start) * t, k, n, lid)
+            pts = _surface(xz[r], k, n, lid)
             prev = _ring(bm, prev, pts, 0, [])
             rings.append(prev)
         centre = np.array([cx, k["ey"], ez])
-        inner = [centre + (np.array(tuple(v.co)) - centre) * 0.65 for v in prev]
+        # socket bag: a deep cone behind the lids (shallow fans z-fight in qa), hidden by the eyeball
+        # (depth alternates by parity so neighbours are never coplanar; nobody sees it)
+        inner = [np.array(tuple(v.co)) * 0.85 + centre * 0.15 + [0, (0.5 + 0.15 * (i % 2)) * R, 0] for i, v in enumerate(prev)]
         sock = _ring(bm, prev, inner, 3, info["mat_faces"][3])
-        _cap(bm, sock, centre + [0, 0.3 * R, 0], 3)
+        _cap(bm, sock, centre + [0, 1.0 * R, 0], 3)
         info["rings"][name] = rings
         info["bag"][name] = sock
     # mouth loops: outer ring = nasolabial loop, inner rings = lips, last = lip seam, then the mouth bag
     cyc = cycles["mouth"]
-    th = _angles(cyc, 0.0, (mouth_box[2] + mouth_box[3]) / 2, 0.15, 0.0725)
-    c, sn = np.cos(th), np.sin(th)
     w = 0.10 * k["mw"]
-    lip_h = np.where(sn > 0, 0.034, 0.04) * k["lips"] * (1 - 0.25 * np.abs(c) ** 4)
-    bow = np.where(sn > 0, -0.004 * np.exp(-0.5 * (c / 0.12) ** 2), 0.0)  # cupid's bow dip at the centre
-    lips = {3: np.column_stack([1.06 * w * c, mz + (lip_h + bow) * sn]),        # vermilion border
-            4: np.column_stack([1.03 * w * c, mz + 0.5 * lip_h * sn]),          # fullest part of the lip
-            5: np.column_stack([w * c, mz + 0.0015 * sn])}                      # seam
+
+    def lip_h(th):
+        c, sn = np.cos(th), np.sin(th)
+        bow = np.where(sn > 0, -0.004 * np.exp(-0.5 * (c / 0.12) ** 2), 0.0)  # cupid's bow dip at the centre
+        return np.where(sn > 0, 0.034, 0.04) * k["lips"] * (1 - 0.25 * np.abs(c) ** 4), bow
+
+    def border_xz(th):
+        h, bow = lip_h(th)
+        return np.column_stack([1.06 * w * np.cos(th), mz + (h + bow) * np.sin(th)])
+
+    th = _even(_angles(cyc, 0.0, (mouth_box[2] + mouth_box[3]) / 2), border_xz)
+    c, sn = np.cos(th), np.sin(th)
+    h, _ = lip_h(th)
+    lips = {3: border_xz(th),                                                  # vermilion border
+            4: np.column_stack([1.03 * w * c, mz + 0.5 * h * sn]),              # fullest part of the lip
+            5: np.column_stack([w * c, mz + np.sign(sn) * np.maximum(0.0015 * np.abs(sn), 0.0016)])}  # seam, open at the corners
     start = np.array([(v.co.x, v.co.z) for v in cyc])
     prev, rings = cyc, []
     for r in range(1, MOUTH_RINGS + 1):
-        xz = lips[r] if r in lips else start + (lips[3] - start) * (r / 3)
-        pts = _surface(xz, k, n)
+        pts = _surface(lips[r] if r in lips else start + (lips[3] - start) * (r / 3), k, n)
         if r == 4:
             pts[:, 1] -= 0.004 * k["lips"] * np.abs(sn) ** 0.5  # lips roll forward
         if r == MOUTH_RINGS:
@@ -315,17 +350,24 @@ def build_shell(k):
         rings.append(prev)
     seam = np.array([tuple(v.co) for v in prev])
     ys = float(seam[:, 1].min())
+    # bag rings are scaled copies of the vermilion border: its points are well spread (qa welds points
+    # closer than 0.05 cm and flags parallel faces sharing a 0.1 cm cell)
+    border = np.array([tuple(v.co) for v in rings[2]])
+    bx, bz = border[:, 0], border[:, 2] - mz
     bag_rings = [
-        np.column_stack([seam[:, 0] * 0.97, seam[:, 1] + 0.010, mz + (seam[:, 2] - mz) * 1.5]),
-        np.column_stack([0.085 * k["mw"] * c, np.full_like(c, ys + 0.045), mz + 0.032 * sn]),
-        np.column_stack([0.075 * k["mw"] * c, np.full_like(c, ys + 0.095), mz - 0.006 + 0.04 * sn]),
-        np.column_stack([0.045 * k["mw"] * c, np.full_like(c, ys + 0.14), mz + 0.022 * sn]),
+        np.column_stack([seam[:, 0] * 0.97, seam[:, 1] + 0.010, mz + 1.5 * (seam[:, 2] - mz)]),
+        np.column_stack([bx * 0.8, np.full_like(c, ys + 0.045), mz + 0.9 * bz]),
+        np.column_stack([bx * 0.7, np.full_like(c, ys + 0.095), mz - 0.006 + 1.1 * bz]),
+        np.column_stack([0.045 * k["mw"] * c, np.full_like(c, ys + 0.14), mz + 0.022 * sn]),  # ellipse: no flat run
     ]
+    zig = np.where(np.arange(len(c)) % 2, 0.003, -0.003)  # hidden bag: alternate depth, no coplanar runs
+    bag_rings[2][:, 1] += zig
+    bag_rings[3][:, 1] += zig
     bag = []
     for i, pts in enumerate(bag_rings):
         prev = _ring(bm, prev, pts, 1 if i == 0 else 2, info["mat_faces"][1 if i == 0 else 2])
         bag.append(prev)
-    _cap(bm, prev, (0, ys + 0.155, mz), 2)
+    _cap(bm, prev, (0, ys + 0.21, mz), 2)  # deep pointed cap: a flat fan's coplanar tris z-fight in qa
     info["rings"]["mouth"] = rings
     info["bag"]["mouth"] = bag
     info.update(ys=ys, mz=mz, ez=ez, n=n)
@@ -412,24 +454,20 @@ def _eye(name, centre, k, mats):
     ly = -math.sqrt(R * R - lim * lim)                # limbus plane (front is -Y)
     rc = 0.0325                                       # cornea curvature radius (7.8 mm)
     cy = ly + math.sqrt(rc * rc - lim * lim)          # cornea sphere centre
-    prof = [(0.0, R)]
-    for i in range(1, 12):
-        a = math.pi * i / 12 * (math.pi - math.asin(lim / R)) / math.pi
-        prof.append((R * math.sin(a), R * math.cos(a)))
-    prof.append((lim, ly))
-    top = math.asin(lim / rc)
-    for i in range(1, 4):
-        a = top * (1 - i / 4)
-        prof.append((rc * math.sin(a), cy - rc * math.cos(a)))
-    prof.append((0.0, cy - rc))
-    v1, f1, row = _lathe(prof, 24)
-    fm = [1 if r >= 12 else 0 for r in row]          # 0 sclera, 1 cornea
-    iris = [(lim * (1 - i / 5), ly + 0.002 + 0.0012 * (i / 5) ** 2) for i in range(5)] + [(0.0, ly + 0.0034)]
-    v2, f2, row2 = _lathe(iris, 24)
+    # qa welds points closer than 0.05 cm and flags parallel faces whose centres share a 0.1 cm cell, so small
+    # parts stay coarse and every pole is a cone, never a flat fan
+    prof = [(0.0, R + 0.012)]                         # back pole pulled out into a cone (hidden in the socket)
+    span = math.pi - math.asin(lim / R)
+    prof += [(R * math.sin(span * i / 9), R * math.cos(span * i / 9)) for i in range(1, 9)]
+    prof += [(lim, ly), (0.0, cy - rc)]               # limbus, then the cornea dome as one fan to its apex
+    v1, f1, row = _lathe(prof, 16)
+    fm = [1 if r >= 9 else 0 for r in row]           # 0 sclera, 1 cornea
+    iris = [(0.0, ly + 0.025), (0.95 * lim, ly + 0.004), (0.3 * lim, ly + 0.0045), (0.0, ly + 0.0145)]  # closed: back cone, iris ring, pupil cone
+    v2, f2, row2 = _lathe(iris, 12)
     base = len(v1)
     verts = v1 + v2
     faces = f1 + [[i + base for i in f] for f in f2]
-    fm += [3 if r >= 3 else 2 for r in row2]          # 2 iris, 3 pupil (inner 40 %)
+    fm += [3 if r >= 2 else 2 for r in row2]          # 2 iris, 3 pupil
     verts = [(x + centre[0], y + centre[1], z + centre[2]) for x, y, z in verts]
     return _object(name, verts, faces, mats, fm, origin=centre)
 
@@ -445,13 +483,13 @@ def _arch(y0, z_top, z_bot, k, gum_z, upper):
     verts, faces = [], []
     h = z_top - z_bot
     for side in (1, -1):
-        at = 0.0
+        at = 0.002  # teeth stay > 0.05 cm apart (qa welds closer points)
         for w in widths:
             w *= scale
             mid = np.interp(at + w / 2, arc, xs)
             at += w
             ang = math.atan(2 * c * mid)
-            pts, fs = _rounded_box((w * 0.95, 0.012 if w < 0.03 else 0.02, h))
+            pts, fs = _rounded_box((w * 0.85, 0.012 if w < 0.03 else 0.02, h))
             rot = np.array(Matrix.Rotation(side * ang, 3, "Z"))
             pts = pts @ rot.T + [side * mid, y0 + c * mid * mid + 0.006, (z_top + z_bot) / 2]
             n0 = len(verts)
@@ -473,6 +511,9 @@ def _arch(y0, z_top, z_bot, k, gum_z, upper):
         for j in range(6):
             a0, b0 = rows[i], rows[i + 1]
             faces.append([a0 + j, a0 + (j + 1) % 6, b0 + (j + 1) % 6, b0 + j])
+    for r, x in ((rows[0], path[0]), (rows[-1], path[-1])):  # closed ends
+        verts.append([x * 1.04, y0 + c * x * x + 0.006, gum_z])
+        faces += [[r + j, r + (j + 1) % 6, len(verts) - 1] for j in range(6)]
     return verts, faces, tooth_faces
 
 
@@ -497,9 +538,9 @@ def _ear(side, centre, k):
     rows = {"f": [], "b": []}
     for kind in ("f", "b"):
         rows[kind].append([len(verts)])
-        verts.append((0.012 if kind == "f" else -0.008, 0.0, 0.0))
+        verts.append((0.012 if kind == "f" else -0.03, 0.0, 0.0))  # both centres are cones, not flat fans (the back one is inside the head)
         for j in range(1, J):
-            r = j / J
+            r = (j / J) ** 0.6  # first ring at 0.34: tiny centre fans z-fight in qa
             hf = front_h(r, th)
             hb = -0.008 + (front_h(1.0, th) - 0.006 + 0.008) * r ** 2
             hx = hf if kind == "f" else hb
@@ -652,22 +693,22 @@ def build_head(p):
         wv += [(cpos[0] + a * 1.4, cpos[1] + b, cpos[2] + c * 1.2) for a, b, c in v]
         wf += [[i + n0 for i in q] for q in fc]
         wm += [0] * len(fc)
-        low = margin[margin[:, 2] < ez + k["tilt"] * 0.5]
+        low = margin[(margin[:, 2] < ez + k["tilt"] * 0.5) & (np.abs(margin[:, 0] - inner[0]) > 0.014)]  # clear of the caruncle
         low = low[np.argsort(low[:, 0])]
         if len(low) >= 2:
             toward = centre - low
             toward /= np.linalg.norm(toward, axis=1, keepdims=True)
             n0 = len(wv)
-            wv += (low + [0, -0.0005, 0]).tolist() + (low + toward * 0.0025).tolist()
+            wv += (low + [0, -0.0005, 0]).tolist() + (low + toward * 0.0035).tolist()
             m = len(low)
             wf += [[n0 + i, n0 + i + 1, n0 + m + i + 1, n0 + m + i] for i in range(m - 1)]
             wm += [1] * (m - 1)
     parts["eyewet"] = _object(prefix + "_eyewet", wv, wf, [mats["Caruncle"], mats["TearLine"]], wm)
     # teeth, gums, tongue
     ys, mz = info["ys"], info["mz"]
-    tv, tf, nt = _arch(ys + 0.012, mz + 0.03, mz - 0.004, k, mz + 0.038, True)
+    tv, tf, nt = _arch(ys + 0.012, mz + 0.038, mz - 0.004, k, mz + 0.038, True)  # roots end mid-gum
     parts["teeth_U"] = _object(prefix + "_teeth_U", tv, tf, [mats["Teeth"], mats["Gums"]], [0] * nt + [1] * (len(tf) - nt))
-    tv, tf, nt = _arch(ys + 0.016, mz - 0.008, mz - 0.036, k, mz - 0.042, False)
+    tv, tf, nt = _arch(ys + 0.016, mz - 0.008, mz - 0.042, k, mz - 0.042, False)
     parts["teeth_L"] = _object(prefix + "_teeth_L", tv, tf, [mats["Teeth"], mats["Gums"]], [0] * nt + [1] * (len(tf) - nt))
     pts, fs = _rounded_box((0.09 * k["mw"], 0.11, 0.034), 3)
     pts = pts + [0, ys + 0.085, mz - 0.022]
@@ -684,6 +725,12 @@ def build_head(p):
         ev += v
         ef += [[i + n0 for i in q] for q in fc]
     parts["ears"] = _object(prefix + "_ears", ev, ef, [mats["Skin"]])
+    for name in ("eyewet", "teeth_U", "teeth_L", "tongue", "ears"):  # pivot on the part's base (qa); eyes keep a centre pivot to aim
+        ob = parts[name]
+        co = np.array([tuple(v.co) for v in ob.data.vertices])
+        base = Vector(((co[:, 0].min() + co[:, 0].max()) / 2, (co[:, 1].min() + co[:, 1].max()) / 2, co[:, 2].min()))
+        ob.data.transform(Matrix.Translation(-base))
+        ob.location = base
     # head heights -> metres
     for ob in parts.values():
         ob.data.transform(Matrix.Scale(H, 4))

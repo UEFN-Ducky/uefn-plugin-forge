@@ -1,3 +1,11 @@
+---
+description: "Forge realistic human head: one head call (sex, age, build, 14 anatomy sliders, tone, eye colour) builds a quad head with eye, mouth and nasolabial loops, eyeballs with cornea and iris parallax, teeth, tongue, mouth bag, ears and SSS skin; proportions, hero pass (uv, bake, face_shapes, lods) and checks"
+metadata:
+  label: "Realistic head"
+  default_enabled: false
+  load_condition: "Building a realistic (not cartoon) human head or face, adding realistic eyes, teeth or skin, or making face blendshapes on a realistic head"
+---
+
 # Realistic head
 
 One call builds a game-ready human head: a quad shell with real edge loops, eyeballs, teeth, tongue, mouth bag, ears and SSS skin. Cartoon faces use `cartoon_face` instead.
@@ -11,7 +19,7 @@ One call builds a game-ready human head: a quad shell with real edge loops, eyeb
 ]}
 ```
 
-Result: `head adult male 12.2k tris 97% quads, eyes 2, teeth, mouth bag, 6 groups` (all parts; the head shell is about 7k).
+Result: `head adult male 11.0k tris 98% quads, eyes 2, teeth, mouth bag, 6 groups` (all parts; the head shell is about 7k).
 
 | Param | Values |
 |---|---|
@@ -45,16 +53,23 @@ Mix sliders for any face. Never encode ethnicity as a preset. Build the look fro
 
 ## Hero pass (after `head`)
 
-1. `{"op": "sculpt_hd", "id": "<head>", "params": {"levels": 3, "detail": "pores"}}` adds tertiary pores in a sidecar.
-2. `{"op": "uv", "id": "<head>", "params": {"method": "seams", "res": 2048}}`, then `{"op": "bake", "id": "<head>", "params": {"from_high": true, "maps": ["normal"]}}` bakes a pore normal.
-3. `{"op": "hair", "id": "<head>", "params": {"style": "short"}}`, then `hair_cards`.
-4. `{"op": "face_shapes", "params": {"ids": ["<head>"], "set": "arkit52"}}` adds blendshapes on the named groups.
-5. `{"op": "ref_compare", "params": {"id": "<head>", "front": "front.png", "side": "side.png", "min_iou": 0.85}}` checks likeness.
+Order matters: `head` → `face_shapes` → `lods`. LOD1 and later drop shape keys, so add blendshapes before building LODs.
+
+1. `{"op": "qa", "params": {"ids": ["<head ids>"], "profile": "uefn", "budget": "char"}}`: expect a score of 88 with 0 errors (head alone: 100). The warnings left are intended: the eye pivots sit at the eyeball centre so the eyes can aim, the tear lines are open strips, and the set uses 13 slots.
+2. `{"op": "sculpt_hd", "id": "<head>", "params": {"levels": 3, "detail": "pores"}}` adds tertiary pores in a sidecar.
+3. `{"op": "uv", "id": "<head>", "params": {"method": "seams", "res": 2048, "texel": 0}}`: `texel: 0` fills the map (about 67% packed, 4.6k px/m). The default 512 px/m packs a 24 cm head into about 3% of the map.
+4. `{"op": "bake", "id": "<head>", "params": {"from_high": true, "maps": ["normal"]}}` bakes a pore normal.
+5. `{"op": "hair", "id": "<head>", "params": {"style": "short"}}`, then `hair_cards`.
+6. `{"op": "face_shapes", "params": {"ids": ["<head>"], "set": "arkit52"}}` adds blendshapes on the named groups.
+7. `{"op": "lods", "id": "<head>", "params": {"ratios": [1, 0.5, 0.25, 0.1]}}`, last.
+8. `{"op": "ref_compare", "params": {"id": "<head>", "front": "front.png", "side": "side.png", "min_iou": 0.85}}` checks likeness.
 
 ## Done when
 
 - `look` front, three and side show the eyes on the half line, lips with a border, and ears level with the nose and brow.
-- `{"op": "topology", "id": "<head>"}` reports quads ≥ 85%. `{"op": "qa", "params": {"budget": "char"}}` passes.
+- `{"op": "topology", "id": "<head>"}` reports quads ≥ 85%.
+- `qa` (step 1) scores ≥ 85 with 0 errors.
+- `uv` reports more than 40% packed.
 
 ## Do / don't
 

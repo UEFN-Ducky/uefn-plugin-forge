@@ -15,6 +15,7 @@ except ImportError:
     sys.exit(subprocess.call([py, "-c", code]))
 
 import json
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -137,6 +138,26 @@ def test_variants():
     assert span(w) >= span(a), "nose_width=1 should not narrow the nose"
 
 
+def test_qa_rules_every_part():
+    """qa's rules in cm: no two points of a part within 0.05 (they weld into non-manifold edges) and no parallel
+    faces whose centres share a 0.1 cell (z-fight), for every variant."""
+    for kw in ({"sex": "male"}, {"sex": "female"}, {"age": "child"}, {"age": "elder", "build": "heavy"},
+               {"sex": "female", "shape": {"eye_size": 1, "eye_spacing": -1, "mouth_width": 1, "lip_full": 1}}):
+        parts, _ = build(**kw)
+        for name, ob in parts.items():
+            mw = ob.matrix_world
+            co = np.array([tuple(mw @ v.co) for v in ob.data.vertices]) * 100
+            d = np.linalg.norm(co[:, None] - co[None], axis=2)
+            np.fill_diagonal(d, 9)
+            assert d.min() >= 0.05, "%s %s: points %.3f cm apart" % (kw, name, d.min())
+            seen, pairs = {}, 0
+            for q in ob.data.polygons:
+                key = tuple(round(v / 0.1) for v in (mw @ q.center) * 100)
+                pairs += any(abs(q.normal.dot(o)) > 0.99 for o in seen.get(key, ()))
+                seen.setdefault(key, []).append(q.normal.copy())
+            assert not pairs, "%s %s: %d z-fight face pairs" % (kw, name, pairs)
+
+
 def test_params_and_registration():
     for bad in ({"sex": "x"}, {"age": "teen"}, {"shape": {"snout": 1}}, {"shape": {"chin": 3}}, {"tone": 2}, {"height_cm": 2}, {"hat": 1}):
         try:
@@ -147,6 +168,13 @@ def test_params_and_registration():
     assert "head" in hq_pkg.HQ_OPS and callable(engine_head.op_head)
     assert len(hq_pkg.run_hq(None, "help", {"op": "head"})["summary"]) <= 400
     assert 0.25 < hq_head.roughness(0.5, 0.72) < 0.4 < hq_head.roughness(0.41, 0.38), "T-zone must be glossier than cheeks"
+    doc = (Path(__file__).resolve().parents[1] / "skills" / "forge" / "references" / "realistic_head.md").read_text(encoding="utf-8")
+    head, sep, _ = doc[4:].partition("\n---\n")
+    assert doc.startswith("---\n") and sep, "realistic_head.md needs a --- frontmatter block"
+    meta = dict(line.strip().split(": ", 1) for line in head.splitlines() if ": " in line)
+    assert {"description", "label", "load_condition"} <= set(meta) and all(meta[k].strip('"') for k in meta), meta
+    named = set(re.findall(r'"op": "([a-z_]+)"', doc)) | {"head", "face_shapes", "lods", "hair_cards", "topology"}
+    assert named <= set(hq_pkg.HQ_OPS), "realistic_head.md names ops Forge lacks: %s" % (named - set(hq_pkg.HQ_OPS))
 
 
 class _Api:
@@ -182,6 +210,19 @@ def test_through_forge_batch():
             skin = next(m for m in scene.data["materials"] if m["name"] == "Head_Skin")
             image = next(layer for layer in skin["spec"]["layers"] if layer["type"] == "image")
             assert image["target"] == "roughness" and (scene.folder / "textures" / image["image"]).is_file()
+            # the documented chain: qa char >= 85 with no errors, then the hero uv packs > 40 %
+            ids = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith("Head")]
+            qa = t["forge_hq"](name="HeadTest", op="qa", params={"ids": ids, "profile": "uefn", "budget": "char", "verbose": True})
+            print("qa:", qa.get("summary"))
+            assert qa.get("score", 0) >= 85 and qa.get("errors") == 0, qa
+            head = next(n["id"] for n in scene.data["nodes"] if n.get("name") == "Head")
+            alone = t["forge_hq"](name="HeadTest", op="qa", params={"id": head, "profile": "uefn", "budget": "char"})
+            print("qa head:", alone.get("summary"))
+            assert alone.get("score", 0) >= 85 and alone.get("errors") == 0, alone
+            uv = t["forge_hq"](name="HeadTest", op="uv", id=head, params={"method": "seams", "res": 2048, "texel": 0})
+            print("uv:", uv.get("summary"))
+            packed = float(re.search(r"(\d+(?:\.\d+)?)% packed", uv["summary"]).group(1))
+            assert packed > 40, uv
         finally:
             client.stop()
             forget("HeadTest")
