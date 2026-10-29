@@ -273,7 +273,9 @@ def car_swap(scene, p):
         cp = n["car_part"]
         kind = over.get("kind") or cp["kind"]
         spec = _spec(dict(cp["params"], **dict(over, kind=kind)))
-        specs.append(dict(spec, side=cp["side"], name=n["name"], at=[0.0, 0.0, 0.0]))
+        # built at its world spot so the engine's sliver pass sees qa's z-fight cells; the old transform is copied back below
+        at = [a + b for a, b in zip(group["transform"]["pos"], n["transform"]["pos"])]
+        specs.append(dict(spec, side=cp["side"], name=n["name"], at=at))
     before = _mats(scene)
     result, changed = engine(scene, "car_part", [], {"parts": specs})
     _keep_mats(scene, before, None)

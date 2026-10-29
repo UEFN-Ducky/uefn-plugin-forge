@@ -14,6 +14,7 @@ from . import tools
 from .check import check_mesh
 from .engine import client, runtime
 from .hq import vehicle as hqv
+from .hq.qa import _zfight
 from .scene import dispatch, forget, load
 
 _READY = runtime.engine_status()["state"] == "ready"
@@ -90,6 +91,14 @@ class Parts(_Engine):
                           if i["severity"] == "error"]
                 self.assertEqual(errors, [], "%s: non-manifold or zero-area faces" % kind)
                 x += 300
+
+    def test_no_zfight_any_kind_or_style(self):  # qa's z-fight cells are world-anchored: build off the origin
+        for kind in hqv.KINDS:
+            for style in hqv.STYLES:
+                with self.subTest(kind=kind, style=style):
+                    out = self.hq("car_part", kind=kind, style=style, at=[37.3, -11.7, 5.1])
+                    scene = load(self.name)
+                    self.assertEqual(_zfight([scene.world_mesh(scene.node(out["ids"][0]))], 0.1), 0)
 
     def test_documented_part_qa(self):  # the call vehicles.md gives for one part
         part = self.hq("car_part", kind="wheel", tire="225/45R17", spokes="10")
@@ -208,6 +217,15 @@ class Cars(_Engine):
             self.assertEqual(n["skin"]["bone"], slot[6:] + "_wheel")
         mirror = self.hq("car_swap", car="Car_Limo", slot="mirror_L", style="sport")
         self.assertIn("1 x mirror", mirror["summary"])
+
+    def test_documented_limo_batch(self):  # vehicles.md: car -> car_swap(mirror, classic) -> qa
+        car = self.hq("car", body="limo", length_cm=720, paint="#101014", parts={"rim": "mesh"}, name="DocLimo")
+        gid = car["ids"][0]
+        self.hq("car_swap", car=gid, slot="mirror", style="classic")
+        qa = self.t["forge_hq"](name=self.name, op="qa", params={"id": gid, "profile": "uefn", "budget": "hero"})
+        self.assertEqual(qa["errors"], 0, qa)
+        scene = load(self.name)
+        self.assertEqual(_zfight([scene.world_mesh(n) for n in hqv.car_nodes(scene, gid)], 0.1), 0)
 
     def test_kart(self):
         out, scene, gid, nodes = self.build("kart")
