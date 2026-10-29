@@ -185,6 +185,34 @@ class SendTests(unittest.TestCase):
         many = {"folder": "/a/F", "assets": [{"mesh": "/a/SK_%d" % i, "materials": ["/a/MI_Long_Name_%d" % i] * 2} for i in range(30)]}
         self.assertLessEqual(len(str(brief(many))), 300)
 
+    def test_send_keeps_existing_prefix(self):
+        """A node already named SM_X lands as SM_X, never SM_SM_X; a plain X still gets SM_."""
+        from pathlib import Path
+        from .scene import dispatch, forget
+        from .uefn import _asset_name, send_to_uefn
+        calls = []
+
+        def listener(command, params, timeout=None):
+            calls.append((command, params))
+            if command == "import_asset":
+                stem = Path(params["source_file"]).stem
+                return {"imported": [f"{params['destination_path']}/StaticMeshes/{stem}.{stem}"]}
+            if command == "create_material_instance":
+                return {"material_instance_path": f"{params['folder']}/{params['asset_name']}"}
+            return {"get_project_info": {"content_root": "/Island"}, "forge_build_master": {"material_path": "/Island/M_Forge_Master"},
+                    "validate_uefn_asset": {"ok": True}}.get(command, {"ok": True})
+
+        with tempfile.TemporaryDirectory(prefix="forge-send-") as tmp, patch.dict(os.environ, {"FORGE_SCENES_DIR": tmp}):
+            for scene, node in (("Lamp", "SM_Headlight"), ("Car", "Bumper")):
+                dispatch("", "scene_new", {"name": scene})
+                dispatch(scene, "add", {"kind": "box", "name": node})
+                send_to_uefn(scene, listener, verbose=True)
+                forget(scene)
+        stems = sorted(Path(p["source_file"]).stem for c, p in calls if c == "import_asset" and p["source_file"].endswith((".glb", ".fbx")))
+        self.assertEqual(stems, ["SM_Bumper", "SM_Headlight"], calls)
+        self.assertEqual(_asset_name("SK_", "sk_Hero"), "sk_Hero")
+        self.assertEqual(_asset_name("SM_", "Smoke"), "SM_Smoke")  # "Sm" alone is no prefix
+
 
 class StoredLodTests(unittest.TestCase):
     def send(self, hq, **kwargs):

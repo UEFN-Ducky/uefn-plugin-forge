@@ -128,11 +128,20 @@ def _safe_name(name: str) -> str:
     return cleaned[:48] or "Forge"
 
 
+_PREFIXES = ("sm_", "sk_", "mi_", "t_", "as_")
+
+
+def _asset_name(prefix: str, name: str) -> str:
+    """prefix + safe name, unless the name already carries an asset prefix (SM_X stays SM_X, never SM_SM_X)."""
+    safe = _safe_name(name)
+    return safe if safe.casefold().startswith(_PREFIXES) else prefix + safe
+
+
 def export_skinned(scene: Scene, folder: Path) -> list[dict[str, Any]]:
     mats = scene.materials()
     out = []
     for item in collect_skinned(scene):
-        name = "SK_" + _safe_name(item["name"])
+        name = _asset_name("SK_", item["name"])
         path = write_glb(item["mesh"], folder / f"{name}.glb", mats, skin=item)
         order = list(dict.fromkeys(item["mesh"].face_mat))
         out.append({"name": name, "glb": str(path), "materials": order,
@@ -145,7 +154,7 @@ def export_glbs(scene: Scene, mode: str, folder: Path) -> list[dict[str, Any]]:
     out = []
     used_names = set()
     for item in collect_exports(scene, mode):
-        name = "SM_" + _safe_name(str(item["name"]))
+        name = _asset_name("SM_", str(item["name"]))
         base = name
         suffix = 2
         while name.casefold() in used_names:
