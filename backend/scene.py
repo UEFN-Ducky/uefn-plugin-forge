@@ -125,6 +125,56 @@ def _b64(values: array.array) -> str:
     return base64.b64encode(values.tobytes()).decode("ascii")
 
 
+# Oct 28 2026: a 168k-tri lion (fur shells merged in) froze Ducky when the dock opened it.
+# Like Blender's viewport, heavy meshes are shown as a lighter preview; the full mesh stays
+# on disk for HQ ops, render and send.
+PREVIEW_TRIS = 60000
+
+
+def _preview(mesh: Mesh, limit: int = PREVIEW_TRIS) -> Mesh:
+    """Vertex-clustered copy under `limit` triangles (one pass over the mesh per try)."""
+    if mesh.tri_count() <= limit or not mesh.verts:
+        return mesh
+    lo, hi = mesh.bounds()
+    size = max(hi[i] - lo[i] for i in range(3)) or 1.0
+    cells = max(8, int((limit ** 0.5) * 1.6))
+    has_uv = len(mesh.uvs) == len(mesh.faces)
+    out = mesh
+    for _ in range(10):
+        cell = size / cells
+        slot: dict = {}
+        verts: list = []
+        remap = []
+        for v in mesh.verts:
+            key = (int((v[0] - lo[0]) / cell), int((v[1] - lo[1]) / cell), int((v[2] - lo[2]) / cell))
+            i = slot.get(key)
+            if i is None:
+                i = slot[key] = len(verts)
+                verts.append([float(v[0]), float(v[1]), float(v[2])])
+            remap.append(i)
+        faces, mats, uvs = [], [], []
+        for fi, face in enumerate(mesh.faces):
+            ring, corners = [], []
+            for ci, vi in enumerate(face):
+                r = remap[vi]
+                if r not in ring:
+                    ring.append(r)
+                    if has_uv:
+                        corners.append(mesh.uvs[fi][ci])
+            if len(ring) < 3:
+                continue
+            faces.append(ring)
+            mats.append(mesh.face_mat[fi] if fi < len(mesh.face_mat) else "default")
+            if has_uv:
+                uvs.append(corners)
+        out = Mesh()
+        out.verts, out.faces, out.face_mat, out.uvs, out.smooth = verts, faces, mats, uvs, mesh.smooth
+        if out.tri_count() <= limit:
+            return out
+        cells = max(8, int(cells * 0.7))
+    return out
+
+
 def _indexed(mesh: Mesh, pid: str, uv: bool = False) -> dict[str, Any]:
     """Packed float32 positions and uint32 indices. Smooth meshes get averaged normals in the view.
 
@@ -499,7 +549,11 @@ class Scene:
     def packed_geometry(self, key, mesh, uv=False):
         cached = self._geometry_cache.get(key)
         if cached is None or cached[0] is not mesh or ("ub" in cached[1]) != uv:
-            packed = _indexed(mesh, key, uv)
+            full = mesh.tri_count()
+            view = _preview(mesh)
+            packed = _indexed(view, key, uv)
+            if view is not mesh:
+                packed["preview"], packed["full_tris"] = True, full
             packed["revision"] = secrets.token_hex(8)
             self._geometry_cache[key] = (mesh, packed)
             return packed
