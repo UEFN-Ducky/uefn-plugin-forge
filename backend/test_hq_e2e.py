@@ -96,7 +96,18 @@ class EndToEnd(unittest.TestCase):
         crate = self.batch(name, [{"tool": "forge_add", "kind": "box", "object_name": "Crate", "pos": [200, 0, 0],
                                    "params": {"w": 60, "d": 60, "h": 60}}])["ids"][0]
         head, torso = parts["Head"], parts["Torso"]
+        # cartoon_face needs an untouched round head facing -Y; the hero head gets hair and fur below.
+        ball = self.batch(name, [{"tool": "forge_add", "kind": "sphere", "object_name": "ToonHead", "pos": [-200, 0, 100],
+                                  "params": {"radius": 25}}])["ids"][0]
         preset = next(iter(__import__("backend.hq.materials", fromlist=["presets"]).presets()))
+        # A tiny two-colour drawing on white, for the reference ops.
+        from PIL import Image, ImageDraw
+        art = Path(self.tmp.name) / "ref_front.png"
+        img = Image.new("RGB", (256, 256), "white")
+        draw = ImageDraw.Draw(img)
+        draw.ellipse((48, 40, 208, 232), fill=(230, 160, 60))
+        draw.ellipse((96, 90, 160, 150), fill=(200, 80, 20))
+        img.save(art)
         # Order matters only where an op reads another's output (hair before hair_cards).
         cases = [
             ("recipe", {"recipe": "barrel"}),
@@ -119,6 +130,13 @@ class EndToEnd(unittest.TestCase):
             ("cloth", {"preset": "cape", "collide": torso, "frames": 8}),
             ("rig_template", {"template": "tail_chain", "ids": [crate], "count": 3}),
             ("creature", {"kind": "big_cat", "length": 120}),
+            ("blockout_from_refs", {"front": str(art), "height": 60, "name": "RefBody"}),
+            ("ref_parts", {"id": head, "front": str(art), "k": 2}),
+            ("tufts", {"id": head, "mane": "lion"}),
+            ("cartoon_face", {"head": ball, "species": "cat"}),
+            ("paint_strokes", {"id": crate, "base": [0.9, 0.6, 0.2], "shadow": [0.5, 0.25, 0.1], "highlight": [1, 0.85, 0.5], "size": 256}),
+            ("project_ref", {"id": crate, "images": {"front": str(art)}, "size": 256}),
+            ("toon", {"ids": [crate]}),
             ("export", {"target": "generic"}),
         ]
         # These spend the person's Tripo/Meshy credits; test_hq_generate covers them with a mocked provider.
