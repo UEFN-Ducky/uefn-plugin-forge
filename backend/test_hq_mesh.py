@@ -216,6 +216,21 @@ def test_lods_cleanup():
     assert watertight(ob) and len(ob.data.vertices) == 32 * 15 + 2, len(ob.data.vertices)
 
 
+def test_lods_with_shape_keys():
+    # Oct 29 2026: head -> face_shapes -> lods raised; decimate can't apply on a mesh with shape keys.
+    fresh()
+    ob = sphere("head", seg=32)
+    ob.shape_key_add(name="Basis")
+    for n in ("smile", "blink"):
+        k = ob.shape_key_add(name=n)
+        k.data[0].co.z += 0.1
+    r = engine_mesh.lods(ob, {"ratios": [1, 0.5, 0.25, 0.1], "keep": True})
+    short(r)
+    assert len(r["lods"]) == 4 and r["keys_dropped_lod1+"] == 3 and "keys kept on LOD0" in r["summary"], r
+    assert [k.name for k in bpy.data.objects[r["lods"][0]].data.shape_keys.key_blocks] == ["Basis", "smile", "blink"]
+    assert r["tris"][1] < r["tris"][0] and len(ob.data.shape_keys.key_blocks) == 3
+
+
 def test_retopo_methods():
     fresh()
     ob = sphere("s", seg=32)

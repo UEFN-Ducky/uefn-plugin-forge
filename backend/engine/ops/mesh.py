@@ -314,12 +314,15 @@ def lods(ob, p):
     nanite = bool(p.get("nanite", False))
     removed = _cleanup(ob, 0.01 * p.get("unit", 1.0)) if p.get("cleanup") else 0
     out, counts = [], []
+    keys = len(ob.data.shape_keys.key_blocks) if ob.data.shape_keys else 0
     for i, r in enumerate(ratios):
         lod = ob.copy()
         lod.data = ob.data.copy()
         lod.name = f"{ob.name}_LOD{i}"
         bpy.context.scene.collection.objects.link(lod)
         if r < 1:
+            if keys:  # decimate can't be applied with shape keys (head after face_shapes): LOD0 keeps them
+                lod.shape_key_clear()
             m = lod.modifiers.new("hq_lod", "DECIMATE")
             m.decimate_type, m.ratio = "COLLAPSE", float(r)
             _pin_seams(lod, m)
@@ -329,8 +332,10 @@ def lods(ob, p):
         counts.append(_stats(lod)["tris"])
         if not p.get("keep"):  # Export rebuilds LODs from node_data; keep=True leaves the objects
             bpy.data.objects.remove(lod, do_unlink=True)
-    return {"summary": "/".join(map(str, counts)) + (" nanite" if nanite else "") + (" cleaned -%d verts" % removed if removed else ""),
+    return {"summary": "/".join(map(str, counts)) + (" nanite" if nanite else "") + (" cleaned -%d verts" % removed if removed else "")
+            + (" (keys kept on LOD0)" if keys and len(ratios) > 1 else ""),
             "lods": out, "tris": counts, "nanite": nanite, "ratios": ratios, "removed": removed,
+            "keys_dropped_lod1+": keys if any(r < 1 for r in ratios) else 0,
             "node_data": {"ratios": ratios, "tris": counts, "nanite": nanite}}
 
 
