@@ -273,6 +273,180 @@ def build_creature(p):
     return ob
 
 
+_CUBES = {}
+
+
+def _cube_sphere(n):
+    """All-quad sphere (6 n^2 quads, n even so each cube face has a centre vertex): unit points + faces."""
+    if n not in _CUBES:
+        bm = bmesh.new()
+        bmesh.ops.create_cube(bm, size=2.0)
+        bmesh.ops.subdivide_edges(bm, edges=bm.edges[:], cuts=n - 1, use_grid_fill=True)
+        bm.verts.ensure_lookup_table()
+        pts = np.array([v.co.normalized() for v in bm.verts], np.float64)
+        faces = [[v.index for v in f.verts] for f in bm.faces]
+        bm.free()
+        _CUBES[n] = (pts, faces)
+    return _CUBES[n]
+
+
+def _spline(pts, t):
+    """Catmull-Rom through pts (uniform), t in 0..1 -> (N, 3)."""
+    pts = np.asarray(pts, np.float64)
+    k = len(pts) - 1
+    s = np.clip(t, 0, 1) * k
+    i = np.minimum(s.astype(int), k - 1)
+    u = (s - i)[:, None]
+    p0, p1, p2, p3 = pts[np.maximum(i - 1, 0)], pts[i], pts[i + 1], pts[np.minimum(i + 2, k)]
+    return 0.5 * (2 * p1 + (p2 - p0) * u + (2 * p0 - 5 * p1 + 4 * p2 - p3) * u ** 2 + (3 * p1 - p0 - 3 * p2 + p3) * u ** 3)
+
+
+def _tube(n, path, radii, blunt=3.0):
+    """Closed quad tube along a spline: path points, radii [(t, rx, ry)]; ends are rounded caps.
+
+    Returns verts, faces and per-vertex (unit sphere point, centre, ry) for material picks.
+    """
+    pts, faces = _cube_sphere(n)
+    x, y, z = pts.T
+    t = (z + 1) / 2
+    c = _spline(path, t)
+    tan = _spline(path, np.clip(t + 0.01, 0, 1)) - _spline(path, np.clip(t - 0.01, 0, 1))
+    tan /= np.linalg.norm(tan, axis=1)[:, None] + 1e-12
+    ref = np.where((abs(tan[:, :1]) > 0.9), np.array([[0, 0, 1.0]]), np.array([[1.0, 0, 0]]))
+    n1 = ref - (ref * tan).sum(1)[:, None] * tan
+    n1 /= np.linalg.norm(n1, axis=1)[:, None]
+    n2 = np.cross(tan, n1)
+    r = np.asarray(radii, np.float64)
+    rx, ry = np.interp(t, r[:, 0], r[:, 1]), np.interp(t, r[:, 0], r[:, 2])
+    hl = np.sqrt(x * x + y * y)
+    g = np.clip(1 - np.abs(z) ** blunt, 0, 1) ** (1 / blunt)  # blunt > 2 squares the caps off
+    k = np.where(hl > 1e-9, g / np.maximum(hl, 1e-9), 0.0)
+    v = c + (x * k * rx)[:, None] * n1 + (y * k * ry)[:, None] * n2
+    return v, faces, pts, c, ry
+
+
+def _ellipsoid(n, centre, radii):
+    pts, faces = _cube_sphere(n)
+    return np.asarray(centre) + pts * np.asarray(radii), faces, pts
+
+
+def _toes(pts, v, centre, radii, grooves=3, depth=0.2):
+    """Press `grooves` vertical creases into the front of a paw (toward -Y)."""
+    x, y, z = pts.T
+    front = np.clip(-y, 0, 1) ** 2 * np.clip(1.2 - np.abs(z + 0.1) * 1.4, 0, 1)
+    cut = np.zeros(len(pts))
+    for xg in np.linspace(-0.55, 0.55, grooves):
+        cut += np.exp(-(((x - xg) / 0.13) ** 2))
+    k = 1 - depth * front * np.clip(cut, 0, 1)
+    return np.asarray(centre) + (v - np.asarray(centre)) * k[:, None]
+
+
+# preset: torso width, leg length, tail length, tail radius, default head_ratio
+KINDS = {"lion": (1.0, 1.0, 1.0, 0.045, 0.36), "cat": (0.85, 1.0, 1.5, 0.032, 0.34),
+         "dog": (0.95, 1.15, 0.9, 0.035, 0.30), "bear": (1.25, 0.9, 0.25, 0.07, 0.30)}
+POSES = ("sit", "stand")
+
+
+def _parts(kind, pose, head_ratio):
+    """Part list in height units (H=1): (name, slot, verts, faces, pts) pieces plus head and tail positions."""
+    w, leg, tl, tr, _ = KINDS[kind]
+    parts = []
+    neck = 1 - head_ratio * 0.9
+    sit = pose == "sit"
+    if sit:
+        body = [(0, 0.10, 0.02), (0, 0.08, 0.20), (0, 0.02, 0.45), (0, -0.03, neck)]
+        rad = [(0, .17 * w, .17 * w), (.3, .26 * w, .25 * w), (.65, .20 * w, .18 * w), (1, .13 * w, .12 * w)]
+        head = [0, -0.07, 1 - head_ratio / 2]
+        arm_top, arm_bot = 0.5, 0.07
+        fx, fy = 0.115 * w + 0.01, -0.15
+    else:
+        z0 = 0.30 * leg + 0.16
+        body = [(0, 0.28, z0), (0, 0.12, z0 + 0.02), (0, -0.08, z0 + 0.03), (0, -0.20, z0 + 0.12)]
+        rad = [(0, .14 * w, .14 * w), (.3, .17 * w, .17 * w), (.7, .16 * w, .16 * w), (1, .12 * w, .12 * w)]
+        head = [0, -0.26, 1 - head_ratio / 2]
+        arm_top, arm_bot = z0 + 0.04, 0.07
+        fx, fy = 0.09 * w + 0.01, -0.15
+    torso = _tube(20, body, rad, 2.5)
+    pts, c, ry = torso[2], torso[3], torso[4]
+    belly_face = (-(torso[0][:, 1] - c[:, 1]) / ry > 0.35) & (pts[:, 2] > -0.55) & (pts[:, 2] < 0.8)
+    parts.append(("torso", belly_face, torso[0], torso[1], None, None))
+    for sx in (-fx, fx):
+        v, f, _p, _c, _r = _tube(8, [(sx, -0.02, arm_top), (sx, fy + 0.04, arm_bot)],
+                                 [(0, .085 * w, .085 * w), (1, .068 * w, .068 * w)], 4.0)
+        parts.append(("leg", 0, v, f, None, None))
+        c = (sx, fy, 0.05)
+        r = (0.075 * w, 0.10, 0.05)
+        v, f, p = _ellipsoid(12, c, r)
+        parts.append(("paw", 2, _toes(p, v, c, r), f, None, None))
+    if sit:
+        for sx in (-0.205 * w, 0.205 * w):
+            c, r = (sx, 0.07, 0.17), (0.12 * w, 0.17, 0.17)
+            v, f, _p = _ellipsoid(10, c, r)
+            parts.append(("haunch", 0, v, f, None, None))
+            c, r = (sx * 1.02, -0.07, 0.04), (0.07 * w, 0.095, 0.045)
+            v, f, p = _ellipsoid(12, c, r)
+            parts.append(("paw", 2, _toes(p, v, c, r), f, None, None))
+    else:
+        for sx in (-0.09 * w - 0.01, 0.09 * w + 0.01):
+            v, f, _p, _c, _r = _tube(8, [(sx, 0.24, z0 + 0.04), (sx, 0.26, 0.07)],
+                                     [(0, .09 * w, .09 * w), (1, .068 * w, .068 * w)], 4.0)
+            parts.append(("leg", 0, v, f, None, None))
+            c, r = (sx, 0.22, 0.05), (0.07 * w, 0.095, 0.05)
+            v, f, p = _ellipsoid(12, c, r)
+            parts.append(("paw", 2, _toes(p, v, c, r), f, None, None))
+    if sit:
+        tail = [(0, 0.15, 0.10), (0.14, 0.27, 0.06), (0.22, 0.38, 0.14), (0.16, 0.46, 0.30), (0.20, 0.50, 0.40)]
+    else:
+        tail = [(0, 0.30, 0.50), (0.06, 0.40, 0.45), (-0.04, 0.50, 0.30), (0.06, 0.55, 0.15)]
+    tail = [(x, 0.15 + (y - 0.15) * tl, z) if sit else (x, 0.30 + (y - 0.30) * tl, z) for x, y, z in tail]
+    v, f, _p, _c, _r = _tube(8, tail, [(0, tr, tr), (.5, tr * .9, tr * .9), (1, tr * .75, tr * .75)], 4.0)
+    parts.append(("tail", 0, v, f, None, None))
+    return parts, head, list(tail[-1])
+
+
+def build_cartoon_body(p):
+    """One quad mesh (cm, feet on z=0, front toward -Y) with slots body, belly, paw, ear_inner."""
+    kind = p.get("kind", "lion")
+    pose = p.get("pose", "sit")
+    height = float(p.get("height", 60.0))
+    head_ratio = float(p.get("head_ratio") or KINDS[kind][4])
+    parts, head, tip = _parts(kind, pose, head_ratio)
+    verts, faces, slots = [], [], []
+    for name, slot, v, f, _pts, _extra in parts:
+        v = v.copy()
+        v[:, 2] = np.maximum(v[:, 2], 0.0)  # sitting weight rests flat on the ground plane
+        base = len(verts)
+        verts.extend((v * height).tolist())
+        faces.extend([[i + base for i in face] for face in f])
+        if name == "torso":  # slot is a per-vertex belly mask here
+            slots.extend([1 if all(slot[i] for i in face) else 0 for face in f])
+        else:
+            slots.extend([slot] * len(f))
+    me = bpy.data.meshes.new(p.get("name") or kind)
+    me.from_pydata(verts, [], faces)
+    me.polygons.foreach_set("material_index", np.array(slots, np.int32))
+    me.polygons.foreach_set("use_smooth", np.ones(len(faces), bool))
+    for name, color, rough in (("body", (0.86, 0.55, 0.2), 0.8), ("belly", (0.97, 0.88, 0.7), 0.8),
+                               ("paw", (0.75, 0.45, 0.17), 0.7), ("ear_inner", (0.95, 0.6, 0.6), 0.8)):
+        me.materials.append(_material(name, color, rough))
+    me.update()
+    ob = bpy.data.objects.new(me.name, me)
+    bpy.context.scene.collection.objects.link(ob)
+    ob["head_socket"] = [round(h * height, 2) for h in head]
+    ob["tail_tip"] = [round(t * height, 2) for t in tip]
+    return ob
+
+
+def op_cartoon_body(p):
+    ob = build_cartoon_body(p)
+    s = _stats(ob)
+    head, tip = list(ob["head_socket"]), list(ob["tail_tip"])
+    fmt = lambda a: "(%s)" % ",".join("%g" % round(c, 1) for c in a)  # noqa: E731
+    return {"summary": "CartoonBody %.1fk tris %d%% quads, head@%s tail_tip@%s" % (
+        s["tris"] / 1000, round(100 * s["quads"] / s["faces"]), fmt(head), fmt(tip)),
+        "head": head, "tail_tip": tip, **s, "scene": bridge.dump(p["scene"])}
+
+
 def op_creature(p):
     ob = build_creature(p)
     return {"summary": "%s %s: %d quads" % (p.get("kind"), p.get("build", "lean"), _stats(ob)["quads"]),

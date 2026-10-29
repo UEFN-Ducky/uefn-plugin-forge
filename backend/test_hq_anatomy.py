@@ -209,6 +209,99 @@ def test_ops_registered():
     assert callable(engine_anatomy.op_creature)
 
 
+_BODIES = {}
+
+
+def body(**kw):
+    key = tuple(sorted(kw.items()))
+    if key not in _BODIES:
+        if not _CACHE and not _BODIES:
+            fresh()
+        _BODIES[key] = engine_anatomy.build_cartoon_body(hq_anatomy.cartoon_params(kw))
+    return _BODIES[key]
+
+
+def paw_islands(ob):
+    """Connected groups of paw-slot faces: their lowest z (cm)."""
+    me = ob.data
+    parent = {}
+
+    def find(a):
+        while parent.setdefault(a, a) != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    paw = [q for q in me.polygons if q.material_index == 2]
+    for q in paw:
+        for v in q.vertices[1:]:
+            parent[find(v)] = find(q.vertices[0])
+    low = {}
+    for q in paw:
+        for v in q.vertices:
+            r = find(v)
+            low[r] = min(low.get(r, 1e9), me.vertices[v].co.z)
+    return sorted(low.values())
+
+
+def test_cartoon_body_lion_sit():
+    ob = body(kind="lion", pose="sit", height=60)
+    s = engine_anatomy._stats(ob)
+    assert 8000 <= s["tris"] <= 20000, s
+    assert s["quads"] / s["faces"] >= 0.85, s
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    assert all(len(e.link_faces) == 2 for e in bm.edges), "open or non-manifold edge"
+    assert all(e.is_manifold for e in bm.edges)
+    bm.free()
+    low = paw_islands(ob)
+    assert len(low) == 4 and max(low) < 1e-3, "paw islands touching the ground: %s" % low
+    assert ob.dimensions.z <= 60 * 0.9 and ob.dimensions.z > 40, tuple(ob.dimensions)
+    assert [m.name for m in ob.data.materials] == ["body", "belly", "paw", "ear_inner"]
+    assert any(q.material_index == 1 for q in ob.data.polygons), "no belly faces"
+    assert all(q.use_smooth for q in ob.data.polygons)
+
+
+def test_cartoon_body_sockets_and_result():
+    import json
+    import tempfile
+    ob = body(kind="lion", pose="sit", height=60)
+    head, tip = list(ob["head_socket"]), list(ob["tail_tip"])
+    assert 0.75 * 60 <= head[2] <= 60 and abs(head[0]) < 1 and head[1] <= 0, head
+    assert tip[1] > 10 and tip[2] > 0, tip  # tail points back and up
+    with tempfile.TemporaryDirectory() as tmp:
+        bpy.ops.wm.read_factory_settings(use_empty=True)
+        _BODIES.clear()
+        out = engine_anatomy.op_cartoon_body({"kind": "lion", "pose": "sit", "height": 60,
+                                              "scene": {"unit": 0.01, "folder": tmp}})
+        assert out["summary"].startswith("CartoonBody ") and "head@" in out["summary"] and "tail_tip@" in out["summary"], out["summary"]
+        assert len(json.dumps(hq_pkg.compact({k: v for k, v in out.items() if k != "scene"}))) <= 300
+        assert len(out["scene"]["objects"]) == 1 and len(out["scene"]["materials"]) == 4
+
+
+def test_cartoon_body_kinds_and_poses():
+    for kind in hq_anatomy.CARTOON_KINDS:
+        for pose in hq_anatomy.CARTOON_POSES:
+            ob = body(kind=kind, pose=pose, height=50)
+            s = engine_anatomy._stats(ob)
+            assert 8000 <= s["tris"] <= 20000 and s["quads"] / s["faces"] >= 0.85, (kind, pose, s)
+            low = paw_islands(ob)
+            assert len(low) == 4 and max(low) < 1e-3, (kind, pose, low)
+    tall = body(kind="lion", pose="sit", height=120)
+    assert abs(tall.dimensions.z / body(kind="lion", pose="sit", height=60).dimensions.z - 2) < 1e-3
+
+
+def test_cartoon_body_params():
+    for bad, word in (({"kind": "dragon"}, "kind must"), ({"pose": "fly"}, "pose must"), ({"height": 0}, "height must"),
+                      ({"head_ratio": 2}, "head_ratio"), ({"legs": 4}, "Params")):
+        try:
+            hq_anatomy.cartoon_params(bad)
+            assert False, bad
+        except ValueError as e:
+            assert word in str(e), e
+    assert "cartoon_body" in hq_pkg.HQ_OPS
+    assert hq_pkg.run_hq(None, "help", {"op": "cartoon_body"})["summary"].startswith("cartoon_body")
+
+
 def show(kind="big_cat", step=4):
     """ASCII side view for eyeballing a spec: ANATOMY_SHOW=canine py -3 -m backend.test_hq_anatomy"""
     img, area = side_silhouette(make(kind)[0])
