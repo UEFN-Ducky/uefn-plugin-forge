@@ -36,7 +36,15 @@ Styles: `sport` `sedan` `suv` `truck` `classic` `scifi`. Bodies: `sedan` `coupe`
 | `spoiler` | Mount | airfoil wing + end plates + uprights (sport, scifi double), ducktail (sedan, classic) |
 | `diffuser` `exhaust` `seat` `steering_wheel` (Column) `dashboard` `engine` `suspension` (Hub + Chassis) `license_plate` `wiper` (Pivot) `window` | | each its own SM_ with real sizes |
 
-Left-side parts sit on +X; `side=right` mirrors them. Material slots are shared ids (`mcar_paint`, `mcar_chrome`, `mcar_rubber`, `mcar_glass`, `mcar_plastic`, `mcar_emissive`, `mcar_metal`, `mcar_lens_red`, `mcar_emissive_red`, `mcar_leather`, `mcar_accent`), so one `forge_material` edit recolours every car. Paint carries clearcoat 1.0 / 0.03 for UE. A rebuild never resets materials you changed.
+Left-side parts sit on +X; `side=right` mirrors them. Material slots are shared ids (`mcar_paint`, `mcar_chrome`, `mcar_rubber`, `mcar_glass`, `mcar_plastic`, `mcar_emissive`, `mcar_metal`, `mcar_lens_red`, `mcar_emissive_red`, `mcar_leather`, `mcar_accent`), so one `forge_material` edit recolours every car. A rebuild never resets materials you changed.
+
+| slot | base fields (`look`, UE export) | `spec` layers (`light`, bakes) |
+|---|---|---|
+| paint | metallic 0.9, roughness 0.22, clearcoat 1.0 / 0.03; `paint` is scaled to max 0.6 per channel | base + roughness-noise flakes (scale 900) + clearcoat 1.0 / 0.03 |
+| glass | opaque dark tint 0.012/0.016/0.02, roughness 0.05 (alpha glass speckles in Eevee) | 60 % alpha, blended |
+| chrome / rubber | metal 1.0 rough 0.08 / rough 0.85 | - |
+
+Metallic paint reflects in its own colour, which acts as a specular tint, so a bright sky never clips the hood to white. For see-through glass in UEFN, set `opacity` 0.35 on `mcar_glass`. The `UCX_` hull uses `mcar_collision` (alpha 0), so it never covers the car in a render.
 
 ## Real numbers
 
@@ -54,7 +62,7 @@ Left-side parts sit on +X; `side=right` mirrors them. Material slots are shared 
 ]
 ```
 
-Run it with `forge_batch(steps=[...], look="three")`. One part alone, checked as a game part:
+Run it with `forge_batch(steps=[...], look="three")`. For a showcase still, end with `{"tool": "forge_hq", "op": "light", "params": {"preset": "studio", "quality": "final"}}`: it builds the clearcoat and flakes. One part alone, checked as a game part:
 
 ```json
 [
@@ -73,7 +81,7 @@ Run it with `forge_batch(steps=[...], look="three")`. One part alone, checked as
 
 `car_swap` slots: `wheel`/`rim`/`tire` (all four), `caliper`, `headlight`, `taillight`, `grille`, `mirror`, `bumper_front`, `bumper_rear`, `spoiler`, `diffuser`, `exhaust`, `seat`, `steering_wheel`, `dashboard`, `engine`, `license_plate`, `wiper`, or an exact slot like `mirror_L`. The new part keeps the old transform, parent, bone and LODs. Body panels (`body_*`) are the shell: rebuild the car to change them.
 
-**Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back and glass you can see the seats through; the `car` summary is within 5 % of the target size and 40-120k tris; `qa(profile="uefn", budget="hero")` has 0 errors (the limo: 90k tris, pass). Its warnings are the hinge and hub pivots on purpose.
+**Done when:** the `look` (three, side) shows four wheels on the ground inside their arches, visible panel lines, lights front and back, dark glass and paint in its own colour with no white patches (the `light` studio render shows the seats through the glass); the `car` summary is within 5 % of the target size and 40-120k tris; `qa(profile="uefn", budget="hero")` has 0 errors (the limo: 90k tris, pass). Its warnings are the hinge and hub pivots on purpose.
 
 ---
 Dimensions from ISO tyre size codes and typical OEM specs. Workflow ideas adapted from Blender Agent Skills (hardsurface-modeling, optimization) by EL4CTEO, MIT licence.

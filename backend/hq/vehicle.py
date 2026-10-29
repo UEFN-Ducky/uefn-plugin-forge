@@ -144,6 +144,16 @@ def car_part(scene, p):
     return {"summary": summary, "ids": [n["id"] for n in nodes.values()], "tris": meta["tris"]}
 
 
+def _ucx_material(scene):
+    """Alpha 0: look/light renders draw every object, so a grey UCX hull read as a white-out over hood and glass.
+    UE ignores UCX materials. ponytail: renders should skip the collision layer; drop this when they do."""
+    if not any(m["id"] == "mcar_collision" for m in scene.data["materials"]):
+        scene.data["materials"].append({"id": "mcar_collision", "name": "Car_Collision", "base_color": [0.9, 0.5, 0.3, 1],
+                                        "metallic": 0.0, "roughness": 1.0, "emissive": [0, 0, 0], "emissive_strength": 0.0,
+                                        "opacity": 0.0, "textures": {}})
+    return "mcar_collision"
+
+
 def _collision(scene, nodes, gid, name):
     from ..scene import _nid
     pts = [v for n in nodes if n.get("car_slot", "").startswith("body_") for v in scene.world_mesh(n).verts]
@@ -154,9 +164,10 @@ def _collision(scene, nodes, gid, name):
     pos = group["transform"]["pos"]
     for v in ucx.verts:
         v[:] = [v[i] - pos[i] for i in range(3)]
+    ucx.face_mat = [_ucx_material(scene)] * len(ucx.faces)  # faces carry their own material; the node's is a fallback
     node = {"id": _nid("o"), "type": "object", "name": "UCX_%s_01" % name, "parent": gid, "layer": "collision", "visible": True,
             "locked": False, "transform": {"pos": [0, 0, 0], "rot": [0, 0, 0], "scale": [1, 1, 1]},
-            "prototype": scene.adopt_mesh(ucx), "modifiers": [], "material": scene.data["materials"][0]["id"]}
+            "prototype": scene.adopt_mesh(ucx), "modifiers": [], "material": _ucx_material(scene)}
     scene.data["nodes"].append(node)
     return node
 

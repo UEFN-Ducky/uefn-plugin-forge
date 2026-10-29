@@ -16,15 +16,23 @@ from . import bridge
 from .mesh import _tris
 
 TAU = 2 * math.pi
-SLOTS = {  # Forge material fields per slot; car paint keeps clearcoat 1.0 / 0.03 for UE
-    "paint": {"base_color": [0.55, 0.03, 0.04, 1], "metallic": 0.25, "roughness": 0.3, "clearcoat": 1.0, "clearcoat_roughness": 0.03},
-    "chrome": {"base_color": [0.95, 0.95, 0.96, 1], "metallic": 1.0, "roughness": 0.05},
-    "rubber": {"base_color": [0.025, 0.025, 0.027, 1], "roughness": 0.9},
-    "glass": {"base_color": [0.04, 0.06, 0.07, 1], "roughness": 0.02, "opacity": 0.35},
+# Forge material fields per slot. The base fields are what `look` and the UE export read; `spec` layers are what
+# the `light` op and bakes build (flakes, clearcoat 1.0 / 0.03). Paint is metallic 0.9: its reflection takes the
+# paint colour (a specular tint), so a bright sky on the hood never clips to white. Glass is opaque dark tint in the
+# base fields (alpha glass dithers into speckle in Eevee look renders) and blended 60 % alpha in the spec.
+SLOTS = {
+    "paint": {"base_color": [0.55, 0.03, 0.04, 1], "metallic": 0.9, "roughness": 0.22, "clearcoat": 1.0, "clearcoat_roughness": 0.03,
+              "spec": {"layers": [{"type": "base", "color": [0.55, 0.03, 0.04], "metallic": 0.9, "roughness": 0.32},
+                                  {"type": "noise", "target": "roughness", "scale": 900.0, "detail": 2.0, "amount": 0.3},
+                                  {"type": "clearcoat", "weight": 1.0, "roughness": 0.03}]}},
+    "chrome": {"base_color": [0.8, 0.8, 0.82, 1], "metallic": 1.0, "roughness": 0.08},
+    "rubber": {"base_color": [0.025, 0.025, 0.027, 1], "roughness": 0.85},
+    "glass": {"base_color": [0.012, 0.016, 0.02, 1], "roughness": 0.05,
+              "spec": {"layers": [{"type": "base", "color": [0.012, 0.016, 0.02], "roughness": 0.05, "opacity": 0.6}]}},
     "plastic": {"base_color": [0.035, 0.035, 0.04, 1], "roughness": 0.55},
     "emissive": {"base_color": [0.9, 0.9, 0.86, 1], "roughness": 0.2, "emissive": [1.0, 0.95, 0.85], "emissive_strength": 6.0},
     "metal": {"base_color": [0.42, 0.42, 0.43, 1], "metallic": 1.0, "roughness": 0.35},
-    "lens_red": {"base_color": [0.45, 0.01, 0.01, 1], "roughness": 0.05, "opacity": 0.7},
+    "lens_red": {"base_color": [0.3, 0.005, 0.005, 1], "roughness": 0.05},
     "emissive_red": {"base_color": [0.8, 0.02, 0.02, 1], "emissive": [1.0, 0.05, 0.02], "emissive_strength": 4.0},
     "leather": {"base_color": [0.09, 0.065, 0.05, 1], "roughness": 0.6},
     "accent": {"base_color": [0.75, 0.05, 0.03, 1], "metallic": 0.3, "roughness": 0.35},
@@ -928,7 +936,11 @@ def _material(slot):
                  "emissive": [0, 0, 0], "emissive_strength": 0.0, "opacity": 1.0, "textures": {}}
         forge.update(json.loads(json.dumps(SLOTS[slot])))
         if slot == "paint" and _STATE["paint"]:
-            forge["base_color"] = list(_STATE["paint"])[:3] + [1.0]
+            rgb = [float(c) for c in list(_STATE["paint"])[:3]]
+            k = min(1.0, 0.6 / max(max(rgb), 1e-6))  # a 0.9-metallic white mirrors the sky: cap 0.6 reads white, never clips
+            rgb = [c * k for c in rgb]
+            forge["base_color"] = rgb + [1.0]
+            forge["spec"]["layers"][0]["color"] = rgb
         mat["forge"] = json.dumps(forge)
     return mat
 

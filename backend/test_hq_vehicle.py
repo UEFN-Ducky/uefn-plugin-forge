@@ -127,6 +127,34 @@ class Parts(_Engine):
 
 
 @unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
+class Look(_Engine):
+    """Render stats of the centre of a look render (the part fills it): paint never clips, glass is not speckled."""
+
+    def centre(self, kind, **params):
+        from PIL import Image
+        out = self.hq("car_part", kind=kind, **params)
+        with patch.object(tools, "_attach_captures", lambda r: r):  # no Ducky frontend here
+            got = dispatch(self.name, "look", {"look": out["ids"], "px": 256}, actor="agent")
+        img = Image.open(got.get("path") or got["paths"][0]).convert("L")
+        w, h = img.size
+        px = [v / 255.0 for v in img.crop((w * 2 // 5, h * 2 // 5, w * 3 // 5, h * 3 // 5)).getdata()]
+        mean = sum(px) / len(px)
+        return mean, (sum((v - mean) ** 2 for v in px) / len(px)) ** 0.5, sum(v > 0.98 for v in px) / len(px)
+
+    def test_paint_does_not_clip(self):
+        for paint in ("#b0101a", "#f2f2f2", "#0c0c10"):  # red, near-white, black
+            with self.subTest(paint=paint):
+                mean, _, clipped = self.centre("hood", paint=paint)
+                self.assertLess(mean, 0.9, "hood washes out")
+                self.assertLess(clipped, 0.15, "hood clips to white")  # a sun highlight (~6 % on white) is fine, a sheet is not
+
+    def test_glass_is_smooth_dark(self):
+        mean, std, _ = self.centre("window")
+        self.assertLess(std, 0.08, "glass is speckled")
+        self.assertLess(mean, 0.6, "glass is not tinted")
+
+
+@unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
 class Cars(_Engine):
     def build(self, body, **extra):
         out = self.hq("car", body=body, **extra)
