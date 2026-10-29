@@ -1971,8 +1971,14 @@ async function refreshScenes(select) {
 }
 
 const browser = makeBrowser((method, params) => rpc(method, params), { onOpen: name => switchScene(name) });
-const browserUi = { scenes: [], closed: new Set(), recent: [], project: "", library: {}, projects: [] };
+// Tabs are only the scenes the person opened, like editor tabs; the full list lives in the Project panel.
+const browserUi = { scenes: [], open: [], recent: [], project: "", library: {}, projects: [] };
 try { browserUi.recent = JSON.parse(localStorage.getItem("forge.recent") || "[]"); } catch { /* no storage */ }
+try { browserUi.open = JSON.parse(localStorage.getItem("forge.tabs") || "[]"); } catch { /* no storage */ }
+
+function saveTabs() {
+  try { localStorage.setItem("forge.tabs", JSON.stringify(browserUi.open)); } catch { /* no storage */ }
+}
 
 function switchScene(name) {
   if (name === state.name) return;
@@ -1997,30 +2003,34 @@ function paintBrowser(names) {
   if (names) browserUi.scenes = names;
   const tabs = document.getElementById("scene-tabs");
   tabs.innerHTML = "";
-  for (const name of browserUi.scenes) {
-    if (browserUi.closed.has(name) && name !== state.name) continue;
+  browserUi.open = browserUi.open.filter(n => browserUi.scenes.includes(n));
+  if (state.name && !browserUi.open.includes(state.name)) browserUi.open.push(state.name);
+  saveTabs();
+  for (const name of browserUi.open) {
     const on = name === state.name;
-    const tab = el("button", { type: "button", className: on ? "on" : "", textContent: name, title: "Double-click to rename" });
+    const tab = el("button", { type: "button", className: on ? "dk-tab on" : "dk-tab", textContent: name, title: "Double-click to rename" });
     tab.setAttribute("role", "tab");
     tab.setAttribute("aria-selected", String(on));
     tab.setAttribute("aria-label", `Scene ${name}`);
     tab.onclick = () => browser.openScene(name);
     tab.ondblclick = () => renameTab(tab, name);
-    if (browserUi.scenes.length > 1) {
+    if (browserUi.open.length > 1) {
       const x = el("span", { className: "x", textContent: "×", title: "Close tab" });
       x.setAttribute("role", "button");
       x.setAttribute("aria-label", `Close ${name}`);
       x.onclick = ev => {
         ev.stopPropagation();
-        browserUi.closed.add(name);
-        if (on) browser.openScene(browserUi.scenes.find(n => !browserUi.closed.has(n)) || name);
+        browserUi.open = browserUi.open.filter(n => n !== name);
+        saveTabs();
+        if (on) browser.openScene(browserUi.open[browserUi.open.length - 1]);
         else paintBrowser();
       };
       tab.append(x);
     }
     tabs.append(tab);
   }
-  const add = el("button", { type: "button", textContent: "+", title: "New scene" });
+  tabs.querySelector(".on")?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  const add = el("button", { type: "button", className: "dk-tab add", textContent: "+", title: "New scene" });
   add.setAttribute("aria-label", "New scene");
   add.onclick = () => document.getElementById("new").click();
   tabs.append(add);
@@ -2075,7 +2085,7 @@ async function chooseProject(name) {
   if (!res || res.ok === false) { setStatus((res && res.error) || "Could not open the project", true); return; }
   browserUi.recent = pushRecent(browserUi.recent, name);
   try { localStorage.setItem("forge.recent", JSON.stringify(browserUi.recent)); } catch { /* no storage */ }
-  browserUi.closed.clear();
+  browserUi.open = [];
   resetScene();
   state.name = "";
   await refreshScenes();
@@ -2098,7 +2108,7 @@ function paintProjectPanel() {
   for (const s of tree.children[0].children) {
     const b = el("button", { type: "button", className: "node" + (s.current ? " on" : ""), textContent: s.label });
     b.setAttribute("aria-label", `Open scene ${s.label}`);
-    b.onclick = () => { browserUi.closed.delete(s.name); browser.openScene(s.name); };
+    b.onclick = () => browser.openScene(s.name);
     box.append(b);
   }
   const lib = document.getElementById("lib");
