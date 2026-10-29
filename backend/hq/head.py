@@ -114,6 +114,30 @@ def _png(scene, file, fn, rgb, size=256):
     return file
 
 
+def _unfight(scene, node, cell=0.1, rounds=12):
+    """qa's z-fight rule (parallel faces whose centres share a 0.1 cm cell) on the hair cards: push one vertex of
+    each offender 0.08 cm along its normal. The groom seeds cards from the node id, so a pair shows up now and then."""
+    mesh = scene.local_mesh(node)
+    moved = False
+    for r in range(rounds):
+        seen, bad = {}, []
+        for fi in range(len(mesh.faces)):
+            c, n = mesh.face_center(fi), mesh.face_normal(fi)
+            key = tuple(round(v / cell) for v in c)
+            if any(abs(sum(a * b for a, b in zip(n, o))) > 0.99 for o in seen.get(key, ())):
+                bad.append((fi, n))
+            seen.setdefault(key, []).append(n)
+        if not bad:
+            break
+        for fi, n in bad:
+            face = mesh.faces[fi]
+            v = mesh.verts[face[r % len(face)]]
+            mesh.verts[face[r % len(face)]] = [v[i] + n[i] * cell * 0.8 for i in range(3)]
+        moved = True
+    if moved:
+        scene.write_mesh(node, mesh)
+
+
 def _srgb(c):
     return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
 
@@ -141,6 +165,7 @@ def head(scene, p):
         head_id = next(i for i in changed if (scene.node(i) or {}).get("name") == q["name"])
         hair(scene, {**strands, "id": head_id, "region": result["scalp"], "color": q["hair_color"]})
         made = hair_cards(scene, {"id": head_id, "cards": cards})
+        _unfight(scene, scene.node(made["ids"][0]))
         ids += made["ids"]
         summary += ", %s hair %d cards" % (q["hair"], made["cards"])
     return {"summary": summary, "ids": ids}  # tris/quads/groups are in the summary; stats would push the result past 300 chars
