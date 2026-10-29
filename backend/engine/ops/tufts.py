@@ -234,7 +234,7 @@ def _dir(o, th):
     return d, o.lerp(oh, wback).normalized(), oh
 
 
-def _leaf(bm, uvl, tv, root, d, ref, length, width, curl, bend):
+def _leaf(bm, uvl, tv, root, d, ref, length, width, curl, bend, mat=0):
     """One tuft: 3 quads and a tip triangle. Face normal = ref made perpendicular to d."""
     n = ref - d * ref.dot(d)
     n = n.normalized() if n.length > 1e-4 else d.orthogonal().normalized()
@@ -254,7 +254,7 @@ def _leaf(bm, uvl, tv, root, d, ref, length, width, curl, bend):
     faces.append(bm.faces.new((rows[-1][0], rows[-1][1], tip)))
     for f in faces:
         f.smooth = True
-        f.material_index = 0
+        f.material_index = mat
         for loop in f.loops:
             loop[uvl].uv = uv[loop.vert]
 
@@ -344,17 +344,22 @@ def leaf(ob, p):
     curl = float(p.get("curl", 0.15))
     back = world.inverted()
     nv0 = len(me.vertices)
+    name = str(p.get("material") or "Mane")
+    mat = next((i for i, m in enumerate(me.materials) if m and m.name == name), None)
+    if mat is None:  # own slot so paint_bake can colour the tufts apart from the host
+        me.materials.append(bpy.data.materials.get(name) or bpy.data.materials.new(name))
+        mat = len(me.materials) - 1
     bm = bmesh.new()
     bm.from_mesh(me)
     uvl = bm.loops.layers.uv.verify()
     tv = []
     if p.get("target") == "tail":
         at = Vector(p["at"]) * unit
-        root = tree.find_nearest(at)[0] or at
+        root = at  # the tuft sits exactly on the given tip; snapping to the nearest surface could land on other geometry (the mane)
         w0 = float(width) * unit if width else 0.5 * length
         for o, d, lf, wf, cv, bend in _plan_tail(p, rng):
             _leaf(bm, uvl, tv, back @ root, (back.to_3x3() @ d).normalized(), (back.to_3x3() @ o).normalized(),
-                  length * lf * (0.85 + 0.3 * rng.random()), w0 * wf, cv, bend)
+                  length * lf * (0.85 + 0.3 * rng.random()), w0 * wf, cv, bend, mat)
         count = int(p["count"])
     else:
         plan, thetas, sizes = _plan_head(p, rng)
@@ -373,7 +378,7 @@ def leaf(ob, p):
             w_auto = 1.7 * 2 * math.pi * radius * math.sin(th) / n_row
             w_m = float(width) * unit if width else min(max(min(w_auto, ring_w * 1.4), 0.08 * radius), 0.5 * radius)
             _leaf(bm, uvl, tv, back @ root, (back.to_3x3() @ flow).normalized(), (back.to_3x3() @ ref).normalized(),
-                  length * lf * (0.85 + 0.3 * rng.random()), w_m * wf, cv, bend)
+                  length * lf * (0.85 + 0.3 * rng.random()), w_m * wf, cv, bend, mat)
         count = len(plan)
     bm.to_mesh(me)
     bm.free()
@@ -389,7 +394,7 @@ def leaf(ob, p):
     stats = hostmesh._stats(ob)
     tail = p.get("target") == "tail"
     extra = "" if tail else "".join(", " + k for k in ("peak", "beard") if int(p[k]))
-    return {"summary": "%s leaf %d tufts %.1fk tris%s" % ("tail" if tail else "mane", count, stats["tris"] / 1000, extra),
+    return {"summary": "%s leaf %d tufts %.1fk tris%s, material %s" % ("tail" if tail else "mane", count, stats["tris"] / 1000, extra, name),
             "tufts": count, "style": "leaf", **stats}
 
 

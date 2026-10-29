@@ -11,7 +11,7 @@ TIPS = ("flame",)
 STYLES = ("leaf", "flame")
 TARGETS = ("head", "tail")
 _KEYS = ("id", "region", "mane", "count", "length", "width", "curl", "layers", "tip", "seed", "budget", "sweep", "smooth", "wait",
-         "style", "rows", "face_ring", "peak", "beard", "target", "at", "dir")
+         "style", "rows", "face_ring", "peak", "beard", "target", "at", "dir", "material")
 
 
 def _host(scene, ident):
@@ -88,6 +88,8 @@ def _leaf(scene, node, p, target, mane):
              seed=int(p.get("seed", 1)))
     if p.get("width") is not None:
         q["width"] = float(p["width"])
+    if p.get("material"):
+        q["material"] = str(p["material"])
     fixed = q["face_ring"] + q["peak"] + q["beard"]
     if min(q["face_ring"], q["peak"], q["beard"]) < 0 or q["rows"] < 2 or q["length"] <= 0 or q.get("width", 1) <= 0:
         raise ValueError("face_ring, peak, beard >= 0; rows >= 2; length > 0 cm; width > 0 cm")

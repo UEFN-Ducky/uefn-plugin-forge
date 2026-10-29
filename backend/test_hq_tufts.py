@@ -205,11 +205,28 @@ class Leaf(unittest.TestCase):
         self.assertAlmostEqual(min(vs), 0.0, places=3)
         self.assertAlmostEqual(max(vs), 1.0, places=3)
 
+    def test_mane_material_slot(self):
+        scene = load(self.name)
+        mane = {m["id"] for m in scene.data["materials"] if m.get("name") == "Mane"}
+        self.assertEqual(len(mane), 1, [m.get("name") for m in scene.data["materials"]])
+        used = [m in mane for m in self.mesh.face_mat]
+        self.assertFalse(any(used[:self.f0]), "host faces moved to Mane")
+        self.assertTrue(all(used[self.f0:]), "tuft faces outside Mane")
+        self.assertIn("material Mane", str(self.out))
+
     def test_tail(self):
-        out = self.t["forge_hq"](name=self.name, op="tufts", params={"id": self.head, "target": "tail", "at": [0, 0, self.R]})
+        at = [0, 0, self.R]
+        before = len(load(self.name).world_mesh(load(self.name).node(self.head)).faces)
+        out = self.t["forge_hq"](name=self.name, op="tufts", params={"id": self.head, "target": "tail", "at": at})
         self.assertTrue(out.get("ok", True), out)
         self.assertEqual(out.get("tufts"), 14)
         self.assertLessEqual(len(str(out)), 300)
+        mesh = load(self.name).world_mesh(load(self.name).node(self.head))
+        cols = [c[0] for c in mesh.attrs["col:tuft"]]
+        roots = {v for f in mesh.faces[before:] for v in f if cols[v] == 0.0}
+        self.assertTrue(roots)
+        for v in roots:
+            self.assertLessEqual(math.dist(mesh.verts[v], at), 2.0, mesh.verts[v])
 
 
 class Errors(unittest.TestCase):
