@@ -479,7 +479,7 @@ def register_tools(api: Any) -> None:
     @api.tool(**host)
     def forge_render(name: str = "", views: list | None = None, id: str = "", clip: str = "", frames: list | None = None,
                      style: str = "pbr") -> dict:
-        """Render PNGs: three|front|side|top|left|back|three_back|az0..az315; clip= renders frames of a motion; style=pbr|toon|wire|islands|silhouette|checker|xray."""
+        """Render PNGs of views (three|front|side|top|back|az0..315); clip= poses a motion; style= pbr|toon or a QA look."""
         if clip:
             return _run(api, name, "render", _given(views=views or ["three"], id=id, clip=clip, frames=frames, style=style))
         return _run(api, name, "render", {"views": views or ["three", "front", "top"], "id": id, "style": style})
@@ -511,7 +511,7 @@ def register_tools(api: Any) -> None:
 
     @api.tool(**host)
     def forge_batch(name: str = "", steps: list | None = None, verbose: bool = False, look: Any = "") -> dict:
-        """Many edits as one undo step: steps=[{tool, ...args}], "$0"/"$0.ids" refs; look=three|ai|ids|{view,style:toon|wire|islands|silhouette|checker|xray,px:128..1024} adds 1 image. See forge/modeling_recipes."""
+        """Many edits as one undo step: steps=[{tool, ...args}], "$0"/"$0.ids" refs; look=three|ai|ids|{view,style,px} adds 1 image. See forge/modeling_recipes."""
         return _run(api, name, "batch", {"steps": steps, "verbose": verbose}, look)
 
     @api.tool(**host)
@@ -562,8 +562,7 @@ def register_tools(api: Any) -> None:
     def forge_camera(name: str = "", action: str = "get", pos: list | None = None, target: list | None = None, fov: float | None = None,
                      seconds: float = 1.0, ids: list | None = None, drive: bool = False, doing: str = "", camera_name: str = "",
                      move: str = "", frames: int = 96, preset: str = "") -> dict:
-        """Your camera: get|goto|look_at|frame|orbit|people|ping|save|cameras; drive=true moves the viewport. move=orbit|dolly|zoom|crane
-        keys a shot over frames; preset=wide|neutral|portrait|product (20/50/85/120 mm). See forge/camera."""
+        """Your camera: get|goto|look_at|frame|orbit|people|ping|save|cameras; drive moves the viewport; move= keys a shot. See forge/camera."""
         name = _scene_name(name)
         if move:
             return compact(apply_move(name, move, frames, preset, target=target))
@@ -589,8 +588,7 @@ def register_tools(api: Any) -> None:
                    pos: list | None = None, target: list | None = None, fov: float | None = None, from_view: str = "",
                    duration: float | None = None, ease: str = "", camera: str = "", move: str = "", frames: int = 96,
                    preset: str = "") -> dict:
-        """Keyed camera shots: add|key|unkey|edit|delete; move=orbit|dolly|zoom|crane keys a whole move over frames
-        (shot= re-keys that shot); preset=wide|neutral|portrait|product lens. See forge/camera."""
+        """Camera shots: add|key|unkey|edit|delete; move=orbit|dolly|zoom|crane; preset=wide|neutral|portrait|product. See forge/camera."""
         name = _scene_name(name)
         if move:
             return compact(apply_move(name, move, frames, preset, shot, target))
@@ -607,7 +605,7 @@ def register_tools(api: Any) -> None:
     @api.tool(**host)
     def forge_shot_render(name: str = "", shot: str = "", fps: int = 30, width: int = 1920, height: int = 1080, imk_project: str = "",
                           job: str = "", wait_seconds: float = 300) -> dict:
-        """Render a shot to MP4 via the open Forge tab; returns job when slow, call again with job."""
+        """Shot to MP4 via the open Forge tab; a slow one returns job, call again with it."""
         name = _scene_name(name)
         result = live_view.render_shot(name, shot, fps, width, height, imk_project, job, wait_seconds)
         if not job:
