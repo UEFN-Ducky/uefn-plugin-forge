@@ -19,7 +19,7 @@ STYLES = {
     "afro": dict(density=60, length=14, clump=0.1, curl=1.0, frizz=0.4, droop=0.0, points=8, region="top"),
     "fur": dict(density=100, length=3, clump=0.0, curl=0.0, frizz=0.1, droop=0.3, points=4, region="all"),
     "beard": dict(density=50, length=8, clump=0.3, curl=0.3, frizz=0.15, droop=0.7, points=6, region="jaw"),
-    "mane": dict(density=40, length=28, clump=0.6, curl=0.15, frizz=0.12, droop=0.1, points=8, region="top"),
+    "mane": dict(density=120, length=28, clump=0.6, curl=0.15, frizz=0.12, droop=0.1, points=8, region="top"),
 }
 COLORS = {"black": (0.03, 0.025, 0.02), "brown": (0.22, 0.12, 0.06), "auburn": (0.35, 0.13, 0.07),
           "blonde": (0.8, 0.6, 0.28), "red": (0.55, 0.12, 0.05), "white": (0.9, 0.9, 0.88),
@@ -223,7 +223,7 @@ def _png(path, w, h, rows, channels):
                            + chunk(b"IDAT", zlib.compress(raw, 6)) + chunk(b"IEND", b""))
 
 
-def bake_atlas(folder, size, color, variants, seed=1, stem="hair", root=0.55):
+def bake_atlas(folder, size, color, variants, seed=1, stem="hair", root=0.55, inner=1.0):
     """color+alpha atlas (RGBA) and data atlas (R root-tip, G depth, B strand id). Returns (cell grid, color file, data file)."""
     rng = random.Random(seed)
     grid = max(1, math.ceil(math.sqrt(variants)))
@@ -250,7 +250,7 @@ def bake_atlas(folder, size, color, variants, seed=1, stem="hair", root=0.55):
                     i = (ox + x) * 4
                     if alpha < col[i + 3]:
                         continue
-                    shade = (root + (1 - root) * v) * (0.9 + 0.2 * ident) * (1 - 0.25 * d)
+                    shade = (root + (1 - root) * v) * (0.9 + 0.2 * ident) * (1 - 0.25 * d) * (inner if cell % 2 == 0 else 1.0)
                     col[i:i + 4] = bytes([min(255, int(base[0] * shade * 255)), min(255, int(base[1] * shade * 255)),
                                           min(255, int(base[2] * shade * 255)), alpha])
                     j = (ox + x) * 3
@@ -288,12 +288,16 @@ def op_hair_cards(p):
     cx = sum(s[0][0] for s in strands) / len(strands)
     cy = sum(s[0][1] for s in strands) / len(strands)
     order = sorted(strands, key=lambda s: math.atan2(s[0][1] - cy, s[0][0] - cx))
+    if mane:  # a ring: three height bands (throat/cheek/crown), each swept around the head, so cards cover the band and not one slice
+        zs = sorted(s[0][2] for s in strands)
+        cut = [zs[len(zs) // 3], zs[2 * len(zs) // 3]]
+        order = sorted(order, key=lambda s: sum(s[0][2] > c for c in cut))  # stable: angle order kept inside a band
     groups = [[] for _ in range(cards)]
     for i, s in enumerate(order):
         groups[i * cards // len(order)].append(s)
     variants = min(cards, 16)
     grid, color_file, data_file = bake_atlas(p["folder"], size, p.get("color"), variants, int(p.get("seed", 1)), str(p.get("stem") or "hair"),
-                                            root=0.3 if mane else 0.55)  # manes get a dark root
+                                            root=0.3 if mane else 0.55, inner=0.55 if mane else 1.0)  # manes: dark root, dark inner (even cells) under tawny outer cards
     cs = 1.0 / grid
     verts, faces, uvs = [], [], []
     for ci, group in enumerate(groups):
@@ -435,7 +439,8 @@ def op_fur_shells(p):
             verts, faces, shell_uvs, rep = decimate(body_verts, body_faces, uvs, room)
             per, layers = _tris(faces) or 1, 1
         layers = max(0, layers)
-    normals = _vertex_normals(verts, faces)
+    body_normals = _vertex_normals(body_verts, body_faces)  # proxy verts are body verts: offset along the BODY normal so a shell never leaves the skin by more than length
+    normals = [body_normals[r] for r in rep]
     uvs, body_uvs = shell_uvs, uvs
     out_verts, out_faces, out_uvs, shell = [], [], [], []
     for k in range(1, layers + 1):
@@ -455,11 +460,59 @@ def op_fur_shells(p):
 # ---- fur bake ---------------------------------------------------------------
 
 
+COATS = {"lion": dict(back=(0.64, 0.43, 0.2), belly=(0.92, 0.82, 0.62), dark=(0.2, 0.1, 0.045))}
+
+
+def _clamp(x):
+    return max(0.0, min(1.0, x))
+
+
+def coat_masks(body, size):
+    """Rasterise per-vertex coat tones into UV space: (belly, dark) bytearrays of size*size, 255 = full.
+    belly: down-facing skin and inner legs; dark: mane base (high, front) and tail tuft (far back)."""
+    verts, faces, uvs = body["verts"], body["faces"], body["uvs"]
+    normals = _vertex_normals(verts, faces)
+    lo = [min(v[i] for v in verts) for i in range(3)]
+    span = [(max(v[i] for v in verts) - lo[i]) or 1.0 for i in range(3)]
+    cx = lo[0] + span[0] / 2
+    tones = []
+    for v, n in zip(verts, normals):
+        h, f = (v[2] - lo[2]) / span[2], (v[1] - lo[1]) / span[1]
+        belly = _clamp((0.15 - n[2]) / 0.7)
+        if n[0] * (v[0] - cx) < -0.2:  # facing the body's midline: inner leg
+            belly = max(belly, 0.6 * _clamp((0.4 - h) / 0.2))
+        mane = _clamp(((1 - f) - 0.7) / 0.15) * _clamp((h - 0.5) / 0.2)
+        tones.append((belly, max(0.8 * mane, _clamp((f - 0.93) / 0.05))))
+    belly_map, dark_map = bytearray(size * size), bytearray(size * size)
+    for face, uv in zip(faces, uvs):
+        for k in range(1, len(face) - 1):
+            idx = (0, k, k + 1)
+            pts = [(uv[i][0] * (size - 1), (1 - uv[i][1]) * (size - 1)) for i in idx]
+            (x0, y0), (x1, y1), (x2, y2) = pts
+            area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0)
+            if abs(area) < 1e-9:
+                continue
+            for y in range(max(0, int(min(y0, y1, y2))), min(size - 1, int(max(y0, y1, y2)) + 1) + 1):
+                for x in range(max(0, int(min(x0, x1, x2))), min(size - 1, int(max(x0, x1, x2)) + 1) + 1):
+                    w1 = ((x - x0) * (y2 - y0) - (x2 - x0) * (y - y0)) / area
+                    w2 = ((x1 - x0) * (y - y0) - (x - x0) * (y1 - y0)) / area
+                    w0 = 1 - w1 - w2
+                    if min(w0, w1, w2) < -0.02:
+                        continue
+                    t = [tones[face[i]] for i in idx]
+                    belly_map[y * size + x] = int(255 * _clamp(w0 * t[0][0] + w1 * t[1][0] + w2 * t[2][0]))
+                    dark_map[y * size + x] = int(255 * _clamp(w0 * t[0][1] + w1 * t[1][1] + w2 * t[2][1]))
+    return belly_map, dark_map
+
+
 def op_fur_bake(p):
-    """Strand-streak BaseColor and a matching fur-direction normal map (tangent space, strands run down V)."""
+    """Strand-streak BaseColor and a matching fur-direction normal map (tangent space, strands run down V).
+    coat="lion" with p["body"] (verts, faces, per-face uvs) paints tawny back, cream belly and inner legs, dark mane base and tail tuft."""
     size = max(64, min(4096, int(p.get("size") or 1024)))
     rng = random.Random(int(p.get("seed", 1)))
-    base = rgb(p.get("color"))
+    coat = COATS[p["coat"]] if p.get("coat") else None
+    base = rgb(p.get("color")) if coat is None else coat["back"]
+    belly_map, dark_map = coat_masks(p["body"], size) if coat else (None, None)
     height = [bytearray(size) for _ in range(size)]
     for _ in range(size * size // 36):
         x, y0, n, b = rng.randrange(size), rng.randrange(size), rng.randint(6, 22), rng.randint(90, 255)
@@ -478,7 +531,12 @@ def op_fur_bake(p):
         up, down, here = height[y - 1], height[(y + 1) % size], height[y]
         for x in range(size):
             shade = (0.45 + 0.55 * here[x] / 255) * tint[y // cell][x // cell]
-            crow += bytes(min(255, int(c * shade * 255)) for c in base)
+            if coat:
+                b, d = belly_map[y * size + x] / 255, dark_map[y * size + x] / 255
+                tone = [(a + (c - a) * b) * (1 - d) + e * d for a, c, e in zip(coat["back"], coat["belly"], coat["dark"])]
+            else:
+                tone = base
+            crow += bytes(min(255, int(c * shade * 255)) for c in tone)
             nx = max(-0.7, min(0.7, (here[x - 1] - here[(x + 1) % size]) / 255.0 * 1.5))
             ny = max(-0.7, min(0.7, (up[x] - down[x]) / 255.0 * 0.5))
             nz = math.sqrt(max(0.05, 1 - nx * nx - ny * ny))

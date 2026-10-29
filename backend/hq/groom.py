@@ -142,8 +142,8 @@ def hair_cards(scene, p):
     tris = region_tris(scene.world_mesh(node), rec["params"]["region"])
     textures = _textures(scene)
     mane = rec["params"].get("style") == "mane"
-    budget = p.get("tris") or (3200 if mane else 2800)
-    result = _call("hair_cards", dict(rec["params"], tris=tris, cards=p.get("cards") or (220 if mane else 120), atlas=p.get("atlas") or "1K",
+    budget = p.get("tris") or (4000 if mane else 2800)
+    result = _call("hair_cards", dict(rec["params"], tris=tris, cards=p.get("cards") or (240 if mane else 120), atlas=p.get("atlas") or "1K",
                                       budget=budget, folder=str(textures), stem="hair_" + rec["id"]))
     color = strand.rgb(rec["params"].get("color"))
     mid = _material(scene, "HairCards", color, roughness=0.45, opacity=1.0, alpha_mode="MASK", alpha_cutoff=0.35, double_sided=True,
@@ -327,10 +327,19 @@ def fur_shells(scene, p):
             "warnings": warnings}
 
 
-@op("fur_bake", "fur_bake(id, size=1024) bake fur color + direction normal into the body's BaseColor and Normal")
+@op("fur_bake", "fur_bake(id, size=1024, coat?=lion) bake fur color + direction normal into the body's BaseColor and Normal")
 def fur_bake(scene, p):
     node = _node(scene, p.get("id"))
     mesh = scene.local_mesh(node)
+    coat = p.get("coat")
+    if coat and str(coat).lower() not in strand.COATS:
+        close = difflib.get_close_matches(str(coat).lower(), strand.COATS, n=1)
+        raise ValueError("No coat %r.%s Coats: %s" % (coat, " Did you mean %r?" % close[0] if close else "", ", ".join(strand.COATS)))
+    body = None
+    if coat:
+        if not (len(mesh.uvs) == len(mesh.faces) and all(len(u) == len(f) for u, f in zip(mesh.uvs, mesh.faces))):
+            raise ValueError("%s has no UVs to paint a coat into. Unwrap it first" % node["id"])
+        body = {"verts": mesh.verts, "faces": mesh.faces, "uvs": [list(map(list, uv)) for uv in mesh.uvs]}
     mid = mesh.face_mat[0] if mesh.face_mat else None
     mat = next((m for m in scene.data["materials"] if m.get("id") == mid), None)
     if mat is None:
@@ -339,7 +348,9 @@ def fur_bake(scene, p):
     name = "".join(c for c in (node.get("name") or node["id"]) if c.isalnum() or c == "_") or node["id"]
     result = _call("fur_bake", {"size": int(p.get("size") or 1024), "color": color, "folder": str(_textures(scene)),
                                 "color_file": "T_%s_BC.png" % name, "normal_file": "T_%s_N.png" % name,
-                                "seed": zlib.crc32(node["id"].encode()) & 0xFFFF})
+                                "seed": zlib.crc32(node["id"].encode()) & 0xFFFF, "coat": str(coat).lower() if coat else None, "body": body})
     mat.setdefault("textures", {}).update(base_color=result["color_file"], normal=result["normal_file"])
+    if coat:  # shells and cards pick up the coat's back color
+        mat["base_color"] = list(strand.COATS[str(coat).lower()]["back"]) + [1.0]
     return {"ids": [node["id"]], "size": result["size"], "textures": [result["color_file"], result["normal_file"]],
             "summary": "baked %s + %s at %d (fur color and direction normal on %s)" % (result["color_file"], result["normal_file"], result["size"], mat.get("name"))}

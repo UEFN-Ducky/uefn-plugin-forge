@@ -6,6 +6,7 @@ import os
 import struct
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -249,6 +250,79 @@ class GroomTests(unittest.TestCase):
         mesh = scene.local_mesh(scene.node(result["ids"][0]))
         self.assertEqual(mesh.tri_count(), result["tris"])
         self.assertFalse(result["warnings"])
+    def test_decimated_shells_stay_close(self):
+        body = self.add("sphere", radius=40, seg=110, rings=58)
+        scene = load("Groom")
+        skin = scene.local_mesh(scene.node(body))
+        skin.verts = [[v[0], v[1], v[2] * 2.0] for v in skin.verts]  # a long body, so radial offsets would be wrong
+        scene.write_mesh(scene.node(body), skin)
+        base_tris = skin.tri_count()
+        self.assertGreater(base_tris, hqg.PROXY_TRIS)  # the default decimation is in play
+        body_verts, length = [list(v) for v in skin.verts], 2.0
+        result = hqg.fur_shells(scene, {"id": body, "layers": 4, "length": length})
+        mesh = scene.local_mesh(scene.node(body))
+        self.assertLess(mesh.tri_count(), base_tris + 4 * hqg.PROXY_TRIS + 1)
+        cells = {}
+        for v in body_verts:
+            cells.setdefault(tuple(int(c // 6) for c in v), []).append(v)
+        for v in mesh.verts[len(body_verts):]:
+            near = [q for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                    for q in cells.get((int(v[0] // 6) + dx, int(v[1] // 6) + dy, int(v[2] // 6) + dz), [])]
+            self.assertTrue(near and min(math.dist(v, q) for q in near) <= length + 1.0, v)
+        self.assertEqual(result["layers"], 4)
+
+    def test_mane_ring_coverage(self):
+        nid = self.add("sphere", radius=30)
+        scene = load("Groom")
+        lo_z, hi_z = 10.0, 50.0
+        hqg.hair(scene, {"id": nid, "style": "mane", "region": {"box": [-40, -40, lo_z, 40, 40, hi_z]}, "color": "auburn"})
+        result = hqg.hair_cards(scene, {"id": nid})
+        mesh = scene.local_mesh(scene.node(result["ids"][0]))
+        self.assertLessEqual(result["tris"], 4000)
+        hit = set()
+        for x, y, z in mesh.verts:
+            if lo_z <= z < hi_z:
+                hit.add((int((math.atan2(y, x) + math.pi) / (2 * math.pi) * 16) % 16, int((z - lo_z) / (hi_z - lo_z) * 3)))
+        self.assertGreaterEqual(len(hit) / 48.0, 0.7)
+        # layered: inner cards share an atlas with darker even cells
+        mat = scene.materials()[mesh.face_mat[0]]
+        self.assertTrue(mat["textures"]["base_color"].endswith("_color.png"))
+
+    def test_lion_coat_gradient(self):
+        nid = self.add("sphere", radius=10)
+        scene = load("Groom")
+        size = 128
+        skin = scene.local_mesh(scene.node(nid))  # the sphere primitive tiles UVs per face: give it a lon/lat unwrap
+        cz = (min(v[2] for v in skin.verts) + max(v[2] for v in skin.verts)) / 2
+        skin.uvs = []
+        for f in skin.faces:
+            uv = [[math.atan2(skin.verts[i][1], skin.verts[i][0]) / (2 * math.pi) % 1.0, (skin.verts[i][2] - cz) / 20 + 0.5] for i in f]
+            if max(c[0] for c in uv) - min(c[0] for c in uv) > 0.5:
+                uv = [[c[0] + (1.0 if c[0] < 0.5 else 0.0) - 1e-3, c[1]] for c in uv]
+            skin.uvs.append(uv)
+        scene.write_mesh(scene.node(nid), skin)
+        hqg.fur_bake(scene, {"id": nid, "size": size, "coat": "lion"})
+        mat = next(m for m in scene.data["materials"] if m.get("textures", {}).get("normal"))
+        raw = (Path(scene.folder) / "textures" / mat["textures"]["base_color"]).read_bytes()
+        idat = raw[raw.index(b"IDAT") + 4:raw.index(b"IEND") - 8]
+        pixels = zlib.decompress(idat)
+        stride = 1 + size * 3
+        mesh = scene.local_mesh(scene.node(nid))
+        zs = [sum(mesh.verts[i][2] for i in f) / len(f) for f in mesh.faces]
+        lo, hi = min(zs), max(zs)
+
+        def luma(face):
+            u = sum(c[0] for c in mesh.uvs[face]) / len(mesh.uvs[face])
+            v = sum(c[1] for c in mesh.uvs[face]) / len(mesh.uvs[face])
+            at = int((1 - v) * (size - 1)) * stride + 1 + int(min(u, 1.0) * (size - 1)) * 3
+            return sum(pixels[at:at + 3])
+
+        top = [luma(i) for i, z in enumerate(zs) if z > hi - 0.2 * (hi - lo)]
+        bottom = [luma(i) for i, z in enumerate(zs) if z < lo + 0.2 * (hi - lo)]
+        self.assertLess(sum(top) / len(top), sum(bottom) / len(bottom) * 0.85)  # tawny back, cream belly
+        self.assertEqual(mat["base_color"][:3], list(eg.COATS["lion"]["back"]))
+        with self.assertRaisesRegex(ValueError, "Did you mean 'lion'"):
+            hqg.fur_bake(scene, {"id": nid, "size": 64, "coat": "lon"})
 
     def test_fur_bake_writes_maps(self):
         nid = self.add("sphere", radius=10)
