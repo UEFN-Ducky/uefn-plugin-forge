@@ -7,6 +7,8 @@ async function yieldStep() {
   lastYield = performance.now();
 }
 async function buffer(text) {
+  if (text instanceof ArrayBuffer) return text; // already binary (transferred in), nothing to decode
+  if (ArrayBuffer.isView(text)) return text.buffer.slice(text.byteOffset, text.byteOffset + text.byteLength);
   const size = text.length * 3 / 4 - (text.endsWith("==") ? 2 : text.endsWith("=") ? 1 : 0);
   const bytes = new Uint8Array(size);
   let offset = 0;
@@ -135,7 +137,56 @@ async function lines(p) {
   }
   return {positions:new Float32Array(points),dense};
 }
+// Vertex clustering: snap vertices to a cells^3 grid over the bounds, drop triangles that collapse. Preview-only.
+async function simplify(p) {
+  const entry = geometries.get(p.key);
+  if (!entry) return new Uint32Array();
+  const {g} = entry, pos = g.attributes.position.array, index = g.index.array;
+  const min = g.boundingBox.min, size = g.boundingBox.getSize(new THREE.Vector3()), cells = Math.max(2, p.cells || 24);
+  const step = Math.max(size.x, size.y, size.z) / cells || 1, rep = new Map(), cell = new Int32Array(pos.length / 3);
+  for (let v = 0; v < cell.length; v++) {
+    if (v % 49152 === 0) await yieldStep();
+    const k = Math.floor((pos[v*3]-min.x)/step) + 4096 * (Math.floor((pos[v*3+1]-min.y)/step) + 4096 * Math.floor((pos[v*3+2]-min.z)/step));
+    if (!rep.has(k)) rep.set(k, v);
+    cell[v] = rep.get(k);
+  }
+  const out = [];
+  for (let i = 0; i < index.length; i += 3) {
+    if (i % 24576 === 0) await yieldStep();
+    const a = cell[index[i]], b = cell[index[i+1]], c = cell[index[i+2]];
+    if (a !== b && b !== c && a !== c) out.push(a, b, c);
+  }
+  return Uint32Array.from(out);
+}
+// Group scene objects by shared geometry key so each group is one InstancedMesh draw call.
+// items: [{key, matrix: 16 numbers}] -> Map(key -> Float32Array(16 * n))
+export function instanceGroups(items) {
+  const counts = new Map();
+  for (const {key} of items) counts.set(key, (counts.get(key) || 0) + 1);
+  const out = new Map(), at = new Map();
+  for (const {key, matrix} of items) {
+    if (!out.has(key)) out.set(key, new Float32Array(counts.get(key) * 16));
+    const i = at.get(key) || 0;
+    out.get(key).set(matrix, i * 16);
+    at.set(key, i + 1);
+  }
+  return out;
+}
+// One draw call for every copy of a part; frustum culled by three's InstancedMesh bounds.
+export function buildInstanced(geometry, material, matrices) {
+  const mesh = new THREE.InstancedMesh(geometry, material, matrices.length / 16);
+  mesh.instanceMatrix.array.set(matrices);
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.frustumCulled = true;
+  mesh.computeBoundingSphere();
+  return mesh;
+}
+// Preview-only simplify switch: the UX layer reads isSimplified() and swaps in simplify() indices; picks and saves keep full data.
+let simplified = false;
+export const setSimplified = on => { simplified = !!on; return simplified; };
+export const isSimplified = () => simplified;
 export async function runMeshTask(op, params) {
+  if(op === "simplify") return simplify(params);
   if(op === "prepare") return prepare(params);
   if(op === "pick") return pick(params);
   if(op === "lines") return lines(params);
