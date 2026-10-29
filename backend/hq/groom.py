@@ -288,6 +288,11 @@ def fur_shells(scene, p):
     node = _node(scene, p.get("id"))
     mesh = scene.local_mesh(node)
     base_tris = mesh.tri_count()
+    rig = (node.get("skin") or {}).get("rig")
+    # the budget is for the whole asset: eyes, mane cards... count too (objects skinned to another rig are another asset)
+    others = sum(scene.local_mesh(n).tri_count() for n in scene.data["nodes"]
+                 if n.get("type") == "object" and n is not node and n.get("visible", True)
+                 and (not rig or not (n.get("skin") or {}).get("rig") or n["skin"]["rig"] == rig))
     layers = max(1, min(32, int(p.get("layers") or 8)))
     budget = p.get("budget")
     budget = UEFN_BUDGET if budget is None and p.get("target", "uefn") == "uefn" else int(budget or 0)
@@ -299,13 +304,13 @@ def fur_shells(scene, p):
     shaped = [list(map(list, uv)) for uv in mesh.uvs] if len(mesh.uvs) == len(mesh.faces) and all(len(u) == len(f) for u, f in zip(mesh.uvs, mesh.faces)) else None
     result = _call("fur_shells", {"verts": mesh.verts, "faces": mesh.faces, "uvs": shaped, "layers": layers, "length": p.get("length") or 2.0,
                                   "color": color, "folder": str(_textures(scene)), "seed": zlib.crc32(node["id"].encode()) & 0xFFFF,
-                                  "proxy": proxy, "budget": budget, "base_tris": base_tris})
+                                  "proxy": proxy, "budget": budget, "base_tris": base_tris + others})
     warnings = []
     if result["layers"] < result["wanted"]:
-        warnings.append("fur layers cut from %d to %d to fit %d tris (body %d + %d x %d per shell)" % (
-            result["wanted"], result["layers"], budget, base_tris, result["layers"], result["per_layer"]))
+        warnings.append("fur layers cut from %d to %d to fit %d tris (asset %d + %d x %d per shell)" % (
+            result["wanted"], result["layers"], budget, base_tris + others, result["layers"], result["per_layer"]))
     if result["layers"] < 1:
-        return {"ids": [node["id"]], "layers": 0, "tris_added": 0, "summary": "no fur shells: body already uses %d of %d tris" % (base_tris, budget),
+        return {"ids": [node["id"]], "layers": 0, "tris_added": 0, "summary": "no fur shells: asset already uses %d of %d tris" % (base_tris + others, budget),
                 "warnings": warnings + ["raise budget, or fur_bake for texture-only fur"]}
     layers = result["layers"]
     rgb = strand.rgb(color)

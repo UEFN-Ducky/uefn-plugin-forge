@@ -13,6 +13,7 @@ from unittest.mock import patch
 from . import hq, rig as rigs
 from .engine.ops import cloth as ec, groom as eg
 from .hq import groom as hqg
+from .kernel.mesh import Mesh
 from .scene import dispatch, forget, load
 
 OPS = {"hair": eg.op_hair, "hair_cards": eg.op_hair_cards, "cloth": ec.op_cloth, "fur_shells": eg.op_fur_shells, "fur_bake": eg.op_fur_bake}
@@ -270,6 +271,25 @@ class GroomTests(unittest.TestCase):
                     for q in cells.get((int(v[0] // 6) + dx, int(v[1] // 6) + dy, int(v[2] // 6) + dz), [])]
             self.assertTrue(near and min(math.dist(v, q) for q in near) <= length + 1.0, v)
         self.assertEqual(result["layers"], 4)
+
+    def test_fur_budget_counts_whole_asset(self):
+        body = self.add("sphere", radius=40, seg=60, rings=30)
+        scene = load("Groom")
+        cards = Mesh()
+        cards.verts = [[0, 0, 0], [1, 0, 0], [1, 1, 0]]
+        cards.faces = [[0, 1, 2]] * 4000
+        cards.uvs = [[[0, 0], [1, 0], [1, 1]]] * 4000
+        cards.face_mat = ["default"] * 4000
+        hqg._add_object(scene, "cards", cards)
+        base = scene.local_mesh(scene.node(body)).tri_count()
+        result = hqg.fur_shells(scene, {"id": body, "layers": 8})
+        total = sum(scene.local_mesh(n).tri_count() for n in scene.data["nodes"] if n.get("type") == "object")
+        self.assertLessEqual(total, 20000)
+        self.assertGreaterEqual(result["layers"], 1)
+        self.assertTrue(result["warnings"] or result["layers"] == 8)
+        full = hqg.fur_shells(scene, {"id": self.add("sphere", radius=10), "budget": 4000 + base})
+        self.assertEqual(full["layers"], 0)  # cards + that body already fill the budget
+        self.assertIn("asset already uses", full["summary"])
 
     def test_mane_ring_coverage(self):
         nid = self.add("sphere", radius=30)
