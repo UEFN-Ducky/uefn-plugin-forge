@@ -23,11 +23,13 @@ svg { display: block; flex: none; }
 .proj { background: var(--sidebar); border-right: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; padding: 6px; overflow-y: auto; min-height: 0; order: 1; }
 .rail { order: 0; } #view { order: 2; } .side { order: 3; }
 .proj input { width: 100%; box-sizing: border-box; }
-.proj .node { display: flex; gap: 6px; align-items: center; width: 100%; text-align: left; background: transparent; border-color: transparent; padding: 3px 6px; }
+.proj .node { display: flex; gap: 6px; align-items: center; justify-content: flex-start; width: 100%; text-align: left; flex: none; background: transparent; border-color: transparent; padding: 3px 6px; }
 .proj .node:hover { background: var(--btn-hover); }
 .proj .node.on { border-left: 2px solid var(--accent); }
 .proj .node img { width: 28px; height: 28px; object-fit: cover; border-radius: var(--radius-sm); background: var(--card); }
-.proj .group { color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 4px 2px; }
+.proj .group { display: flex; justify-content: flex-start; width: 100%; flex: none; min-height: 24px; background: transparent; border-color: transparent; color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 4px 2px; }
+.proj .group:hover { color: var(--fg); background: transparent; }
+.proj #lib-search { position: sticky; top: 0; z-index: 1; flex: none; }
 .proj .item { cursor: grab; }
 #view.drop { outline: 2px dashed var(--accent); outline-offset: -4px; }
 /* Open scenes as the kit's pill tabs: they take the spare width and scroll sideways, never wrap the header. */

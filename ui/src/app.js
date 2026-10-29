@@ -2100,21 +2100,46 @@ async function loadLibrary() {
   paintProjectPanel();
 }
 
+// Collapsed section headers in the Project panel, remembered across reloads.
+let folded = new Set();
+try { folded = new Set(JSON.parse(localStorage.getItem("forge.folded") || "[]")); } catch { /* no storage */ }
+
+function sectionHead(key, label, count) {
+  const open = !folded.has(key);
+  const b = el("button", { type: "button", className: "group", textContent: `${open ? "▾" : "▸"} ${label} (${count})` });
+  b.setAttribute("aria-expanded", String(open));
+  b.onclick = () => {
+    if (open) folded.add(key); else folded.delete(key);
+    try { localStorage.setItem("forge.folded", JSON.stringify([...folded])); } catch { /* no storage */ }
+    paintProjectPanel();
+  };
+  return b;
+}
+
 function paintProjectPanel() {
+  const query = document.getElementById("lib-search").value.trim().toLowerCase();
   const tree = buildTree(browserUi.project || "Project", browserUi.scenes, browserUi.library, state.name);
   const box = document.getElementById("proj-tree");
   box.innerHTML = "";
-  box.append(el("div", { className: "group", textContent: tree.label }));
-  for (const s of tree.children[0].children) {
+  const scenes = tree.children[0].children.filter(s => !query || s.label.toLowerCase().includes(query));
+  box.append(sectionHead("scenes", tree.label, scenes.length));
+  // A search opens every section so its hits show.
+  if (folded.has("scenes") && !query) return paintLibrary(tree, query);
+  for (const s of scenes) {
     const b = el("button", { type: "button", className: "node" + (s.current ? " on" : ""), textContent: s.label });
     b.setAttribute("aria-label", `Open scene ${s.label}`);
     b.onclick = () => browser.openScene(s.name);
     box.append(b);
   }
+  paintLibrary(tree, query);
+}
+
+function paintLibrary(tree, query) {
   const lib = document.getElementById("lib");
   lib.innerHTML = "";
   for (const group of tree.children[1].children) {
-    lib.append(el("div", { className: "group", textContent: `${group.label} (${group.children.length})` }));
+    lib.append(sectionHead(group.lib, group.label, group.children.length));
+    if (folded.has(group.lib) && !query) continue;
     for (const leaf of group.children) {
       const item = { ...leaf.item, kind: group.lib };
       const b = el("button", { type: "button", className: "node item", draggable: true });
@@ -3061,7 +3086,15 @@ function wire() {
     loadLibrary();
   };
   let libTimer = 0;
-  document.getElementById("lib-search").oninput = () => { clearTimeout(libTimer); libTimer = setTimeout(loadLibrary, 250); };
+  // One search for everything: scenes and library here, objects in the Outliner.
+  document.getElementById("lib-search").oninput = ev => {
+    paintProjectPanel();
+    state.search = ev.target.value;
+    const outlinerSearch = document.getElementById("tree-search");
+    if (outlinerSearch) { outlinerSearch.value = state.search; indexTree(); paintTree(); }
+    clearTimeout(libTimer);
+    libTimer = setTimeout(loadLibrary, 250);
+  };
   const viewEl = document.getElementById("view");
   viewEl.addEventListener("dragover", ev => { if ([...ev.dataTransfer.types].includes("application/x-forge-lib")) { ev.preventDefault(); viewEl.classList.add("drop"); } });
   viewEl.addEventListener("dragleave", () => viewEl.classList.remove("drop"));
