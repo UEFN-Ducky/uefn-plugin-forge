@@ -16,11 +16,18 @@ except ImportError:
     code = f"import sys,runpy;sys.path.insert(0,{root!r});runpy.run_module('backend.test_hq_mesh',run_name='__main__')"
     sys.exit(subprocess.call([py, "-c", code]))
 
+import json
+import math
+
 from backend import hq as hq_pkg
 from backend.engine.ops import mesh as engine_mesh
 from backend.hq import mesh as hq_mesh
 
-NAMES = {"remesh", "retopo", "sculpt_hd", "modifiers", "lods"}
+NAMES = {"remesh", "retopo", "sculpt_hd", "modifiers", "lods", "boolean", "hardsurface", "sculpt", "origin"}
+
+
+def short(r):
+    assert len(json.dumps(hq_pkg.compact(r))) <= 300, hq_pkg.compact(r)
 
 
 class hq:  # validate like the hq layer, run the bpy fn directly on an object
@@ -195,18 +202,117 @@ def test_ops_registered():
     assert NAMES <= set(hq_pkg.HQ_OPS), sorted(NAMES - set(hq_pkg.HQ_OPS))
     assert not hasattr(hq_mesh, "OPS")
     text = hq_pkg.run_hq(None, "help", {})["summary"]
-    assert "mesh: lods modifiers remesh retopo sculpt_hd" in text, text
+    assert "mesh: boolean hardsurface lods modifiers origin remesh retopo sculpt sculpt_hd" in text, text
     for n in NAMES:
         assert hq_pkg.run_hq(None, "help", {"op": n})["summary"].startswith(n)
-    for n in ("remesh", "retopo", "sculpt_hd", "modifiers", "lods"):  # engine side discoverable as op_<name>
+    for n in NAMES:  # engine side discoverable as op_<name>
         assert callable(getattr(engine_mesh, "op_" + n))
     r = engine_mesh.modifiers(bpy.context.active_object if bpy.context.active_object else _cube(), {"stack": ["bevel"]})
     assert r["node_data"] == {"stack": [{"type": "bevel"}]}
 
 
-def _cube():
-    bpy.ops.mesh.primitive_cube_add()
+def _cube(size=2.0, loc=(0, 0, 0)):
+    bpy.ops.mesh.primitive_cube_add(size=size, location=loc)
     return bpy.context.active_object
+
+
+def test_modstack_presets():
+    fresh()
+    ob = _cube()
+    r = hq.run("modifiers", ob, {"stack": "midpoly"})
+    bevel, wn = ob.modifiers
+    assert (bevel.type, wn.type) == ("BEVEL", "WEIGHTED_NORMAL"), r
+    assert abs(bevel.width - 0.02) < 1e-6 and bevel.segments == 3 and bevel.harden_normals and bevel.use_clamp_overlap
+    assert abs(bevel.angle_limit - math.radians(30)) < 1e-4 and wn.mode == "FACE_AREA" and wn.keep_sharp
+    assert 12 < r["tris"] < 500, r
+    short(r)
+    r = hq.run("modifiers", ob, {"stack": "subd"})
+    assert [m.type for m in ob.modifiers] == ["BEVEL", "SUBSURF"] and r["tris"] > 500, r
+    assert ob.modifiers[0].segments == 2
+    assert hq.run("modifiers", ob, {"stack": "render"})["tris"] > 200
+    for bad in ("chunky",):
+        try:
+            hq.params("modifiers", {"stack": bad})
+            raise AssertionError("bad preset accepted")
+        except ValueError as e:
+            assert "midpoly" in str(e)
+
+
+def test_bevel_weight_angle():
+    fresh()
+    ob = _cube()
+    hq.run("modifiers", ob, {"stack": [{"type": "bevel", "weight_angle": 45}, "triangulate"]})
+    assert ob.modifiers[0].limit_method == "ANGLE" and abs(ob.modifiers[0].angle_limit - math.radians(45)) < 1e-4
+    assert ob.modifiers[1].type == "TRIANGULATE"
+
+
+def test_boolean_shapes_and_ids():
+    fresh()
+    ob = _cube()
+    base = engine_mesh._tris(ob)
+    r = engine_mesh.boolean(ob, hq.params("boolean", {"cutters": [{"shape": "cylinder", "size": [0.6, 0.6, 3]}]}))
+    assert r["manifold"] and r["tris"] > base, r
+    assert not [o for o in bpy.data.objects if o.name.startswith("hq_cutter")], "cutter left behind"
+    short(r)
+    knob = _cube(0.5, (0, 0, 1.1))
+    r = engine_mesh.boolean(ob, {"cutters": ["k"], "mode": "union"}, {"k": knob})
+    assert r["manifold"] and max(v.co.z for v in ob.data.vertices) > 1.3, r
+    try:
+        hq.params("boolean", {"cutters": []})
+        raise AssertionError("empty cutters accepted")
+    except ValueError:
+        pass
+
+
+def test_hardsurface_kits():
+    for preset in hq_mesh.KITS:
+        fresh()
+        ob = _cube()
+        r = hq.run("hardsurface", ob, {"preset": preset, "depth": 0.03})
+        assert r["manifold"], (preset, r)
+        assert 12 < r["tris"] < 20000, (preset, r)
+        assert r["count"] == {"panel": 4, "vent": 5, "grille": 16, "bolt": 4}[preset], r
+        top = max(v.co.z for v in ob.data.vertices)
+        assert (top > 1.01) == (preset == "bolt"), (preset, top)  # bolts stand proud, cuts go in
+        assert not [o for o in bpy.data.objects if o.name.startswith("hq_kit")]
+        short(r)
+    fresh()
+    ob = _cube()  # a side face, picked by `at`
+    hq.run("hardsurface", ob, {"preset": "vent", "at": [0, -3, 0], "size": 0.8, "depth": 0.05})
+    assert min(v.co.y for v in ob.data.vertices) == -1 and any(abs(v.co.y + 0.95) < 1e-3 for v in ob.data.vertices)
+
+
+def test_sculpt_chain():
+    fresh()
+    ob = sphere("s", r=1.0)
+    faces = len(ob.data.polygons)
+    r = hq.run("sculpt", ob, {"ops": ["inflate:0.1", {"detail": {"strength": 0.05, "scale": 0.3, "seed": 2}},
+                                     "symmetrize:+x", "smooth:2", "multires:1"]})
+    assert r["steps"] == 5 and len(ob.data.polygons) >= 3 * faces, r
+    assert max(v.co.length for v in ob.data.vertices) > 1.03, "inflate did nothing"
+    xs = sorted(round(v.co.x, 3) for v in ob.data.vertices)
+    assert all(abs(a + b) < 2e-3 for a, b in zip(xs, reversed(xs))), "not symmetric"
+    assert watertight(ob)
+    short(r)
+    for bad in (["wobble:1"], ["symmetrize:x"]):
+        try:
+            hq.run("sculpt", ob, {"ops": bad})
+            raise AssertionError(bad)
+        except ValueError:
+            pass
+
+
+def test_origin_corner_and_ground():
+    fresh()
+    ob = _cube(2.0, (1, 2, 3))
+    world = sorted(tuple(round(c, 4) for c in ob.matrix_world @ v.co) for v in ob.data.vertices)
+    r = hq.run("origin", ob, {"at": "corner"})
+    assert [round(c, 4) for c in r["move"]] == [-1, -1, -1], r
+    assert tuple(round(c, 4) for c in ob.location) == (0, 1, 2)
+    assert sorted(tuple(round(c, 4) for c in ob.matrix_world @ v.co) for v in ob.data.vertices) == world, "object moved"
+    r = hq.run("origin", ob, {"at": "bottom", "ground": True})
+    assert abs(min((ob.matrix_world @ v.co).z for v in ob.data.vertices)) < 1e-5 and abs(ob.location.z) < 1e-5, r
+    short(r)
 
 
 if __name__ == "__main__":

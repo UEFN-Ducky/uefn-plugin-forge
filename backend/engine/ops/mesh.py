@@ -1,11 +1,16 @@
-"""bpy mesh ops for Forge HQ: remesh, retopo, sculpt_hd, modifiers, lods.
+"""bpy mesh ops for Forge HQ: remesh, retopo, sculpt_hd, modifiers, lods, boolean, hardsurface,
+sculpt, origin.
 
 Each op is `fn(ob, params) -> dict` on a bpy mesh object (scene must contain it).
 Needs bpy; import lazily so the hq layer stays importable without it.
 """
+import math
 import os
+import random
+
 import bpy
 import bmesh
+from mathutils import Euler, Matrix, Vector, noise
 
 from . import bridge
 
@@ -205,12 +210,29 @@ _MOD = {
     "displace": ("DISPLACE", {"strength": 0.02}),
     "array": ("ARRAY", {"count": 2}),
     "mirror": ("MIRROR", {}),
+    "triangulate": ("TRIANGULATE", {}),
 }
+STACKS = ("midpoly", "subd", "render")
+
+
+def preset_stack(ob, name, unit=1.0):
+    """Hard-surface stacks (Forge units): bevel 1% of the largest side, 30 deg, clamped, hardened + weighted normals."""
+    if name not in STACKS:
+        raise ValueError(f"Unknown stack '{name}'. Presets: {', '.join(STACKS)}")
+    w = round(max(ob.dimensions) / unit * 0.01, 4) or 1.0
+    bevel = {"type": "bevel", "width": w, "segments": 3, "angle_limit": math.radians(30),
+             "use_clamp_overlap": True, "harden_normals": True}
+    wn = {"type": "weighted_normal", "mode": "FACE_AREA", "keep_sharp": True}
+    if name == "subd":  # tight support loops, then Catmull-Clark
+        return [dict(bevel, width=w / 2, segments=2, harden_normals=False), {"type": "subsurf", "levels": 2, "render_levels": 2}]
+    return [dict(bevel, segments=5 if name == "render" else 3), wn]
 
 
 def modifiers(ob, p):
     """Replace the hq_ modifier stack; evaluated mesh is what look/send use."""
     stack = p.get("stack") or []
+    if isinstance(stack, str):
+        stack = preset_stack(ob, stack, p.get("unit", 1.0))
     for m in [m for m in ob.modifiers if m.name.startswith("hq_")]:
         ob.modifiers.remove(m)
     norm = []
@@ -221,7 +243,10 @@ def modifiers(ob, p):
             raise ValueError(f"Unknown modifier '{t}'. Options: {', '.join(_MOD)}")
         bt, defaults = _MOD[t]
         m = ob.modifiers.new(f"hq_{i}_{t}", bt)
-        for a, v in {**defaults, **{k: x * p.get("unit", 1.0) if k in _LEN else x for k, x in s.items()}}.items():
+        given = dict(s)
+        if "weight_angle" in given:  # bevel only the edges sharper than this many degrees
+            given.update(limit_method="ANGLE", angle_limit=math.radians(float(given.pop("weight_angle"))))
+        for a, v in {**defaults, **{k: x * p.get("unit", 1.0) if k in _LEN else x for k, x in given.items()}}.items():
             setattr(m, a, v)
         norm.append({"type": t, **s})
     ev = ob.evaluated_get(bpy.context.evaluated_depsgraph_get())
@@ -269,8 +294,272 @@ def lods(ob, p):
             "node_data": {"ratios": ratios, "tris": counts, "nanite": nanite}}
 
 
+# ---- hard surface ---------------------------------------------------------------
+
+
+def _tris(ob):
+    return sum(len(q.vertices) - 2 for q in ob.data.polygons)
+
+
+def manifold(ob):
+    """Every edge has exactly two faces."""
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    ok = all(len(e.link_faces) == 2 for e in bm.edges)
+    bm.free()
+    return ok
+
+
+def _shape(bm, shape, dims, matrix, seg=16):
+    """Add a box | cylinder | sphere of dims (x, y, z) to bm, centred, then moved by matrix."""
+    m = matrix @ Matrix.Diagonal((*dims, 1.0))
+    if shape == "box":
+        bmesh.ops.create_cube(bm, size=1.0, matrix=m)
+    elif shape == "cylinder":
+        bmesh.ops.create_cone(bm, cap_ends=True, segments=seg, radius1=0.5, radius2=0.5, depth=1.0, matrix=m)
+    elif shape == "sphere":
+        bmesh.ops.create_uvsphere(bm, u_segments=seg, v_segments=max(4, seg // 2), radius=0.5, matrix=m)
+    else:
+        raise ValueError(f"Unknown cutter shape '{shape}'. Options: box, cylinder, sphere")
+
+
+def _object_from(bm, name):
+    me = bpy.data.meshes.new(name)
+    bm.to_mesh(me)
+    bm.free()
+    ob = bpy.data.objects.new(name, me)
+    bpy.context.scene.collection.objects.link(ob)
+    return ob
+
+
+def cutter(spec, unit=1.0):
+    """{shape, size: cm or [x,y,z], at: [x,y,z] cm, rot: [deg x,y,z], seg} -> a temporary bpy object."""
+    size = spec.get("size", 20)
+    dims = [float(s) * unit for s in (size if isinstance(size, (list, tuple)) else [size] * 3)]
+    rot = [math.radians(float(r)) for r in spec.get("rot") or [0, 0, 0]]
+    matrix = Matrix.Translation(Vector(spec.get("at") or [0, 0, 0]) * unit) @ Euler(rot).to_matrix().to_4x4()
+    bm = bmesh.new()
+    _shape(bm, spec.get("shape", "box"), dims, matrix, int(spec.get("seg", 32)))
+    return _object_from(bm, "hq_cutter")
+
+
+def clean(ob, dist=1e-5):
+    """Boolean cleanup: weld, drop slivers, consistent normals."""
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=dist)
+    bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges[:])
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(ob.data)
+    bm.free()
+    ob.data.update()
+
+
+_SOLVER = {"exact": "EXACT", "manifold": "MANIFOLD", "fast": "FLOAT"}
+_BOOL = {"difference": "DIFFERENCE", "union": "UNION", "intersect": "INTERSECT"}
+
+
+def _apply_bool(ob, cut, mode, solver):
+    m = ob.modifiers.new("hq_bool", "BOOLEAN")
+    m.operation, m.solver, m.object = _BOOL[mode], _SOLVER[solver], cut
+    if solver == "exact":
+        m.use_self = True  # joined cutters may overlap each other
+    with _ctx(ob):
+        bpy.ops.object.modifier_apply(modifier=m.name)
+
+
+def boolean(ob, p, objs=None):
+    """Cut (or join) every cutter into ob: Forge ids from objs or {shape, size, at} specs made here."""
+    unit, mode, solver = p.get("unit", 1.0), p.get("mode", "difference"), p.get("solver", "exact")
+    if mode not in _BOOL or solver not in _SOLVER:
+        raise ValueError(f"mode: {', '.join(_BOOL)}; solver: {', '.join(_SOLVER)}")
+    made, cuts = [], []
+    for c in p.get("cutters") or []:
+        if isinstance(c, dict):
+            made.append(cutter(c, unit))
+            cuts.append(made[-1])
+        elif objs and c in objs:
+            cuts.append(objs[c])
+        else:
+            raise ValueError(f"No cutter {c!r}: give a Forge id or {{shape, size, at}}")
+    if not cuts:
+        raise ValueError("cutters is empty")
+    try:
+        for c in cuts:
+            _apply_bool(ob, c, mode, solver)
+    finally:
+        for c in made:
+            bpy.data.objects.remove(c, do_unlink=True)
+    clean(ob)
+    ok = manifold(ob)
+    return {"summary": f"{mode} x{len(cuts)} ({solver}): {_tris(ob)} tris, {'manifold' if ok else 'OPEN edges'}",
+            "tris": _tris(ob), "manifold": ok}
+
+
+KITS = ("panel", "vent", "bolt", "grille")
+
+
+def _surface(ob, at):
+    """(world point, world normal) on ob nearest at (world metres); at None = top centre."""
+    mw = ob.matrix_world
+    if at is None:
+        box = [mw @ Vector(c) for c in ob.bound_box]
+        at = Vector((sum(v.x for v in box) / 8, sum(v.y for v in box) / 8, max(v.z for v in box) + 1.0))
+    ok, loc, nor, _ = ob.closest_point_on_mesh(mw.inverted() @ at)
+    if not ok:
+        raise ValueError("object has no faces")
+    return mw @ loc, (mw.to_3x3() @ nor).normalized()
+
+
+def _kit_parts(preset, size, depth, count, radius):
+    """[(shape, dims, offset)] in a frame whose Z is the surface normal and whose origin is on it."""
+    h = 2 * depth  # half above, half below: cuts `depth` deep, bolts stand `depth` proud
+    if preset == "panel":  # count x count panels separated by grooves
+        g = max(depth, size * 0.015)
+        lines = [-size / 2 + i * size / count for i in range(count + 1)]
+        return ([("box", (size + g, g, h), (0, y, 0)) for y in lines] +
+                [("box", (g, size + g, h), (x, 0, 0)) for x in lines])
+    if preset == "vent":  # count slots
+        step = size / count
+        return [("box", (size, step * 0.5, h), (0, -size / 2 + step * (i + 0.5), 0)) for i in range(count)]
+    if preset == "grille":  # count x count round holes
+        step = size / count
+        r = radius or step * 0.3
+        return [("cylinder", (2 * r, 2 * r, h), (-size / 2 + step * (i + .5), -size / 2 + step * (j + .5), 0))
+                for i in range(count) for j in range(count)]
+    r = radius or size * 0.05  # bolts on a ring of `size`
+    return [("cylinder", (2 * r, 2 * r, h), (size / 2 * math.cos(a), size / 2 * math.sin(a), 0))
+            for a in (2 * math.pi * (i + .5) / count for i in range(count))]
+
+
+def hardsurface(ob, p):
+    """Detail kit cut into (or bolted onto) the surface nearest `at`, aligned to its normal."""
+    unit, preset = p.get("unit", 1.0), p.get("preset", "panel")
+    if preset not in KITS:
+        raise ValueError(f"Unknown preset '{preset}'. Options: {', '.join(KITS)}")
+    span = max(ob.dimensions) or 1.0
+    size = float(p["size"]) * unit if p.get("size") else span * 0.3
+    depth = float(p["depth"]) * unit if p.get("depth") else span * 0.01
+    count = int(p.get("count") or {"panel": 2, "vent": 5, "grille": 4, "bolt": 4}[preset])
+    radius = float(p["radius"]) * unit if p.get("radius") else 0.0
+    loc, nor = _surface(ob, Vector(p["at"]) * unit if p.get("at") else None)
+    frame = Matrix.Translation(loc) @ nor.to_track_quat("Z", "Y").to_matrix().to_4x4()
+    seg = 8 if preset == "bolt" else 12  # segment table: bolts 6-8, small holes 12
+    bm = bmesh.new()
+    for shape, dims, off in _kit_parts(preset, size, depth, count, radius):
+        _shape(bm, shape, dims, frame @ Matrix.Translation(off), seg)
+    cut = _object_from(bm, "hq_kit")
+    try:
+        _apply_bool(ob, cut, "union" if preset == "bolt" else "difference", "exact")
+    finally:
+        bpy.data.objects.remove(cut, do_unlink=True)
+    clean(ob)
+    n = count * count if preset in ("panel", "grille") else count
+    return {"summary": f"{preset} x{n}, depth {depth / unit:g}: {_tris(ob)} tris" + ("" if manifold(ob) else ", OPEN edges"),
+            "tris": _tris(ob), "count": n, "manifold": manifold(ob)}
+
+
+# ---- procedural sculpt ----------------------------------------------------------
+
+_SYM = {"+x": "X", "-x": "-X", "+y": "Y", "-y": "-Y", "+z": "Z", "-z": "-Z"}
+SCULPT_STEPS = ("inflate", "smooth", "symmetrize", "detail", "multires", "remesh")
+MAX_FACES = 400000
+
+
+def _steps(ops):
+    """["inflate:2", {"detail": {...}}] -> [(name, value)]."""
+    out = []
+    for s in ops or []:
+        items = s.items() if isinstance(s, dict) else [str(s).partition(":")[::2]]
+        for k, v in items:
+            if k not in SCULPT_STEPS:
+                raise ValueError(f"Unknown sculpt step '{k}'. Steps: {', '.join(SCULPT_STEPS)}")
+            out.append((k, v))
+    return out
+
+
+def _bm_step(ob, fn):
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bm.normal_update()
+    fn(bm)
+    bm.to_mesh(ob.data)
+    bm.free()
+    ob.data.update()
+
+
+def _detail(bm, v, unit):
+    v = v if isinstance(v, dict) else {"strength": float(v or 1)}
+    k = float(v.get("strength", 1)) * unit
+    scale = float(v.get("scale", 20)) * unit or 1.0
+    off = Vector([random.Random(int(v.get("seed", 0))).uniform(-100, 100) for _ in range(3)])
+    moves = [(vert, vert.normal * k * noise.fractal(vert.co / scale + off, 1.0, 2.0, 4)) for vert in bm.verts]
+    for vert, d in moves:
+        vert.co += d
+
+
+def sculpt(ob, p):
+    """Headless sculpt chain: inflate:cm, smooth:n, symmetrize:+x, detail:{strength,scale,seed} (cm), multires:n, remesh:cm."""
+    unit, steps = p.get("unit", 1.0), _steps(p.get("ops"))
+    if not steps:
+        raise ValueError("ops is empty, e.g. [\"remesh:2\", \"inflate:1\", \"smooth:3\", \"symmetrize:+x\"]")
+    for k, v in steps:
+        if k == "inflate":
+            _bm_step(ob, lambda bm, d=float(v) * unit: [setattr(x, "co", x.co + x.normal * d) for x in bm.verts])
+        elif k == "smooth":
+            _bm_step(ob, lambda bm, n=int(v or 1): [bmesh.ops.smooth_vert(
+                bm, verts=bm.verts[:], factor=0.5, use_axis_x=True, use_axis_y=True, use_axis_z=True) for _ in range(n)])
+        elif k == "symmetrize":
+            if str(v) not in _SYM:
+                raise ValueError(f"symmetrize takes {', '.join(_SYM)}")
+            _bm_step(ob, lambda bm: bmesh.ops.symmetrize(
+                bm, input=bm.verts[:] + bm.edges[:] + bm.faces[:], direction=_SYM[str(v)], dist=1e-4 * max(ob.dimensions)))
+        elif k == "detail":
+            _bm_step(ob, lambda bm: _detail(bm, v, unit))
+        elif k == "multires":
+            n = int(v or 1)
+            if len(ob.data.polygons) * 4 ** n > MAX_FACES:
+                raise ValueError(f"multires:{n} would pass {MAX_FACES} faces; use fewer levels or sculpt_hd")
+            m = ob.modifiers.new("hq_sub", "SUBSURF")
+            m.levels = m.render_levels = n
+            with _ctx(ob):
+                bpy.ops.object.modifier_apply(modifier=m.name)
+        else:
+            remesh(ob, {"voxel": float(v), "unit": unit})
+    return {"summary": f"sculpt {len(steps)} steps: {_tris(ob)} tris", "tris": _tris(ob), "steps": len(steps)}
+
+
+ORIGINS = ("bottom", "center", "corner")
+
+
+def origin(ob, p):
+    """Pivot to the bottom centre | centre | min corner; ground=True drops the lowest point to z=0.
+    Returns move: the world shift (Forge units) the host adds to the node position."""
+    at, unit = p.get("at", "bottom"), p.get("unit", 1.0)
+    if at not in ORIGINS:
+        raise ValueError(f"at must be one of: {', '.join(ORIGINS)}")
+    me = ob.data
+    if not len(me.vertices):
+        raise ValueError("object has no vertices")
+    lo = Vector([min(v.co[i] for v in me.vertices) for i in range(3)])
+    hi = Vector([max(v.co[i] for v in me.vertices) for i in range(3)])
+    mid = (lo + hi) / 2
+    pivot = {"bottom": Vector((mid.x, mid.y, lo.z)), "center": mid, "corner": lo}[at]
+    me.transform(Matrix.Translation(-pivot))
+    me.update()
+    move = ob.matrix_world.to_3x3() @ pivot
+    ob.matrix_world = Matrix.Translation(move) @ ob.matrix_world
+    if p.get("ground"):
+        low = min((ob.matrix_world @ v.co).z for v in me.vertices)
+        move.z -= low
+        ob.matrix_world = Matrix.Translation((0, 0, -low)) @ ob.matrix_world
+    move = [c / unit for c in move]
+    return {"summary": f"origin {at}" + (" grounded" if p.get("ground") else "") + ", moved %.1f %.1f %.1f" % tuple(move),
+            "move": move}
+
+
 FNS = {"remesh": remesh, "retopo": retopo, "sculpt_hd": sculpt_hd,
-       "modifiers": modifiers, "lods": lods}
+       "modifiers": modifiers, "lods": lods, "hardsurface": hardsurface, "sculpt": sculpt, "origin": origin}
 
 
 def _each(name, p, write):
@@ -306,3 +595,23 @@ def op_modifiers(p):
 
 def op_lods(p):
     return _each("lods", p, False)
+
+
+def op_hardsurface(p):
+    return _each("hardsurface", p, True)
+
+
+def op_sculpt(p):
+    return _each("sculpt", p, True)
+
+
+def op_origin(p):
+    return _each("origin", p, True)
+
+
+def op_boolean(p):
+    """The target is p['id']; every other loaded object can be a cutter."""
+    objs, _ = bridge.load(p["scene"])
+    out = boolean(objs[p["id"]], {**p, "unit": float(p["scene"].get("unit", 0.01))}, objs)
+    out["scene"] = bridge.dump(p["scene"])
+    return out

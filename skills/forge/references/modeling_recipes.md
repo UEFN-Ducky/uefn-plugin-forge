@@ -10,6 +10,10 @@ metadata:
 
 Every recipe is one `forge_batch`. Change sizes and colors, keep the shape of the calls. Render after each one (`forge_render`), then adjust with `forge_edit` or `forge_mesh_op`.
 
+## Intent first
+
+Before the first call, write one line each: **silhouette** (what reads at 20 m), **proportions** (height against the 190 cm player), **parts** (3-7 pieces, biggest first), **connections** (what sits on, through or into what), **surface** (metal, wood, cloth; worn or clean). Build in that order and check the silhouette with a `look` before any detail. Hard-surface detail: [hardsurface](hardsurface.md). Buildings, kits, scatter, cables: [procedural](procedural.md).
+
 ## Scale (centimetres)
 
 | Thing | Size |
@@ -23,6 +27,9 @@ Every recipe is one `forge_batch`. Change sizes and colors, keep the shape of th
 | Table | 75 H top; chair seat 45 |
 | Rifle / sword | 80-120 long; pistol about 20 |
 | Tree (game) | 400-1200 tall |
+| Ceiling | 300-384 above the floor |
+| Phone / mug | 15 / 10 tall |
+| Car | 450 L x 180 W x 145 H |
 
 Build next to a 190 cm box when unsure, then delete it. Props that ignore player scale read as toys or monuments.
 
@@ -169,7 +176,7 @@ Booleans need closed shapes. Planes and open grids give holes. Join and boolean 
 
 ## Kits and grids
 
-Snap kit pieces to the 512 grid: walls 512 wide and 384 tall, floors 512 x 512. Keep each piece's pivot on its base (`forge_mesh_op op="origin"`, or `forge_fix`) so they snap in UEFN. `forge_add count=N` lays out N instances of one shared shape on a 512 grid: edit one and the others follow until you change it directly.
+Snap kit pieces to the 512 grid: walls 512 wide and 384 tall, floors 512 x 512. `forge_hq(op="procedural", params={kind: "wall", opening: "door"|"window"|"none"})` and `kind: "floor"` make those pieces as one `SM_` mesh with the pivot on the min corner (see [procedural](procedural.md)). Keep each piece's pivot on its base (`forge_mesh_op op="origin"`, or `forge_fix`) so they snap in UEFN. `forge_add count=N` lays out N instances of one shared shape on a 512 grid: edit one and the others follow until you change it directly.
 
 ## Art direction
 

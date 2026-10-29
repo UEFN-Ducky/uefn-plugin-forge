@@ -64,6 +64,31 @@ A boulder, sitting on its base:
 ]
 ```
 
+## Sculpt chain (one call)
+
+`forge_hq(op="sculpt", id, params={ops: [...]})` runs steps in order on the base mesh, no points needed. Lengths cm.
+
+| step | Does |
+|---|---|
+| `remesh:2` | voxel remesh: even, watertight resolution (about 1 % of the height) |
+| `inflate:1` | swell along normals (negative thins) |
+| `smooth:3` | relax n passes |
+| `symmetrize:+x` | copy the +X half onto -X (`-x`, `±y`, `±z` too) |
+| `{"detail": {"strength": 2, "scale": 15, "seed": 1}}` | fractal noise along normals; `scale` = feature size |
+| `multires:1` | Catmull-Clark x4 faces per level (capped at 400k faces) |
+
+Work in three passes and `look` after each: **primary** (mass and silhouette: remesh, inflate, symmetrize), **secondary** (planes and forms: `forge_sculpt` clay, flatten, crease strokes), **tertiary** (surface: `detail` small scale, or `sculpt_hd` in a sidecar for baking). Remesh before UVs and rigging, never after.
+
+```json
+[
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Blob", "params": {"radius": 40}},
+  {"tool": "forge_hq", "op": "sculpt", "id": "$0", "params": {"ops": ["remesh:2", {"detail": {"strength": 6, "scale": 30, "seed": 3}}, "symmetrize:+x", "smooth:2", {"detail": {"strength": 1, "scale": 6}}]}},
+  {"tool": "forge_hq", "op": "origin", "id": "$0", "params": {"at": "bottom", "ground": true}}
+]
+```
+
+**Done when:** `look="three"` shows the mass reading clearly from the front and side, the two halves match, and the summary tris fit the budget.
+
 ## Shape keys
 
 A shape key stores another position for every vertex: a smile, a blink, a squash. It blends in by a weight from 0 to 1 and ships as a morph target.
@@ -116,3 +141,6 @@ A head with a smile and a puff, and a clip that plays the smile:
 ## The user in the dock
 
 The user sculpts the same mesh from the dock: Mode, then Sculpt, pick a brush and a target (Base mesh or a shape key), and drag. `[` and `]` resize the brush, "+ Key" adds a shape key, and Subdivide and Decimate step the resolution up or down. Each finished stroke is one undo step, like each of yours, and both of you can work on the same object in turns.
+
+---
+Sculpt chain and pass order adapted from Blender Agent Skills (sculpting) by EL4CTEO, MIT licence.
