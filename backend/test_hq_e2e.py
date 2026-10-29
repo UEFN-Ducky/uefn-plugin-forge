@@ -108,6 +108,18 @@ class EndToEnd(unittest.TestCase):
         draw.ellipse((48, 40, 208, 232), fill=(230, 160, 60))
         draw.ellipse((96, 90, 160, 150), fill=(200, 80, 20))
         img.save(art)
+        # Fresh shapes for the hard-surface, procedural and QA ops (the crate is remeshed and sculpted below).
+        add = lambda kind, nm, pos, prm: self.batch(name, [{"tool": "forge_add", "kind": kind, "object_name": nm, "pos": pos,
+                                                          "params": prm}])["ids"][0]
+        hs = add("box", "Panel", [400, 0, 0], {"w": 80, "d": 80, "h": 40})
+        box2 = add("box", "Dropper", [0, 400, 120], {"w": 30, "d": 30, "h": 30})
+        ground = add("plane", "Ground", [0, 400, 0], {"w": 300, "d": 300})
+        blob = add("sphere", "Blob", [20, 400, 140], {"radius": 20})
+        bvh = Path(self.tmp.name) / "walk.bvh"
+        bvh.write_text("HIERARCHY\nROOT Hips\n{\n OFFSET 0 0 0\n CHANNELS 6 Xposition Yposition Zposition Zrotation Xrotation Yrotation\n"
+                       " JOINT LeftUpLeg\n {\n  OFFSET 10 0 0\n  CHANNELS 3 Zrotation Xrotation Yrotation\n"
+                       "  End Site\n  {\n   OFFSET 0 -40 0\n  }\n }\n}\nMOTION\nFrames: 2\nFrame Time: 0.033333\n"
+                       "0 90 0 0 0 0 0 0 0\n0 90 0 0 10 0 0 10 0\n")
         # Order matters only where an op reads another's output (hair before hair_cards).
         cases = [
             ("recipe", {"recipe": "barrel"}),
@@ -139,7 +151,28 @@ class EndToEnd(unittest.TestCase):
             ("project_ref", {"id": crate, "images": {"front": str(art)}, "size": 256}),
             ("paint_bake", {"ids": [crate], "size": 256}),
             ("toon", {"ids": [crate]}),
+            ("hardsurface", {"id": hs, "preset": "panel"}),
+            ("boolean", {"id": hs, "cutters": [{"shape": "cylinder", "size": [10, 10, 100]}]}),
+            ("origin", {"id": hs, "at": "bottom"}),
+            ("uv", {"id": hs, "res": 512}),
+            ("topology", {"id": hs}),
+            ("sculpt", {"id": blob, "ops": ["smooth:2"]}),
+            ("sdf_blend", {"ids": [blob, box2]}),
+            ("gn", {"id": ground, "preset": "pebbles"}),
+            ("scatter", {"on": ground, "items": [hs], "density": 1, "seed": 3}),
+            ("drop", {"ids": [box2], "onto": [ground], "frames": 20}),
+            ("procedural", {"kind": "building", "floors": 3}),
+            ("light", {"id": hs, "preset": "studio"}),
+            ("qa", {"id": hs, "profile": "uefn", "budget": "prop"}),
+            ("collision", {"id": hs, "kind": "hull"}),
+            ("print_check", {"id": hs}),
+            ("ref_compare", {"id": hs, "front": str(art)}),
+            ("rig_check", {"profile": "ue5"}),
+            ("stress", {}),
+            ("retarget", {"src": str(bvh)}),
+            ("bake_clip", {"clip": "Run"}),
             ("export", {"target": "generic"}),
+            ("convert", {"path": str(load(name).folder / "exports" / (name + ".glb")), "to": "obj"}),
         ]
         # These spend the person's Tripo/Meshy credits; test_hq_generate covers them with a mocked provider.
         paid = {"generate", "creature_from_prompt"}
@@ -218,6 +251,16 @@ class EndToEnd(unittest.TestCase):
         self.assertTrue(options, "LODs from lods() must reach UEFN")
         self.assertEqual(options[0]["lod_count"], 4, options)
         self.assertIn("/AS_", json.dumps(sent), "the run clip ships as an AS_ animation")
+
+    def test_look_around_and_turntable(self):
+        name = self.scene("E2ELook")
+        self.batch(name, [{"tool": "forge_add", "kind": "box", "params": {"w": 40, "d": 20, "h": 60}}])
+        for look in ("back", "three_back", "left", "around", "turntable"):
+            out = self.t["forge_batch"](name=name, steps=[{"tool": "forge_edit", "id": load(name).data["nodes"][0]["id"]}], look=look)
+            self.assertNotIn("look_error", out, look)
+            self.assertTrue(out.get("seen"), (look, out))
+        with self.assertRaises(Exception):
+            self.t["forge_batch"](name=name, steps=[], look="sideways")
 
 
 if __name__ == "__main__":

@@ -1843,7 +1843,8 @@ def _noted(result: dict, rd) -> dict:
     return result
 
 
-_LOOK_VIEWS = {"ai": ["three", "front", "side", "top"]}
+_LOOK_VIEWS = {"ai": ["three", "front", "side", "top"], "around": ["front", "side", "back", "left"],
+               "turntable": [f"az{a}" for a in range(0, 360, 45)]}
 
 
 def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
@@ -1860,7 +1861,7 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
     views = ["three"] if ids else _LOOK_VIEWS.get(look, [look])
     bad = [v for v in views if v not in _VIEWS]
     if bad:
-        raise ValueError(f"look={look!r} is not a view. Use one of: {', '.join([*_VIEWS, 'ai'])}, or a list of ids")
+        raise ValueError(f"look={look!r} is not a view. Use one of: {', '.join([*_LOOK_VIEWS, *(v for v in _VIEWS if not v.startswith('az'))])}, or a list of ids")
 
     def wanted(n):
         while n is not None:

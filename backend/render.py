@@ -7,6 +7,7 @@ draw in the wrong order. Upgrade path is a z-buffer if a prop reads wrong.
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import tempfile
@@ -31,7 +32,12 @@ _VIEWS = {
     "front": (0.0, -2.2, 0.45),
     "top": (0.0, -0.01, 2.4),
     "side": (2.2, 0.0, 0.45),
+    "left": (-2.2, 0.0, 0.45),
+    "back": (0.0, 2.2, 0.45),
+    "three_back": (-1.3, 1.6, 0.9),
 }
+# Turntable stills: az0 is the front, then every 45 degrees clockwise seen from above.
+_VIEWS.update({f"az{a}": (2.2 * math.sin(math.radians(a)), -2.2 * math.cos(math.radians(a)), 0.45) for a in range(0, 360, 45)})
 
 
 def render_mesh(mesh: Mesh, view: str = "three", size: tuple[int, int] = (320, 240), materials: dict | None = None,

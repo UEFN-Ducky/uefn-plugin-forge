@@ -11,7 +11,9 @@ from mathutils import Vector
 
 from . import bridge, toon
 
-_DIRS = {"three": (1.3, -1.6, 0.9), "front": (0.0, -2.2, 0.45), "top": (0.0, -0.01, 2.4), "side": (2.2, 0.0, 0.45)}
+_DIRS = {"three": (1.3, -1.6, 0.9), "front": (0.0, -2.2, 0.45), "top": (0.0, -0.01, 2.4), "side": (2.2, 0.0, 0.45),
+         "left": (-2.2, 0.0, 0.45), "back": (0.0, 2.2, 0.45), "three_back": (-1.3, 1.6, 0.9)}
+_DIRS.update({f"az{a}": (2.2 * math.sin(math.radians(a)), -2.2 * math.cos(math.radians(a)), 0.45) for a in range(0, 360, 45)})
 _QUALITY = {"look": 16, "final": 64}
 
 

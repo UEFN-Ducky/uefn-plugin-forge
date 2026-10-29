@@ -421,7 +421,7 @@ def register_tools(api: Any) -> None:
     @api.tool(**host)
     def forge_render(name: str = "", views: list | None = None, id: str = "", clip: str = "", frames: list | None = None,
                      style: str = "pbr") -> dict:
-        """Render PNGs: three|front|side|top; clip= renders frames of a motion; style=pbr|toon."""
+        """Render PNGs: three|front|side|top|left|back|three_back|az0..az315; clip= renders frames of a motion; style=pbr|toon."""
         if clip:
             return _run(api, name, "render", _given(views=views or ["three"], id=id, clip=clip, frames=frames, style=style))
         return _run(api, name, "render", {"views": views or ["three", "front", "top"], "id": id, "style": style})
