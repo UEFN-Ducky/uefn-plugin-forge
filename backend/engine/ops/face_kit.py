@@ -35,11 +35,11 @@ SPECIES = {
     "bird": dict(muzzle=0, cheeks=False, nose=0.22, nose_v=-0.05, mouth="none", mouth_w=0, mouth_v=0, ear=None),
 }
 # cm above the head surface, base + dome; the deepest stack (nose + mouth carve) stays under 0.5 cm
-LIFT = {"outline": 0.04, "white": 0.10, "iris": 0.16, "pupil": 0.21, "glint": 0.26, "brow": 0.12, "mouth": 0.27}
+LIFT = {"white": 0.10, "iris": 0.16, "pupil": 0.21, "glint": 0.26, "brow": 0.12, "mouth": 0.27}
 CARVE_CM = 0.15
 COLORS = {
-    "EyeOutline": ((0.12, 0.07, 0.04), 0.6, 0), "EyeWhite": ((0.98, 0.97, 0.93), 0.15, 0),
-    "EyeIris": ((0.30, 0.16, 0.07), 0.1, 0), "EyePupil": ((0.03, 0.02, 0.02), 0.05, 0),
+    "EyeWhite": ((0.98, 0.97, 0.93), 0.05, 0),  # glossy: eye layers are low roughness, the glints glow
+    "EyeIris": ((0.30, 0.16, 0.07), 0.04, 0), "EyePupil": ((0.03, 0.02, 0.02), 0.03, 0),
     "EyeGlint": ((1.0, 1.0, 1.0), 0.1, 1.0), "Brow": ((0.22, 0.11, 0.05), 0.6, 0),
     "Muzzle": ((0.96, 0.88, 0.70), 0.7, 0), "Nose": ((0.07, 0.04, 0.04), 0.25, 0),
     "MouthLine": ((0.16, 0.08, 0.05), 0.6, 0), "EarInner": ((0.93, 0.58, 0.62), 0.7, 0),
@@ -163,7 +163,6 @@ def _eyes(P, st, eye_size, look):
     bi = min(b * 0.92, ai * 1.12)
     for s in (1, -1):
         c = (s * xe, ve)
-        P.add("eye", "EyeOutline", _disc(_ellipse(a + 0.012, b + 0.012), c, lambda t: LIFT["outline"]))
         P.add("eye", "EyeWhite", _disc(_ellipse(a, b), c, lambda t: LIFT["white"]))
         ic = (c[0] + look[0] * (a - ai) * 0.8, c[1] + look[1] * (b - bi) * 0.8)
         P.add("eye", "EyeIris", _disc(_ellipse(ai, bi), ic, lambda t: LIFT["iris"]))
@@ -283,16 +282,35 @@ def _sphere_piece(size, tilt, base, side, anchor, tdisp, hoff):
     return out, faces
 
 
-def _ears(head, sp, unit):
+def _fit_in_mane(verts, base, centre, limit):
+    """Shrink one ear piece about its base until every vertex is within `limit` of the head centre."""
+    for _ in range(4):
+        far = max((v - centre).length for v in verts)
+        if far <= limit:
+            break
+        reach = (base - centre).length
+        k = max((limit - reach) / max(far - reach, 1e-9), 0.2) * 0.98
+        verts = [base + (v - base) * k for v in verts]
+    return verts
+
+
+def _ears(head, sp, unit, forward=False, mane=1.3):
+    """Ears on the head. forward: set on the front of the head and kept inside a mane shell of radius mane * the
+    head's, so a ray from behind (+Y) meets the mane before any ear."""
     if not sp["ear"]:
         return None
     anchor, fx, fw, fh, tilt = sp["ear"]
     W = head.W
     th = 0.045 * W
+    centre = Vector((head.cx, head.cy, head.zc))
+    limit = 0.97 * mane * W / 2
     outer = head.ob.data.materials[0] if len(head.ob.data.materials) and head.ob.data.materials[0] else None
     verts, faces, fmat = [], [], []
     for side in (1, -1):
-        if anchor == "top":
+        if forward:
+            out = Vector((side * (0.5 if anchor == "top" else 1.0), -0.3, 0.75 if anchor == "top" else 0.1)).normalized()
+            o, d = centre + out * W * 2, -out
+        elif anchor == "top":
             o, d = Vector((head.cx + side * fx * W, head.cy, head.zmax + W)), Vector((0, 0, -1))
         else:
             o, d = Vector((head.cx + side * W, head.cy, head.zc + 0.05 * W)), Vector((-side, 0, 0))
@@ -304,6 +322,8 @@ def _ears(head, sp, unit):
         for kind, size, tdisp, mi in (("outer", (fw * W, th, fh * W), 0, 0),
                                       ("inner", (fw * W * 0.62, th * 0.5, fh * W * 0.62), front * th * 0.7, 1)):
             vs, fs = _sphere_piece(size, tilt, base, side, anchor, tdisp, hoff)
+            if forward:
+                vs = _fit_in_mane(vs, base, centre, limit)
             n = len(verts)
             verts += vs
             faces += [[n + i for i in f] for f in fs]
@@ -335,7 +355,7 @@ def build_face(head, p):
     ve = _eyes(P, st, float(p["eye_size"]), [max(-1.0, min(1.0, float(x))) for x in p.get("look", [0, 0])])
     lines = _nose_mouth(P, sp)
     face = _face_object(h, P, unit, ve, st, sp, p["eye_size"])
-    ears = _ears(h, sp, unit)
+    ears = _ears(h, sp, unit, bool(p.get("ears_forward")), float(p.get("mane", 1.3)))
     _carve(h, lines, unit)
     return face, ears
 
@@ -346,6 +366,7 @@ def op_cartoon_face(p):
     if head is None or head.type != "MESH":
         raise ValueError("cartoon_face needs the head mesh object (head=<id>)")
     face, ears = build_face(head, {**p, "unit": float(p["scene"].get("unit", 0.01))})
-    return {"summary": "%s %s face on %s: %d verts%s; shapes blink smile brow_up" % (
-        p["style"], p["species"], head.name, len(face.data.vertices), " + ears" if ears else ""),
-        "scene": bridge.dump(p["scene"])}
+    parts = ["eyes glossy x2", "brows", "nose"] + (["smile"] if SPECIES[p["species"]]["mouth"] != "none" else [])
+    if ears:
+        parts.append("ears fwd" if p.get("ears_forward") else "ears")
+    return {"summary": "face %s: %s" % (p["species"], ", ".join(parts)), "scene": bridge.dump(p["scene"])}

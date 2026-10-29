@@ -119,6 +119,53 @@ def test_species_and_look():
     assert ib > ia + 0.003, "look=[1,0] did not move the irises (%.4f -> %.4f)" % (ia, ib)
 
 
+def test_eye_layers_no_ring():
+    (face, _), _ = build()
+    names = [m.name for m in face.data.materials]
+    layers = [n for n in names if n.startswith("Eye")]
+    assert sorted(layers) == ["EyeGlint", "EyeIris", "EyePupil", "EyeWhite"], layers  # 4 layers, no EyeOutline ring
+    assert all(face.data.materials[names.index(n)].roughness <= 0.15 for n in layers if n != "EyeGlint"), "eyes not glossy"
+    glints = [q for q in face.data.polygons if face.data.materials[q.material_index].name == "EyeGlint"]
+    assert glints and len({v for q in glints for v in q.vertices}) > 0
+
+
+def _hits_from_behind(ears, mane_r, centre):
+    """Per ear vertex: (mane entry y, ear first-hit y) for a ray along -Y from behind the head."""
+    bm = bmesh.new()
+    bmesh.ops.create_uvsphere(bm, u_segments=48, v_segments=24, radius=mane_r)
+    bmesh.ops.translate(bm, verts=bm.verts, vec=centre)
+    mane = BVHTree.FromBMesh(bm)
+    bm.free()
+    mw = ears.matrix_world
+    verts = [mw @ v.co for v in ears.data.vertices]
+    tree = BVHTree.FromPolygons(verts, [tuple(p.vertices) for p in ears.data.polygons])
+    out = []
+    for v in verts[::7]:
+        o = Vector((v.x, centre.y + 3, v.z))
+        m = mane.ray_cast(o, Vector((0, -1, 0)))[0]
+        e = tree.ray_cast(o, Vector((0, -1, 0)))[0]
+        out.append((m.y if m else None, e.y if e else None))
+    return out
+
+
+def test_ears_forward_hidden_from_behind():
+    (_, ears), head = build(ears_forward=True, mane=1.3)
+    centre = head.matrix_world.translation
+    mane_r = 1.3 * HEAD_W / 2
+    hits = _hits_from_behind(ears, mane_r, centre)
+    assert hits and all(m is not None and e is not None and m > e for m, e in hits), "an ear is the first hit from behind: %s" % hits[:3]
+    assert max(v.co.y for v in ears.data.vertices) < centre.y + mane_r
+    (_, flat), _ = build()
+    loose = _hits_from_behind(flat, mane_r, centre)
+    assert any(m is None or m <= e for m, e in loose if e is not None), "default ears should poke out of the mane"
+    for bad in ({"mane": 0.5}, {"mane": 3}):
+        try:
+            hq_face.params(bad)
+            assert False, bad
+        except ValueError as e:
+            assert "mane must" in str(e), e
+
+
 def test_params_and_registration():
     for bad in ({"style": "scary"}, {"species": "fish"}, {"eye_size": 0.9}, {"look": [1]}, {"mouthy": 1}):
         try:

@@ -8,7 +8,8 @@ NAME = "face_kit"
 
 STYLES = ("cute", "heroic", "realistic")
 SPECIES = ("cat", "dog", "human", "bird")
-_DEFAULTS = {"style": "cute", "species": "cat", "eye_size": 0.22, "look": [0, 0]}
+_DEFAULTS = {"style": "cute", "species": "cat", "eye_size": 0.22, "look": [0, 0],
+             "ears_forward": False, "mane": 1.3}
 
 
 def params(given):
@@ -28,11 +29,15 @@ def params(given):
     if not (isinstance(look, (list, tuple)) and len(look) == 2):
         raise ValueError("look must be [x, y] in -1..1, e.g. [0.3, 0]")
     p["look"] = [max(-1.0, min(1.0, float(v))) for v in look]
+    p["ears_forward"] = bool(p["ears_forward"])
+    p["mane"] = float(p["mane"])
+    if not 1.05 <= p["mane"] <= 2.5:
+        raise ValueError("mane must be 1.05-2.5: the mane shell radius as a multiple of the head radius (lion 1.3)")
     return p
 
 
-@op("cartoon_face", "cartoon_face(head, style=cute|heroic|realistic, species=cat|dog|human|bird, eye_size=0.22, look=[0,0]) "
-                    "eyes (white, iris, pupil, glints), brows, cream muzzle + cheeks, nose, mouth crease, ears; "
+@op("cartoon_face", "cartoon_face(head, style=cute|heroic|realistic, species=cat|dog|human|bird, eye_size=0.22, look=[0,0], ears_forward=false, mane=1.3) "
+                    "glossy eyes (white, iris, pupil, glints; no ring), brows, cream muzzle + cheeks, nose, mouth crease, ears (ears_forward: front of the head, inside a mane shell of mane x head radius, hidden from behind); "
                     "shape keys blink smile brow_up. Head must face -Y")
 def cartoon_face(scene, p):
     ident = str(p.get("head") or p.get("id") or "")
