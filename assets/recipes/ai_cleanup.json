@@ -1,0 +1,11 @@
+{"about": "Clean an imported or scanned mesh: weld, quad retopo copy, smart UVs, bake the original onto it, delete the original, pivot on the floor; ends in qa. Pass mesh=<object id>", "params": {"mesh": "", "faces": 1400, "res": 1024, "budget": "prop"},
+ "steps": [
+  {"tool": "forge_fix", "id": "$mesh"},
+  {"tool": "forge_duplicate", "id": "$mesh", "offset": [0, 0, 0]},
+  {"tool": "forge_hq", "op": "retopo", "id": "$1", "params": {"method": "quadriflow", "faces": "$faces"}},
+  {"tool": "forge_hq", "op": "uv", "id": "$1", "params": {"method": "smart"}},
+  {"tool": "forge_hq", "op": "bake", "id": "$1", "params": {"from_high": "$mesh", "size": "$res"}},
+  {"tool": "forge_delete", "ids": ["$mesh"]},
+  {"tool": "forge_hq", "op": "origin", "id": "$1", "params": {"at": "bottom", "ground": true}},
+  {"tool": "forge_hq", "op": "qa", "id": "$1", "params": {"profile": "uefn", "budget": "$budget", "fix": true}}
+ ]}

@@ -23,6 +23,23 @@ metadata:
 | `rock_boulder` | radius 60, stone granite | sculpted, decimated, smart-unwrapped |
 | `crystal_cluster`, `mushroom_giant` | size/height, glow or cap colour | set dressing |
 
+## Pipeline recipes
+
+Each pipeline recipe ends with `qa` (score in the summary). Call it with `look="three"` to see the result.
+
+```json
+forge_batch(name="Props", steps=[{"tool": "forge_hq", "op": "recipe", "params": {"recipe": "prop_midpoly", "material": "oak"}}], look="three")
+```
+
+| Recipe | Params (defaults) | Pipeline |
+|---|---|---|
+| `prop_midpoly` | w 60, d 60, h 50, material worn_steel, bevel 1.5 | box → bevel(2 seg) + weighted normals → smart UV → pivot on floor → `qa uefn prop` |
+| `prop_baked` | size 60, material worn_steel, detail panel\|vent\|bolt\|grille, res 1024 | low box + panelled high copy → smart UV → `bake from_high` → high deleted → pivot → `qa` |
+| `ai_cleanup` | mesh (object id, required), faces 1400 (quads, ~2.8k tris), res 1024, budget prop | weld (`forge_fix`) → quadriflow copy → smart UV → bake the original onto it → original deleted → pivot → `qa` |
+| `character_game` | height 180, skin skin_tan, cloth cotton | blocked body → `rig_template ue5_manny` → `auto_weights uefn` → idle + walk clips → `rig_check` → `qa uefn char` |
+
+`ai_cleanup` is for meshes you imported or scanned (`forge_import_mesh`); it never generates one. Done when: the summary's `qa` score is 80 or more and the look shows the shape you meant.
+
 Material params are preset names (see `hq_materials`). Change a look after the fact with `forge_hq(op="material", id=..., params={preset: ...})`.
 
 ## Writing a recipe

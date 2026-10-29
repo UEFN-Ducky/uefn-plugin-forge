@@ -1,0 +1,12 @@
+{"about": "Baked game prop: a panelled high-poly copy baked onto a low box (BaseColor, Normal, ORM), high deleted, pivot on the floor; ends in qa", "params": {"size": 60, "material": "worn_steel", "detail": "panel", "res": 1024},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "PropMat", "preset": "$material"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Prop", "params": {"w": "$size", "d": "$size", "h": "$size"}, "material": "$0"},
+  {"tool": "forge_duplicate", "id": "$1", "offset": [0, 0, 0]},
+  {"tool": "forge_hq", "op": "hardsurface", "id": "$2", "params": {"preset": "$detail"}},
+  {"tool": "forge_hq", "op": "uv", "id": "$1", "params": {"method": "smart"}},
+  {"tool": "forge_hq", "op": "bake", "id": "$1", "params": {"from_high": "$2", "size": "$res"}},
+  {"tool": "forge_delete", "ids": ["$2"]},
+  {"tool": "forge_hq", "op": "origin", "id": "$1", "params": {"at": "bottom", "ground": true}},
+  {"tool": "forge_hq", "op": "qa", "id": "$1", "params": {"profile": "uefn", "budget": "prop", "fix": true}}
+ ]}

@@ -1,0 +1,18 @@
+{"about": "Game character: blocked body on the UE5 Manny skeleton, 4-influence weights, idle and walk clips, LOD chain; ends in rig_check and qa", "params": {"height": 180, "skin": "skin_tan", "cloth": "cotton"},
+ "let": {"s": "=height/180"},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Skin", "preset": "$skin"}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Cloth", "preset": "$cloth"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Torso", "params": {"w": "=40*s", "d": "=22*s", "h": "=60*s"}, "pos": [0, 0, "=90*s"], "material": "$1"},
+  {"tool": "forge_add", "kind": "sphere", "object_name": "Head", "params": {"radius": "=11*s", "seg": 16, "rings": 10}, "pos": [0, 0, "=160*s"], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "ArmL", "params": {"radius": "=4*s", "height": "=62*s", "seg": 10}, "pos": ["=52*s", 0, "=146*s"], "rot": [0, 90, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "ArmR", "params": {"radius": "=4*s", "height": "=62*s", "seg": 10}, "pos": ["=-52*s", 0, "=146*s"], "rot": [0, -90, 0], "material": "$0"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegL", "params": {"radius": "=6*s", "height": "=90*s", "seg": 10}, "pos": ["=10*s", 0, 0], "material": "$1"},
+  {"tool": "forge_add", "kind": "cylinder", "object_name": "LegR", "params": {"radius": "=6*s", "height": "=90*s", "seg": 10}, "pos": ["=-10*s", 0, 0], "material": "$1"},
+  {"tool": "forge_hq", "op": "rig_template", "params": {"template": "ue5_manny", "ids": ["$2", "$3", "$4", "$5", "$6", "$7"], "bind": true}},
+  {"tool": "forge_hq", "op": "auto_weights", "params": {"ids": ["$2", "$3", "$4", "$5", "$6", "$7"], "target": "uefn"}},
+  {"tool": "forge_hq", "op": "clip", "params": {"kind": "idle"}},
+  {"tool": "forge_hq", "op": "clip", "params": {"kind": "walk"}},
+  {"tool": "forge_hq", "op": "rig_check", "params": {"profile": "uefn"}},
+  {"tool": "forge_hq", "op": "qa", "params": {"profile": "uefn", "budget": "char", "fix": true}}
+ ]}

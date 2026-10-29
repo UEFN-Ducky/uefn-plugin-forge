@@ -1,0 +1,9 @@
+{"about": "Mid-poly game prop: chamfered box, weighted normals, smart UVs, pivot on the floor, no bake needed; ends in qa", "params": {"w": 60, "d": 60, "h": 50, "material": "worn_steel", "bevel": 1.5},
+ "steps": [
+  {"tool": "forge_hq", "op": "material", "params": {"material": "PropMat", "preset": "$material"}},
+  {"tool": "forge_add", "kind": "box", "object_name": "Prop", "params": {"w": "$w", "d": "$d", "h": "$h"}, "material": "$0"},
+  {"tool": "forge_hq", "op": "modifiers", "id": "$1", "params": {"stack": [{"type": "bevel", "width": "$bevel", "segments": 2}, "weighted_normal"]}},
+  {"tool": "forge_hq", "op": "uv", "id": "$1", "params": {"method": "smart"}},
+  {"tool": "forge_hq", "op": "origin", "id": "$1", "params": {"at": "bottom", "ground": true}},
+  {"tool": "forge_hq", "op": "qa", "id": "$1", "params": {"profile": "uefn", "budget": "prop", "fix": true}}
+ ]}
