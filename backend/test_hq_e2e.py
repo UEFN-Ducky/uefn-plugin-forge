@@ -132,10 +132,12 @@ class EndToEnd(unittest.TestCase):
             ("creature", {"kind": "big_cat", "length": 120}),
             ("blockout_from_refs", {"front": str(art), "height": 60, "name": "RefBody"}),
             ("ref_parts", {"id": head, "front": str(art), "k": 2}),
+            ("cartoon_body", {"kind": "lion", "pose": "sit", "height": 60}),
             ("tufts", {"id": head, "mane": "lion"}),
             ("cartoon_face", {"head": ball, "species": "cat"}),
             ("paint_strokes", {"id": crate, "base": [0.9, 0.6, 0.2], "shadow": [0.5, 0.25, 0.1], "highlight": [1, 0.85, 0.5], "size": 256}),
             ("project_ref", {"id": crate, "images": {"front": str(art)}, "size": 256}),
+            ("paint_bake", {"ids": [crate], "size": 256}),
             ("toon", {"ids": [crate]}),
             ("export", {"target": "generic"}),
         ]
