@@ -33,13 +33,131 @@ _CACHE = {}
 
 
 def build(**kw):
+    """The code-built head unless base="makehuman"."""
     key = repr(sorted(kw.items()))
     if key not in _CACHE:
         if not _CACHE:
             bpy.ops.wm.read_factory_settings(use_empty=True)
-        p = hq_head.params(kw)
-        _CACHE[key] = engine_head.build_head({**p, "unit": 0.01})
+        p = hq_head.params({"base": "procedural", **kw})
+        fn = engine_head.build_makehuman if p["base"] == "makehuman" else engine_head.build_head
+        _CACHE[key] = fn({**p, "unit": 0.01})
     return _CACHE[key]
+
+
+def mh(**kw):
+    return build(base="makehuman", **kw)
+
+
+def _world(ob):
+    return np.array([tuple(ob.matrix_world @ v.co) for v in ob.data.vertices])
+
+
+def _open_edges(ob):
+    bm = _bm(ob)
+    bad = sum(1 for e in bm.edges if len(e.link_faces) != 2)
+    bm.free()
+    return bad
+
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def test_mh_head_and_parts():
+    parts, info = mh(sex="male")
+    assert set(parts) == {"head", "eye_L", "eye_R", "details", "teeth_U", "teeth_L", "tongue"}, set(parts)
+    s = engine_head.stats(parts)
+    assert 6000 <= s["tris"] <= 16000 and s["quads"] >= 95 and s["groups"] == 6, s
+    for name in ("head", "eye_L", "eye_R", "tongue"):
+        assert not _open_edges(parts[name]), "%s must be closed" % name
+    co = _world(parts["head"])
+    chin = info["chin"]
+    assert abs(co[:, 2].min()) < 1e-4, "the bust stands on z=0"
+    assert abs(co[:, 2].max() - chin - 0.24) < 0.002, "chin to crown %.3f m, want 0.24" % (co[:, 2].max() - chin)
+    assert chin >= 0.035, "neck reaches %.1f cm below the chin" % (chin * 100)
+    eye = _world(parts["eye_L"]).mean(0)
+    assert 0.44 <= (eye[2] - chin) / 0.24 <= 0.56 and eye[0] > 0.02, "eye line at %.2f H" % ((eye[2] - chin) / 0.24)
+    tip = co[np.argmin(co[:, 1])]
+    assert abs(tip[0]) < 0.004 and chin < tip[2] < eye[2], "nose tip at %s" % tip
+    for name in ("head", "eye_L", "details", "teeth_U", "tongue"):  # qa: every part pivots on its base
+        local = np.array([tuple(v.co) for v in parts[name].data.vertices])
+        assert abs(local[:, 2].min()) < 1e-3 and np.abs(local[:, :2].min(0) + local[:, :2].max(0)).max() < 2e-3, name
+    used = {parts["head"].data.materials[q.material_index].name.split("_", 1)[1] for q in parts["head"].data.polygons}
+    assert used == {"Skin", "Lips"}, used
+    lips = [q.center for q in parts["head"].data.polygons if q.material_index == 1]
+    assert 20 <= len(lips) <= 300, "%d lip faces" % len(lips)
+    det = {parts["details"].data.materials[q.material_index].name.split("_", 1)[1] for q in parts["details"].data.polygons}
+    assert det == {"Hair"}, det
+
+
+def test_mh_sliders_move_their_region():
+    """Every slider moves the mesh; nose_width widens the nose and leaves the ears; ear_size the other way round."""
+    base = engine_head.mh_verts({})
+    x, y, z = base.T  # MakeHuman dm, Forge axes
+    nose = (np.abs(x) < 0.25) & (y < -1.45) & (z > 6.7) & (z < 7.2)
+    ears = (np.abs(x) > 0.72) & (z > 6.9) & (z < 7.6) & (y > -0.6)
+    assert nose.sum() > 30 and ears.sum() > 60
+    for name in engine_head.MH_SLIDERS:
+        for v in (1.0, -1.0):
+            d = np.linalg.norm(engine_head.mh_verts({"shape": {name: v}}) - base, axis=1)
+            assert d.max() > 0.01, "%s=%g moves nothing" % (name, v)
+    wide = engine_head.mh_verts({"shape": {"nose_width": 1.0}})
+    assert np.ptp(wide[nose, 0]) - np.ptp(base[nose, 0]) > 0.005, "nose_width=1 should widen the nose"
+    assert np.abs(wide[ears] - base[ears]).max() < 1e-3, "nose_width moved the ears"
+    big = engine_head.mh_verts({"shape": {"ear_size": 1.0}})
+    assert np.linalg.norm(big[ears] - base[ears], axis=1).max() > 0.02 and np.abs(big[nose] - base[nose]).max() < 1e-3
+    male, female = engine_head.mh_verts({"sex": "male"}), engine_head.mh_verts({"sex": "female"})
+    child = engine_head.mh_verts({"age": "child"})
+    assert np.abs(male - female).max() > 0.05 and np.abs(child - base).max() > 0.5, "sex and age targets must apply"
+
+
+def test_mh_asset_and_notice():
+    files = list((REPO / "assets" / "heads").iterdir())
+    assert sum(f.stat().st_size for f in files) < 5 * 1024 * 1024, "assets/heads must stay under 5 MB"
+    notice = (REPO / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    assert "CC0" in notice and "makehumancommunity/makehuman" in notice and re.search(r"\b[0-9a-f]{40}\b", notice), "notice needs source, commit, CC0"
+
+
+def test_mh_hair_covers_scalp():
+    from mathutils.bvhtree import BVHTree
+    for hair in ("short", "buzz"):
+        parts, info = mh(sex="male", hair=hair)
+        det = parts["details"]
+        tree = BVHTree.FromPolygons([tuple(c) for c in _world(det)], [list(q.vertices) for q in det.data.polygons])
+        head = parts["head"]
+        mw = head.matrix_world
+        hit = 0
+        for f in info["scalp"]:
+            q = head.data.polygons[f]
+            loc = tree.ray_cast(mw @ q.center, q.normal, 0.02)[0]
+            hit += loc is not None
+        assert len(info["scalp"]) > 150 and hit / len(info["scalp"]) >= 0.9, "%s hair covers %d of %d scalp faces" % (hair, hit, len(info["scalp"]))
+    parts, info = mh(sex="male", hair="none")
+    assert len(parts["details"].data.polygons) < 600, "hair=none: brows and lashes only"
+
+
+def test_mh_qa_rules_every_part():
+    """qa's rules in cm for every variant: no two points of a part within 0.05 (they weld) and no parallel faces
+    of any two parts whose centres share a 0.1 cell (z-fight)."""
+    from mathutils.kdtree import KDTree
+    for kw in ({"sex": "male"}, {"sex": "female", "hair": "long"}, {"age": "child", "hair": "buzz"}, {"age": "elder", "build": "heavy"},
+               {"sex": "female", "build": "slim", "shape": {"eye_size": 1, "eye_spacing": -1, "mouth_width": 1, "lip_full": 1, "nose_width": -1}}):
+        parts, _ = mh(**kw)
+        seen, pairs = {}, 0
+        for name, ob in parts.items():
+            co = _world(ob) * 100
+            tree = KDTree(len(co))
+            for i, c in enumerate(co):
+                tree.insert(c, i)
+            tree.balance()
+            gap = min(tree.find_n(c, 2)[1][2] for c in co)
+            assert gap >= 0.05, "%s %s: points %.3f cm apart" % (kw, name, gap)
+            mw = ob.matrix_world
+            for q in ob.data.polygons:
+                key = tuple(round(v / 0.1) for v in (mw @ q.center) * 100)
+                pairs += any(abs(q.normal.dot(o)) > 0.99 for o in seen.get(key, ()))
+                seen.setdefault(key, []).append(q.normal.copy())
+        assert not pairs, "%s: %d z-fight face pairs" % (kw, pairs)
+        assert not _open_edges(parts["head"]), kw
 
 
 def _bm(ob):
@@ -245,7 +363,7 @@ def test_qa_rules_every_part():
 
 
 def test_params_and_registration():
-    for bad in ({"sex": "x"}, {"age": "teen"}, {"shape": {"snout": 1}}, {"shape": {"chin": 3}}, {"tone": 2}, {"height_cm": 2}, {"hat": 1}):
+    for bad in ({"base": "x"}, {"sex": "x"}, {"age": "teen"}, {"shape": {"snout": 1}}, {"shape": {"chin": 3}}, {"tone": 2}, {"height_cm": 2}, {"hat": 1}):
         try:
             hq_head.params(bad)
             assert False, bad
@@ -288,30 +406,33 @@ def test_through_forge_batch():
         try:
             out = t["forge_batch"](name="HeadTest", steps=[{"tool": "forge_hq", "op": "head", "params": {"sex": "male"}}])
             assert out.get("ok", True), out
-            hq_out = t["forge_hq"](name="HeadTest", op="head", params={"sex": "female", "name": "Her", "hair": "none"})
+            hq_out = t["forge_hq"](name="HeadTest", op="head", params={"sex": "female", "name": "Her", "hair": "none", "base": "procedural"})
             assert hq_out.get("ok") and len(json.dumps(hq_out)) <= 300, hq_out
+            long = t["forge_hq"](name="HeadTest", op="head", params={"sex": "female", "name": "Long", "hair": "long", "hair_color": "auburn"})
+            assert long.get("ok") and len(json.dumps(long)) <= 300, long
             scene = load("HeadTest")
-            names = {n.get("name") for n in scene.data["nodes"] if n.get("type") == "object"}
-            assert {"Head", "Head_eye_L", "Head_eye_R", "Head_teeth_U", "Head_tongue", "Head_ears", "Head_neck", "Her"} <= names, names
-            assert "Head_cards" in names and "Her_cards" not in names, "hair cards only when hair != none: %s" % names
-            cards = next(n for n in scene.data["nodes"] if n.get("name") == "Head_cards")
-            assert len(scene.local_mesh(cards).faces) >= 100, "hair cards are nearly empty"
+            names = [n.get("name") for n in scene.data["nodes"] if n.get("type") == "object"]
+            assert {"Head", "Head_eye_L", "Head_eye_R", "Head_teeth_U", "Head_tongue", "Head_details", "Her", "Her_ears", "Her_neck"} <= set(names), names
+            assert not [n for n in names if n.endswith("_cards")], "makehuman hair is a cap (+ drape); hair=none has none: %s" % names
+            hair = next(n for n in scene.data["nodes"] if n.get("name") == "Long_details")
+            zs = [v[2] for v in scene.world_mesh(hair).verts]
+            assert len(scene.local_mesh(hair).faces) >= 2000 and np.ptp(zs) > 20, "long hair should hang from the crown to the neck"
             skin = next(m for m in scene.data["materials"] if m["name"] == "Head_Skin")
             images = {layer["target"]: layer["image"] for layer in skin["spec"]["layers"] if layer["type"] == "image"}
             assert set(images) == {"color", "roughness"} and all((scene.folder / "textures" / f).is_file() for f in images.values())
-            # the documented chain: qa char >= 85 with no errors, then the hero uv packs > 40 %
-            ids = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith("Head")]
-            qa = t["forge_hq"](name="HeadTest", op="qa", params={"ids": ids, "profile": "uefn", "budget": "char", "verbose": True})
-            print("qa:", qa.get("summary"))
-            assert qa.get("errors") == 0, qa  # with hair cards: open-card and pivot warnings only
-            hers = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith("Her")]
-            bald = t["forge_hq"](name="HeadTest", op="qa", params={"ids": hers, "profile": "uefn", "budget": "char"})
-            print("qa hair=none:", bald.get("summary"))
-            assert bald.get("score", 0) >= 85 and bald.get("errors") == 0, bald
+
+            def grade(prefix, want):
+                ids = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith(prefix)]
+                qa = t["forge_hq"](name="HeadTest", op="qa", params={"ids": ids, "profile": "uefn", "budget": "char"})
+                print("qa %s:" % prefix, qa.get("summary"))
+                assert qa.get("score", 0) >= want and qa.get("errors") == 0, qa
+            grade("Head", 90)   # makehuman base, short hair cap
+            grade("Long", 90)   # makehuman base, long hair cards
+            grade("Her", 85)    # procedural base, no hair
             head = next(n["id"] for n in scene.data["nodes"] if n.get("name") == "Head")
             alone = t["forge_hq"](name="HeadTest", op="qa", params={"id": head, "profile": "uefn", "budget": "char"})
             print("qa head:", alone.get("summary"))
-            assert alone.get("score", 0) >= 85 and alone.get("errors") == 0, alone
+            assert alone.get("score", 0) >= 95 and alone.get("errors") == 0, alone
             uv = t["forge_hq"](name="HeadTest", op="uv", id=head, params={"method": "seams", "res": 2048, "texel": 0})
             print("uv:", uv.get("summary"))
             packed = float(re.search(r"(\d+(?:\.\d+)?)% packed", uv["summary"]).group(1))

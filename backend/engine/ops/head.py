@@ -11,9 +11,11 @@ Proportions follow Loomis / Reilly: eye line 0.5, brow 0.585, nose base 0.30, mo
 apart, ears from brow to nose base. Every feature only moves vertices along Y, so x and z come from the skull
 map alone and the loops are placed exactly through its inverse.
 """
+import functools
 import hashlib
 import json
 import math
+from pathlib import Path
 
 import bmesh
 import bpy
@@ -520,22 +522,24 @@ def _object(name, verts, faces, mats, face_mat=None, origin=(0, 0, 0), smooth=Tr
     return ob
 
 
-def _eye(name, centre, k, mats):
-    """Sclera sphere open at the limbus + cornea dome (one closed shell), iris + pupil disc 2 mm under it."""
-    R = k["R"]
-    lim = 0.025 * min(k["eye"], 1.1)                  # limbus radius = iris radius (12 mm iris at H 24 cm)
+def _eye(name, centre, k, mats, scale=1.0):
+    """Sclera sphere open at the limbus + cornea dome (one closed shell), iris + pupil disc 2 mm under it.
+    scale grows the whole eye (the MakeHuman base has its own eyeball size)."""
+    R = k["R"] * scale
+    lim = 0.025 * min(k["eye"], 1.1) * scale          # limbus radius = iris radius (12 mm iris at H 24 cm)
     ly = -math.sqrt(R * R - lim * lim)                # limbus plane (front is -Y)
-    rc = 0.0325                                       # cornea curvature radius (7.8 mm)
+    rc = 0.0325 * scale                               # cornea curvature radius (7.8 mm)
     cy = ly + math.sqrt(rc * rc - lim * lim)          # cornea sphere centre
     # qa welds points closer than 0.05 cm and flags parallel faces whose centres share a 0.1 cm cell, so small
     # parts stay coarse and every pole is a cone, never a flat fan
-    prof = [(0.0, R + 0.012)]                         # back pole pulled out into a cone (hidden in the socket)
+    prof = [(0.0, R + 0.012 * scale)]                 # back pole pulled out into a cone (hidden in the socket)
     span = math.pi - math.asin(lim / R)
     prof += [(R * math.sin(span * i / 9), R * math.cos(span * i / 9)) for i in range(1, 9)]
     prof += [(lim, ly), (0.0, cy - rc)]               # limbus, then the cornea dome as one fan to its apex
     v1, f1, row = _lathe(prof, 16)
     fm = [1 if r >= 9 else 0 for r in row]           # 0 sclera, 1 cornea
-    iris = [(0.0, ly + 0.025), (0.95 * lim, ly + 0.004), (0.3 * lim, ly + 0.0045), (0.0, ly + 0.0145)]  # closed: back cone, iris ring, pupil cone
+    iris = [(0.0, ly + 0.025 * scale), (0.95 * lim, ly + 0.004 * scale), (0.3 * lim, ly + 0.0045 * scale),
+            (0.0, ly + 0.0145 * scale)]  # closed: back cone, iris ring, pupil cone
     v2, f2, row2 = _lathe(iris, 12)
     base = len(v1)
     verts = v1 + v2
@@ -617,17 +621,21 @@ def _neck(k, segs=20, rows=10):
     return verts, faces
 
 
-def scalp_faces(me):
-    """Skin faces above the hairline (0.80 H at the forehead, 0.66 over the ears, 0.42 at the nape)."""
+HAIRLINE = ([0, 0.6, 1.6, math.pi], [0.80, 0.78, 0.66, 0.42])  # head heights by angle from the face (0) to the nape (pi)
+
+
+def scalp_faces(me, z0=None, H=None, yc=0.0):
+    """Skin faces above the hairline (0.80 H at the forehead, 0.66 over the ears, 0.42 at the nape). z0 / H: the
+    chin and chin-to-crown height (default: the mesh's own span); yc: the head's centre in Y."""
     out = []
-    zmin = min(v.co.z for v in me.vertices)
-    H = max(v.co.z for v in me.vertices) - zmin
+    zmin = min(v.co.z for v in me.vertices) if z0 is None else z0
+    H = H or max(v.co.z for v in me.vertices) - zmin
     for q in me.polygons:
         if q.material_index != 0:
             continue
         c = q.center
-        phi = abs(math.atan2(c.x, -c.y))
-        line = float(np.interp(phi, [0, 0.6, 1.6, math.pi], [0.80, 0.78, 0.66, 0.42]))
+        phi = abs(math.atan2(c.x, -(c.y - yc)))
+        line = float(np.interp(phi, *HAIRLINE))
         if (c.z - zmin) / H > line:
             out.append(q.index)
     return out
@@ -698,9 +706,11 @@ def _material(name, layers):
     return m
 
 
-def materials(prefix, tone, iris):
+def materials(prefix, tone, iris, hair="brown"):
     """Skin (SSS radius R 1.0 / G 0.35 / B 0.2 cm, roughness breakup, pore bump), lips, eye and mouth parts."""
+    from .groom import rgb
     skin = (_LIGHT + (_DEEP - _LIGHT) * min(max(tone, 0.0), 1.0)).tolist()
+    strand = list(rgb(hair))
     sss = {"type": "sss", "weight": 1.0, "radius": [1.0, 0.35, 0.2], "scale": 0.01}  # Forge cm -> metres
     lip = (np.array(skin) * [1.0, 0.62, 0.62]).tolist()
     spec = {
@@ -731,6 +741,10 @@ def materials(prefix, tone, iris):
         "Brow": [{"type": "base", "color": [0.035, 0.022, 0.014], "roughness": 0.55},
                  {"type": "noise", "target": "color", "scale": 300.0, "detail": 4.0, "amount": 0.3, "color": [0.09, 0.06, 0.04]}],
         "Lash": [{"type": "base", "color": [0.012, 0.009, 0.007], "roughness": 0.5}],
+        # brows, lashes and the scalp cap on the MakeHuman base: one hair material (fine strand bump, tone breakup)
+        "Hair": [{"type": "base", "color": [c * 0.8 for c in strand], "roughness": 0.42},
+                 {"type": "noise", "target": "color", "scale": 90.0, "detail": 6.0, "amount": 0.35, "color": [c * 0.45 for c in strand]},
+                 {"type": "noise", "target": "bump", "scale": 1400.0, "detail": 3.0, "amount": 0.6}],
         "Ears": [{"type": "base", "color": (np.array(skin) * [1.0, 0.88, 0.86]).tolist(), "roughness": 0.5},
                  {"type": "noise", "target": "bump", "scale": 900.0, "detail": 2.0, "amount": 0.2}, sss],
     }
@@ -763,9 +777,11 @@ def _spread(co, min_d, rounds=8):
     return co.tolist()
 
 
-def _brows(k, info):
-    """Two staggered rows of 18 cards per brow along the arch: hairs rise at the head, sweep out to the tail."""
-    out, f, n = [], k["f"], info["n"]
+def _brows(k, info, surf=None):
+    """Two staggered rows of 18 cards per brow along the arch: hairs rise at the head, sweep out to the tail.
+    surf(xz) -> skin points (default: the code-built head's surface)."""
+    out, f, n = [], k["f"], info.get("n")
+    x0, span, z0 = k.get("brow_x0", 0.052), k.get("brow_span", 0.17), k.get("brow_z", 0.56 * f)
     thick = 1.0 + 0.3 * (k["brow"] - 1)
     for s in (1, -1):
         for row in range(3):
@@ -773,14 +789,14 @@ def _brows(k, info):
                 u = (i + 0.33 * row) / 18
                 if row == 2 and u > 0.55:
                     continue  # the tail thins to two rows
-                x = 0.052 + 0.17 * u
-                z = 0.56 * f + 0.022 * math.sin(math.pi * min(u / 0.65, 1.0) * 0.5) - 0.012 * max(u - 0.65, 0) / 0.35 \
+                x = x0 + span * u
+                z = z0 + 0.022 * math.sin(math.pi * min(u / 0.65, 1.0) * 0.5) - 0.012 * max(u - 0.65, 0) / 0.35 \
                     + (row - 1) * 0.006 * thick * (1.2 - 0.5 * u)
                 ang = math.radians(75 - 70 * min(u / 0.6, 1.0) - 10 * max(u - 0.6, 0) / 0.4)  # up at the head, out at the tail
                 d = np.array([s * math.cos(ang), math.sin(ang)])
                 L = 0.03 * (0.8 + 0.2 * math.sin(math.pi * u))
                 xz = np.array([[s * x, z]]) + np.outer(np.arange(3) / 2, d * L)
-                pts = _surface(xz, k, n)
+                pts = surf(xz) if surf else _surface(xz, k, n)
                 # neighbours along a row and across rows sit on different depth levels: overlapping cards never weld
                 pts[:, 1] -= 0.0012 + 0.003 * (i % 2 + 2 * row) + 0.0018 * np.arange(3) / 2
                 tw = (0.45, -0.45, 0.9)[(i + row) % 3]
@@ -797,32 +813,37 @@ def _lashes(me, k, info):
     for name, s in (("eye_L", 1), ("eye_R", -1)):
         ring = np.array([tuple(me.vertices[i].co) for i in info["rings"][name][-1]])
         centre = np.array([s * k["ex"], 0.0, ez])
-        inner_x = ring[np.argmin(np.abs(ring[:, 0])), 0]
-        m = len(ring)
-        made = 0
-        for i, p in enumerate(ring):
-            if abs(p[0] - inner_x) < 0.012:
-                continue  # caruncle corner
-            upper = p[2] > ez + k["tilt"] * (p[0] - centre[0]) * s / 0.0625
-            outward = p - centre
-            outward[1] = 0
-            outward /= max(np.linalg.norm(outward), 1e-9)
-            if upper:
-                d, L, curl, root = outward * 0.2 + [0, -0.85, 0.45], 0.024, 0.35, p + [0, -0.002, 0.001]
-            else:
-                if i % 2:
-                    continue  # lower lashes: sparser and shorter
-                d, L, curl, root = outward * 0.2 + [0, -0.85, -0.4], 0.011, -0.1, p + [0, -0.004, -0.002]
-            d = d / np.linalg.norm(d)
-            t = np.arange(4) / 3 if upper else np.arange(2.0)  # short lower lashes: one quad (straight segments z-fight)
-            pts = root + np.outer(t, d * L) + np.outer(t ** 2, [0, 0, curl * L])
-            tan = ring[(i + 1) % m] - ring[i - 1]
-            tan /= max(np.linalg.norm(tan), 1e-9)
-            tw = 0.5 if made % 2 else -0.5  # alternate per card made (lower lashes skip vertices)
-            made += 1
-            side = tan * math.cos(tw) + np.cross(d, tan) * math.sin(tw)
-            v, fc = _strip(pts, np.tile(side, (len(t), 1)), 0.0035)
-            out.append((v, fc, 3))
+        out += _lash_ring(ring, centre, lambda p: p[2] > ez + k["tilt"] * (p[0] - centre[0]) * s / 0.0625)
+    return out
+
+
+def _lash_ring(ring, centre, is_upper, scale=1.0, mat=3, lower=True):
+    """Lash cards along one closed lid-margin ring (ordered round the eye)."""
+    out, made, m = [], 0, len(ring)
+    inner_x = ring[np.argmin(np.abs(ring[:, 0])), 0]
+    for i, p in enumerate(ring):
+        if abs(p[0] - inner_x) < 0.012 * scale:
+            continue  # caruncle corner
+        upper = is_upper(p)
+        outward = p - centre
+        outward[1] = 0
+        outward /= max(np.linalg.norm(outward), 1e-9)
+        if upper:
+            d, L, curl, root = outward * 0.2 + [0, -0.85, 0.45], 0.024 * scale, 0.35, p + np.array([0, -0.002, 0.001]) * scale
+        else:
+            if i % 2 or not lower:
+                continue  # lower lashes: sparser and shorter
+            d, L, curl, root = outward * 0.2 + [0, -0.85, -0.4], 0.011 * scale, -0.1, p + np.array([0, -0.004, -0.002]) * scale
+        d = d / np.linalg.norm(d)
+        t = np.arange(4) / 3 if upper else np.arange(2.0)  # short lower lashes: one quad (straight segments z-fight)
+        pts = root + np.outer(t, d * L) + np.outer(t ** 2, [0, 0, curl * L])
+        tan = ring[(i + 1) % m] - ring[i - 1]
+        tan /= max(np.linalg.norm(tan), 1e-9)
+        tw = 0.5 if made % 2 else -0.5  # alternate per card made (lower lashes skip vertices)
+        made += 1
+        side = tan * math.cos(tw) + np.cross(d, tan) * math.sin(tw)
+        v, fc = _strip(pts, np.tile(side, (len(t), 1)), 0.0035 * scale)
+        out.append((v, fc, mat))
     return out
 
 
@@ -852,10 +873,10 @@ def _groups(ob, info, k):
             g.add([i for i, v in enumerate(vals) if round(float(v), 2) == val], val, "REPLACE")
 
 
-def _uv(me):
-    """Cylindrical head UV: u = angle round the head (face centre 0.5), v = height."""
+def _uv(me, yc=0.0):
+    """Cylindrical head UV: u = angle round the head (face centre 0.5) about the axis at y = yc, v = height."""
     co = np.array([tuple(v.co) for v in me.vertices])
-    u = 0.5 + np.arctan2(co[:, 0], -co[:, 1]) / (2 * math.pi)
+    u = 0.5 + np.arctan2(co[:, 0], -(co[:, 1] - yc)) / (2 * math.pi)
     v = (co[:, 2] - co[:, 2].min()) / max(np.ptp(co[:, 2]), 1e-9)
     layer = me.uv_layers.new(name="UVMap")
     for poly in me.polygons:
@@ -961,6 +982,356 @@ def build_head(p):
     return parts, info
 
 
+# ---- MakeHuman base: CC0 head + neck with its sex / age / weight and face targets (assets/heads, extract.py) ----
+
+_MH = Path(__file__).resolve().parents[3] / "assets" / "heads" / "makehuman_head.npz"
+MH_SLIDERS = SLIDERS + ("nose_tip", "ear_size")
+_SEX_W = {"male": {"male": 1.0}, "female": {"female": 1.0}, "neutral": {"male": 0.5, "female": 0.5}}
+_AGE_W = {"child": {"child": 1.0}, "adult": {"young": 1.0}, "elder": {"old": 0.7, "young": 0.3}}  # ~11, 25, 70 years
+_WEIGHT_W = {"slim": {"minweight": 0.6, "averageweight": 0.4}, "average": {"averageweight": 1.0},
+             "heavy": {"maxweight": 0.6, "averageweight": 0.4}}
+_FAT = {"slim": -0.4, "average": 0.0, "heavy": 0.6}
+CAP = {"short": 0.6, "buzz": 0.25, "long": 1.0}  # hair cap thickness, cm
+
+
+@functools.lru_cache(1)
+def _mh():
+    with np.load(_MH) as z:
+        return {k: z[k] for k in z.files}
+
+
+def mh_verts(p):
+    """Base vertices with the macro targets (sex x age x weight, races averaged) and the -1..1 sliders mixed in."""
+    z = _mh()
+    co = z["co"].astype(np.float64)
+
+    def add(key, w):
+        if w and len(z.get("i:" + key, ())):
+            co[z["i:" + key].astype(np.int64)] += w * z["d:" + key].astype(np.float64)
+    build = p.get("build", "average")
+    for s, ws in _SEX_W[p.get("sex", "neutral")].items():
+        for a, wa in _AGE_W[p.get("age", "adult")].items():
+            add("race-%s-%s" % (s, a), ws * wa)
+            for w, ww in _WEIGHT_W[build].items():
+                add("macro-%s-%s-%s" % (s, a, w), ws * wa * ww)
+    sliders = {k: float(v) for k, v in (p.get("shape") or {}).items() if k in MH_SLIDERS}
+    sliders["fat"] = _FAT[build]
+    for name, v in sliders.items():
+        add("slider-%s%s" % (name, "+" if v > 0 else "-"), abs(v))
+    return co
+
+
+def _ray_surface(tree):
+    """xz points (head heights) -> where a ray from the front hits the skin."""
+    def surf(xz):
+        out = []
+        for x, z in np.asarray(xz, float):
+            hit = tree.ray_cast(Vector((x, -5.0, z)), Vector((0.0, 1.0, 0.0)))[0]
+            out.append(tuple(hit) if hit is not None else (x, 0.0, z))
+        return np.array(out)
+    return surf
+
+
+def _lid_margin(co, centre, R):
+    """Skin vertices on the lid margin round an eyeball: per 10 deg about the eye axis, the vertex closest to it
+    among those hugging the front of the ball."""
+    d = co - centre
+    near = np.nonzero((np.linalg.norm(d, axis=1) < 1.25 * R) & (d[:, 1] < -0.45 * R))[0]
+    ang = np.arctan2(d[near, 2], d[near, 0])
+    rad = np.hypot(d[near, 0], d[near, 2])
+    ring = []
+    for b in np.linspace(-math.pi, math.pi, 36, endpoint=False):
+        sel = np.abs((ang - b + math.pi) % (2 * math.pi) - math.pi) < math.pi / 36
+        if sel.any():
+            ring.append(near[sel][np.argmin(rad[sel])])
+    return co[ring]
+
+
+def _unfight_parts(parts, cell=0.001, rounds=12):
+    """qa's z-fight rule across every part (metres): parallel faces whose centres share a 0.1 cm cell. Push one
+    vertex of the later face 0.08 cm along its normal until none are left."""
+    obs = list(parts.values())
+    for r in range(rounds):
+        seen, bad = {}, []
+        for ob in obs:
+            me = ob.data
+            for q in me.polygons:
+                c = ob.matrix_world @ q.center
+                key = tuple(round(v / cell) for v in c)
+                if any(abs(q.normal.dot(o)) > 0.99 for o in seen.get(key, ())):
+                    bad.append((ob, q.index))
+                seen.setdefault(key, []).append(q.normal.copy())
+        if not bad:
+            return
+        for ob, fi in bad:
+            q = ob.data.polygons[fi]
+            v = ob.data.vertices[q.vertices[r % len(q.vertices)]]
+            v.co += q.normal * cell * 0.8
+        for ob in obs:
+            ob.data.update()
+
+
+def _separate(ob, min_d=0.0006, rounds=4):
+    """qa welds points closer than 0.05 cm (MakeHuman's lip and lid seams touch): push such pairs min_d apart."""
+    from mathutils.kdtree import KDTree
+    vs = ob.data.vertices
+    for _ in range(rounds):
+        co = [v.co.copy() for v in vs]
+        tree = KDTree(len(co))
+        for i, c in enumerate(co):
+            tree.insert(c, i)
+        tree.balance()
+        moved = False
+        for i, c in enumerate(co):
+            for _, j, d in tree.find_range(c, min_d):
+                if j > i:
+                    away = (co[i] - co[j]).normalized() if d > 1e-9 else vs[i].normal.copy()
+                    vs[i].co += away * ((min_d - d) / 2 + 1e-5)
+                    vs[j].co -= away * ((min_d - d) / 2 + 1e-5)
+                    moved = True
+        if not moved:
+            break
+    ob.data.update()
+
+
+def _base_pivot(ob):
+    co = np.array([tuple(v.co) for v in ob.data.vertices])
+    base = Vector(((co[:, 0].min() + co[:, 0].max()) / 2, (co[:, 1].min() + co[:, 1].max()) / 2, co[:, 2].min()))
+    ob.data.transform(Matrix.Translation(-base))
+    ob.location = ob.location + base
+
+
+def build_makehuman(p):
+    """MakeHuman head + neck (closed, the neck capped at the clavicle) shaped by its targets, then the same eyes,
+    teeth, brow and lash cards as the code-built head, a tongue and a scalp hair cap. Head heights while building
+    (chin z=0, crown 1, face -Y), metres at the end. Returns ({part: object}, info)."""
+    from mathutils.bvhtree import BVHTree
+    k = shape(p)
+    unit = float(p.get("unit", 0.01))
+    H = float(p.get("height_cm") or 24.0) * unit
+    prefix = str(p.get("name") or "Head")
+    hair = p.get("hair", "short")
+    mats = materials(prefix, float(p.get("tone", 0.3)), p.get("eye_color", "brown"), p.get("hair_color", "brown"))
+    z = _mh()
+    co = mh_verts(p)
+    skin = z["f:skin"].astype(np.int64)
+    used = np.unique(skin)
+    s = co[used]
+    front = s[:, 1] < s[:, 1].min() + 0.3 * np.ptp(s[:, 1])
+    mid = np.abs(s[:, 0]) < 0.02 * np.ptp(s[:, 0])
+    chin = s[front & mid, 2].min()
+    co = (co - [0.0, 0.0, chin]) / (s[:, 2].max() - chin)
+    # ---- head: skin quads, neck ring capped with a fan whose centre sits up inside the neck
+    remap = np.full(len(co), -1)
+    remap[used] = np.arange(len(used))
+    me = bpy.data.meshes.new(prefix)
+    me.from_pydata([tuple(v) for v in co[used]], [], remap[skin].tolist())
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    ring = [e for e in bm.edges if len(e.link_faces) == 1]
+    cap = bmesh.ops.holes_fill(bm, edges=ring, sides=0)["faces"]
+    poked = bmesh.ops.poke(bm, faces=cap)
+    for v in poked["verts"]:
+        v.co.z += 0.03
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    bm.to_mesh(me)
+    bm.free()
+    hco = np.array([tuple(v.co) for v in me.vertices])
+    # landmarks
+    eyes = {}
+    for name, key in (("L", "f:helper-l-eye"), ("R", "f:helper-r-eye")):
+        e = co[np.unique(z[key])]
+        c = e.mean(0)
+        eyes[name] = (c, float(np.linalg.norm(e - c, axis=1).mean()))
+    (cl, R), (cr, _) = eyes["L"], eyes["R"]
+    ez, ex = float((cl[2] + cr[2]) / 2), float((cl[0] - cr[0]) / 2)
+    teeth_u, teeth_l = co[np.unique(z["f:helper-upper-teeth"])], co[np.unique(z["f:helper-lower-teeth"])]
+    mz = float(teeth_u[:, 2].min())
+    midf = hco[np.abs(hco[:, 0]) < 0.01]
+    nose = midf[(midf[:, 2] > mz) & (midf[:, 2] < ez)]
+    nose_tip = nose[np.argmin(nose[:, 1])]
+    lips_y = midf[np.abs(midf[:, 2] - mz) < 0.04, 1].min()
+    mw = 0.8 * ex  # mouth half-width ~ 0.8 x half the pupil distance
+    yc = float(hco[hco[:, 2] > ez, 1].mean())
+    # ---- materials on the head: skin, lips (vermilion: upper 0.032 H, lower 0.04 H at the centre)
+    for m in ("Skin", "Lips"):
+        me.materials.append(mats[m])
+    fm = np.zeros(len(me.polygons), np.int32)
+    for q in me.polygons:
+        c, n = q.center, q.normal
+        edge = max(0.0, 1 - (c.x / mw) ** 2) ** 0.6
+        if abs(c.x) < mw and n.y < 0.2 and c.y < lips_y + 0.035 and mz - 0.04 * edge - 0.002 < c.z < mz + 0.032 * edge + 0.002:
+            fm[q.index] = 1
+    me.polygons.foreach_set("material_index", fm)
+    me.polygons.foreach_set("use_smooth", np.ones(len(me.polygons), bool))
+    head = bpy.data.objects.new(prefix, me)
+    bpy.context.scene.collection.objects.link(head)
+    _groups_mh(head, dict(eyes=eyes, R=R, ez=ez, ex=ex, mz=mz, mw=mw, yc=yc, nose=nose_tip))
+    _uv(me, yc)
+    parts = {"head": head}
+    # ---- eyes: the code-built eyeball (cornea, iris parallax) at the MakeHuman eye, its size
+    for name, side in (("L", 1), ("R", -1)):
+        c, r = eyes[name]
+        parts["eye_" + name] = _eye("%s_eye_%s" % (prefix, name), tuple(c), k, [mats[m] for m in ("Sclera", "Cornea", "Iris", "Pupil")],
+                                    scale=r / k["R"])
+    # ---- details: brow + lash cards (hair material) and the scalp hair cap
+    tree = BVHTree.FromPolygons([tuple(v) for v in hco], [list(q.vertices) for q in me.polygons])
+    kb = dict(k, brow_x0=ex - 0.078, brow_span=0.17, brow_z=ez + 0.062 + 0.01 * (k["brow"] - 1))
+    wv, wf, wm = [], [], []
+    cards = _brows(kb, {}, _ray_surface(tree))
+    for name, side in (("L", 1), ("R", -1)):
+        c, r = eyes[name]
+        margin = _lid_margin(hco, c, r)
+        if len(margin) >= 8:
+            cards += _lash_ring(margin, c, lambda q, c=c: q[2] > c[2] + 0.2 * r, scale=0.75 * r / 0.05, lower=False)
+    for verts, faces, _ in cards:
+        n0 = len(wv)
+        wv += verts
+        wf += [[i + n0 for i in q] for q in faces]
+        wm += [0] * len(faces)
+    for _ in range(3):
+        wv = _spread(_unfight_arrays(np.array(wv), wf, 0.1 * 0.01 / H), 0.0006 / H)
+    scalp = scalp_faces(me, z0=0.0, H=1.0, yc=yc)
+    if hair in CAP and scalp:
+        # cap on the faces the hairline crosses or clears: verts under the line slide along their edges to where
+        # the edge crosses it, so the cap edge follows the smooth hairline, not the quads' staircase
+        normals = np.array([tuple(v.normal) for v in me.vertices])
+        t = CAP[hair] * unit / H
+        line = np.interp(np.abs(np.arctan2(hco[:, 0], -(hco[:, 1] - yc))), *HAIRLINE)
+        inside = hco[:, 2] > line
+        nbr = {}
+        for e in me.edges:
+            a, b = e.vertices
+            nbr.setdefault(a, []).append(b)
+            nbr.setdefault(b, []).append(a)
+        pos, ok = hco.copy(), inside.copy()
+        for v in np.nonzero(~inside)[0]:
+            ins = [n for n in nbr.get(v, ()) if inside[n]]
+            if ins:
+                dz = [hco[n, 2] - hco[v, 2] for n in ins]
+                pos[v] = np.mean([hco[v] + min(max((line[v] - hco[v, 2]) / d if d > 1e-6 else 0.5, 0.15), 0.85) * (hco[n] - hco[v])
+                                  for n, d in zip(ins, dz)], axis=0)
+                ok[v] = True
+        capf = [q.index for q in me.polygons if q.material_index == 0 and any(inside[i] for i in q.vertices) and all(ok[i] for i in q.vertices)]
+        idx = sorted({i for f in capf for i in me.polygons[f].vertices})
+        at = {i: n for n, i in enumerate(idx)}
+        edges = {}
+        for f in capf:
+            vs = list(me.polygons[f].vertices)
+            for a, b in zip(vs, vs[1:] + vs[:1]):
+                edges[(min(a, b), max(a, b))] = edges.get((min(a, b), max(a, b)), 0) + 1
+        rim = {i for e, c in edges.items() if c == 1 for i in e}
+        thick = np.array([0.3 if i in rim else 1.0 for i in idx])[:, None] * t  # tapers onto the skin at the hairline
+        n0 = len(wv)
+        wv += (pos[idx] + normals[idx] * thick).tolist()
+        wf += [[n0 + at[i] for i in me.polygons[f].vertices] for f in capf]
+        wm += [0] * len(capf)
+        if hair == "long":
+            for verts, faces in _drape(tree, pos[idx], hco[:, 2].min() + 0.02, ez, 28.0 * unit / H, 1.4 * unit / H, unit / H):
+                n0 = len(wv)
+                wv += verts
+                wf += [[i + n0 for i in q] for q in faces]
+                wm += [0] * len(faces)
+    parts["details"] = _object(prefix + "_details", wv, wf, [mats["Hair"]], wm)
+    # ---- teeth: the code-built arches fitted to the MakeHuman teeth boxes; its tongue
+    for name, box, upper in (("teeth_U", teeth_u, True), ("teeth_L", teeth_l, False)):
+        lo, hi = box.min(0), box.max(0)
+        tv, tf, nt = _arch(0.0, hi[2], lo[2], k, hi[2] if upper else lo[2], upper)
+        tv = np.array(tv)
+        tlo, thi = tv.min(0), tv.max(0)
+        for a in (0, 1):
+            tv[:, a] = lo[a] + (tv[:, a] - tlo[a]) / max(thi[a] - tlo[a], 1e-9) * (hi[a] - lo[a])
+        # 8 materials for the char budget: teeth share the sclera's ivory, gums and tongue the lips (behind closed lips)
+        parts[name] = _object(prefix + "_" + name, tv, tf, [mats["Sclera"], mats["Lips"]], [0] * nt + [1] * (len(tf) - nt))
+    tq = z["f:helper-tongue"].astype(np.int64)
+    tu = np.unique(tq)
+    tmap = np.full(len(co), -1)
+    tmap[tu] = np.arange(len(tu))
+    parts["tongue"] = _object(prefix + "_tongue", co[tu], tmap[tq].tolist(), [mats["Lips"]])
+    for ob in parts.values():  # every part pivots on its base (qa)
+        _base_pivot(ob)
+    zmin = float(hco[:, 2].min())
+    for ob in parts.values():  # metres, the bust standing on z=0 (neck base)
+        ob.data.transform(Matrix.Scale(H, 4))
+        ob.location = (ob.location - Vector((0, 0, zmin))) * H
+    bpy.context.view_layer.update()
+    for _ in range(3):  # each can undo the other a little: alternate until both hold
+        _unfight_parts(parts)
+        for ob in parts.values():
+            _separate(ob, rounds=8)
+    return parts, {"base": "makehuman", "scalp": scalp, "v_chin": -zmin / (1.0 - zmin), "chin": -zmin * H, "H": H}
+
+
+def _drape(tree, roots, floor, ez, length, width, cm, segs=10):
+    """Long hair as strips that slide down the skull from each root (swept to the sides and back, never over the
+    face), then hang once below the eyes; they stop at floor (the neck base). Head heights; cm = 1 cm in them."""
+    out = []
+    step = length / segs
+    for k, root in enumerate(roots):
+        off = (0.35 + 0.2 * (k % 3)) * cm  # three layers: neighbouring strips never share a plane
+        side = 1.0 if root[0] >= 0 else -1.0
+        sweep = Vector((side * 0.7, 0.6, -1.0)).normalized()
+        p = Vector(root)
+        hit, n = tree.find_nearest(p)[:2]
+        p, path, norms = hit + n * off, [], []
+        for _ in range(segs + 1):
+            hit, n = tree.find_nearest(p)[:2]
+            path.append(p.copy())
+            norms.append(n.copy())
+            if p.z > ez:  # on the skull: gravity + sweep in the tangent plane, kept off the skin
+                d = sweep - n * sweep.dot(n)
+                q = p + d.normalized() * step
+                hq, nq = tree.find_nearest(q)[:2]
+                p = hq + nq * off
+            else:  # below the eyes: hang, pushed out of the head and neck
+                q = p + Vector((0.0, 0.0, -step))
+                hq, nq = tree.find_nearest(q)[:2]
+                if (q - hq).length < off or (q - hq).dot(nq) < 0:
+                    q = hq + nq * off
+                p = q
+            if p.z < floor:
+                break
+        if len(path) < 3:
+            continue
+        pts = np.array([tuple(v) for v in path])
+        nrm = np.array([tuple(v) for v in norms])
+        tan = np.gradient(pts, axis=0)
+        sidev = np.cross(tan, nrm)
+        sidev /= np.maximum(np.linalg.norm(sidev, axis=1, keepdims=True), 1e-9)
+        taper = (1 - 0.6 * np.linspace(0, 1, len(pts)) ** 1.5)[:, None]
+        m = len(pts)
+        verts = np.concatenate([pts - sidev * width * taper / 2, pts + sidev * width * taper / 2]).tolist()
+        out.append((verts, [[i, m + i, m + i + 1, i + 1] for i in range(m - 1)]))
+    return out
+
+
+def _groups_mh(ob, land):
+    """face_shapes groups on the MakeHuman head from its landmarks (head heights)."""
+    co = np.array([tuple(v.co) for v in ob.data.vertices])
+    x, y, z = co.T
+    ax, ez, ex, mz, R = np.abs(x), land["ez"], land["ex"], land["mz"], land["R"]
+    nose = land["nose"]
+    front = np.clip((nose[1] + 0.3 - y) / 0.1, 0, 1)
+    eyes = np.zeros(len(co))
+    for c, r in land["eyes"].values():
+        eyes = np.maximum(eyes, np.exp(-0.5 * (np.linalg.norm(co - c, axis=1) / (1.6 * r)) ** 2))
+    w = {
+        "eyes": eyes * front,
+        "lips": _g(x, z, 0, mz, 0.7 * land["mw"], 0.035) * front,
+        "brows": _g(ax, z, ex, ez + 0.07, 0.06, 0.03) * front,
+        "jaw": _smooth(mz + 0.1, mz - 0.08, z) * np.clip((land["yc"] + 0.1 - y) / 0.2, 0, 1) * (z > -0.02),
+        "nose": _g(x, z, 0, (nose[2] + ez) / 2, 0.05, 0.09) * front,
+        "cheeks": _g(ax, z, ex + 0.03, (ez + mz) / 2, 0.06, 0.06) * front,
+    }
+    m = np.array(list(w.values()))
+    m[m < 0.05] = 0
+    m[np.argsort(-m, axis=0)[4:], np.arange(m.shape[1])] = 0  # qa: 4 influences per vertex at most
+    for name, vals in zip(w, m):
+        g = ob.vertex_groups.new(name=name)
+        for val in sorted({round(float(v), 2) for v in vals if v > 0.01}):
+            g.add([i for i, v in enumerate(vals) if round(float(v), 2) == val], val, "REPLACE")
+
+
 def stats(parts):
     head = parts["head"].data
     quads = sum(1 for q in head.polygons if q.loop_total == 4)
@@ -969,8 +1340,10 @@ def stats(parts):
 
 
 def op_head(p):
-    parts, _ = build_head({**p, "unit": float(p["scene"].get("unit", 0.01))})
+    mh = p.get("base", "makehuman") == "makehuman"
+    parts, info = (build_makehuman if mh else build_head)({**p, "unit": float(p["scene"].get("unit", 0.01))})
     s = stats(parts)
-    summary = "head %s %s %.1fk tris %d%% quads, eyes 2, teeth, mouth bag, %d groups" % (
-        p.get("age", "adult"), p.get("sex", "neutral"), s["tris"] / 1000, s["quads"], s["groups"])
-    return {"summary": summary, **s, "scalp": scalp_faces(parts["head"].data), "scene": bridge.dump(p["scene"])}
+    summary = "head %s %s (base=%s) %.1fk tris %d%% quads, eyes 2, teeth, %d groups" % (
+        p.get("age", "adult"), p.get("sex", "neutral"), "makehuman" if mh else "procedural", s["tris"] / 1000, s["quads"], s["groups"])
+    scalp = info["scalp"] if mh else scalp_faces(parts["head"].data)
+    return {"summary": summary, **s, "scalp": scalp, "v_chin": info.get("v_chin", 0.0), "scene": bridge.dump(p["scene"])}

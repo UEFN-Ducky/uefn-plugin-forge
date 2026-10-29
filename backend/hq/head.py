@@ -1,6 +1,7 @@
 """HQ head: realistic human head. The bpy work is engine/ops/head.py; see skill forge/realistic_head.
 
-height_cm is chin to crown (adult 24, child 19, elder 23.5). Sliders are -1..1 offsets of neutral anatomy.
+base=makehuman (default) shapes the bundled CC0 MakeHuman head + neck with its targets; base=procedural is the
+code-built head. height_cm is chin to crown (adult 24, child 19, elder 23.5). Sliders are -1..1 offsets.
 """
 import hashlib
 import math
@@ -16,7 +17,8 @@ AGES = ("child", "adult", "elder")
 BUILDS = ("slim", "average", "heavy")
 EYES = ("brown", "hazel", "green", "blue", "grey", "amber")
 SLIDERS = ("face_width", "skull_depth", "jaw_width", "chin", "cheekbone", "brow", "nose_width", "nose_length",
-           "nose_bridge", "lip_full", "mouth_width", "eye_size", "eye_tilt", "eye_spacing")
+           "nose_bridge", "nose_tip", "lip_full", "mouth_width", "eye_size", "eye_tilt", "eye_spacing", "ear_size")
+BASES = ("makehuman", "procedural")
 HEIGHT = {"child": 19.0, "adult": 24.0, "elder": 23.5}
 # hair -> existing groom ops: hair(style, length cm, density) on the scalp faces, then hair_cards(cards). The groom
 # droops by gravity, not along the scalp, so short cuts are a dense short coat (crew / buzz) and only "long" droops;
@@ -25,8 +27,8 @@ HAIR = {"short": ({"style": "short", "length": 2.5, "density": 90, "clump": 0.1}
         "buzz": ({"style": "short", "length": 0.9, "density": 100, "clump": 0.05}, 160),
         "long": ({"style": "long", "length": 28.0}, 220), "none": (None, 0)}
 HAIR_COLORS = ("black", "brown", "auburn", "blonde", "red", "white", "gray")
-_DEFAULTS = {"sex": "neutral", "age": "adult", "build": "average", "shape": None, "height_cm": None, "tone": 0.3,
-             "eye_color": "brown", "hair": "short", "hair_color": "brown", "name": "Head"}
+_DEFAULTS = {"base": "makehuman", "sex": "neutral", "age": "adult", "build": "average", "shape": None, "height_cm": None,
+             "tone": 0.3, "eye_color": "brown", "hair": "short", "hair_color": "brown", "name": "Head"}
 
 
 def params(given):
@@ -35,7 +37,7 @@ def params(given):
     if bad:
         raise ValueError("Unknown param %r for head. Params: %s" % (bad[0], ", ".join(_DEFAULTS)))
     p = {**_DEFAULTS, **given}
-    for key, options in (("sex", SEXES), ("age", AGES), ("build", BUILDS), ("eye_color", EYES), ("hair", tuple(HAIR)),
+    for key, options in (("base", BASES), ("sex", SEXES), ("age", AGES), ("build", BUILDS), ("eye_color", EYES), ("hair", tuple(HAIR)),
                          ("hair_color", HAIR_COLORS)):
         if p[key] not in options:
             raise ValueError("%s must be one of: %s" % (key, ", ".join(options)))
@@ -73,15 +75,16 @@ def roughness(u, v):
 _LIGHT, _DEEP = (0.68, 0.45, 0.36), (0.13, 0.065, 0.04)  # linear albedo at tone 0 and 1 (same as the engine's)
 
 
-def scalp(u, v):
-    """0..1 under the hair: hairline 0.80 at the forehead, 0.66 over the ears, 0.42 at the nape (engine scalp_faces)."""
+def scalp(u, v, drop=0.0):
+    """0..1 under the hair: hairline 0.80 at the forehead, 0.66 over the ears, 0.42 at the nape (engine scalp_faces);
+    drop paints it that much lower (below the edge of a hair cap, so its quad steps don't read)."""
     phi = abs(u - 0.5) * 2 * math.pi
     knots = [(0, 0.80), (0.6, 0.78), (1.6, 0.66), (math.pi, 0.42)]
     line = next(a[1] + (b[1] - a[1]) * (phi - a[0]) / (b[0] - a[0]) for a, b in zip(knots, knots[1:]) if phi <= b[0])
-    return max(0.0, min(1.0, (v - line + 0.01) / 0.03))
+    return max(0.0, min(1.0, (v - line + 0.01 + drop) / 0.03))
 
 
-def colour(u, v, tone, male, hair=None):
+def colour(u, v, tone, male, hair=None, drop=0.0):
     """Linear skin albedo at head UV: redder nose, cheeks and lips' surround; blue-grey beard shadow on a male jaw;
     the scalp tinted toward the hair colour (hair: rgb) so gaps between cards read as hair, not skin."""
     c = [a + (b - a) * tone for a, b in zip(_LIGHT, _DEEP)]
@@ -93,7 +96,7 @@ def colour(u, v, tone, male, hair=None):
         beard = _g(u, v, 0.5, 0.12, 0.12, 0.1) * (1 - 0.8 * _g(u, v, 0.5, 0.21, 0.07, 0.035))  # jaw + upper lip, not the lips
         c = [a * (1 - 0.35 * beard) + g * 0.35 * beard for a, g in zip(c, (0.2, 0.21, 0.24))]
     if hair:
-        s = 0.85 * scalp(u, v)
+        s = 0.85 * scalp(u, v, drop)
         c = [a * (1 - s) + h * s for a, h in zip(c, hair)]
     return c
 
@@ -138,11 +141,27 @@ def _unfight(scene, node, cell=0.1, rounds=12):
         scene.write_mesh(node, mesh)
 
 
+def _dedupe(scene, node, rounds=4):
+    """qa welds card points closer than 0.05 cm: lift the later of each pair 0.06 cm."""
+    from ..check import weld_map
+    mesh = scene.local_mesh(node)
+    moved = False
+    for _ in range(rounds):
+        dup = [i for i, j in enumerate(weld_map(mesh)) if i != j]
+        if not dup:
+            break
+        for i in dup:
+            mesh.verts[i] = [mesh.verts[i][0], mesh.verts[i][1], mesh.verts[i][2] + 0.06]
+        moved = True
+    if moved:
+        scene.write_mesh(node, mesh)
+
+
 def _srgb(c):
     return 12.92 * c if c <= 0.0031308 else 1.055 * c ** (1 / 2.4) - 0.055
 
 
-@op("head", "head(sex=male|female|neutral, age=child|adult|elder, build=slim|average|heavy, shape={slider:-1..1}, height_cm=24, "
+@op("head", "head(base=makehuman|procedural, sex=male|female|neutral, age=child|adult|elder, build=slim|average|heavy, shape={slider:-1..1}, height_cm=24, "
             "tone=0.3, eye_color, hair=short|buzz|long|none, hair_color=brown, name=Head) realistic quad head + neck: eye/mouth loops, "
             "eyeballs with cornea, brow+lash cards, nostrils, teeth, tongue, mouth bag, ears, SSS skin, scalp hair cards; groups eyes lips brows jaw nose cheeks")
 def head(scene, p):
@@ -154,18 +173,34 @@ def head(scene, p):
         male = q["sex"] == "male" and q["age"] != "child"
         from ..engine.ops.groom import rgb
         tint = rgb(q["hair_color"]) if q["hair"] != "none" else None
-        col = _png(scene, "T_%s_Skin_C.png" % q["name"], lambda u, v: [_srgb(c) for c in colour(u, v, q["tone"], male, tint)], True)
-        rough = _png(scene, "T_%s_Skin_R.png" % q["name"], roughness, False)
+        vc = float(result.get("v_chin") or 0.0)  # the MakeHuman head's UV also spans the neck: v -> chin 0 .. crown 1
+        hv = lambda v: (v - vc) / (1 - vc)  # noqa: E731
+        col = _png(scene, "T_%s_Skin_C.png" % q["name"], lambda u, v: [_srgb(c) for c in colour(u, hv(v), q["tone"], male, tint, 0.07 if vc else 0.0)], True)
+        rough = _png(scene, "T_%s_Skin_R.png" % q["name"], lambda u, v: roughness(u, hv(v)), False)
         layers[1:1] = [{"type": "image", "image": col, "target": "color"}, {"type": "image", "image": rough, "target": "roughness"}]
         skin["spec"]["layers"] = layers
     summary, ids = result["summary"], list(changed)
     strands, cards = HAIR[q["hair"]]
-    if strands and result.get("scalp"):  # the existing groom ops, on the scalp faces the engine picked
-        from .groom import hair, hair_cards
-        head_id = next(i for i in changed if (scene.node(i) or {}).get("name") == q["name"])
-        hair(scene, {**strands, "id": head_id, "region": result["scalp"], "color": q["hair_color"]})
-        made = hair_cards(scene, {"id": head_id, "cards": cards})
-        _unfight(scene, scene.node(made["ids"][0]))
-        ids += made["ids"]
-        summary += ", %s hair %d cards" % (q["hair"], made["cards"])
+    mh = q["base"] == "makehuman"
+    if mh and q["hair"] != "none":
+        summary += ", %s hair" % q["hair"]  # the engine laid a cap over the scalp faces (+ draped strips when long)
+    if strands and result.get("scalp") and not mh:  # the existing groom ops on the scalp faces
+        made = _groom(scene, next(i for i in changed if (scene.node(i) or {}).get("name") == q["name"]), result["scalp"],
+                      strands, cards, q["hair_color"])
+        ids.append(made["id"])
+        summary += ", %d cards" % made["cards"]
     return {"summary": summary, "ids": ids}  # tris/quads/groups are in the summary; stats would push the result past 300 chars
+
+
+def _groom(scene, head_id, scalp, strands, cards, color):
+    """The groom ops (procedural base): hair + hair_cards on the scalp faces, then qa-clean the cards."""
+    from .groom import hair, hair_cards
+    from .qa import _fix
+    hair(scene, {**strands, "id": head_id, "region": scalp, "color": color})
+    made = hair_cards(scene, {"id": head_id, "cards": cards})
+    node = scene.node(made["ids"][0])
+    _dedupe(scene, node)
+    _unfight(scene, node)
+    _dedupe(scene, node)
+    _fix(scene, [node], [("warn", "pivot", "", "origin=base")])  # qa's own pivot fix: cards stand on their base
+    return {"id": node["id"], "cards": made["cards"]}
