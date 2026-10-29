@@ -213,6 +213,47 @@ class SendTests(unittest.TestCase):
         self.assertEqual(_asset_name("SK_", "sk_Hero"), "sk_Hero")
         self.assertEqual(_asset_name("SM_", "Smoke"), "SM_Smoke")  # "Sm" alone is no prefix
 
+    def test_send_instances_and_placements(self):
+        """Two identical boxes: 1 asset placed twice; two different boxes: 2 assets."""
+        from pathlib import Path
+        from .scene import dispatch, forget
+        from .uefn import send_to_uefn
+
+        def run(sizes):
+            calls = []
+
+            def listener(command, params, timeout=None):
+                calls.append((command, params))
+                if command == "import_asset":
+                    stem = Path(params["source_file"]).stem
+                    return {"imported": [f"{params['destination_path']}/StaticMeshes/{stem}.{stem}"]}
+                if command == "create_material_instance":
+                    return {"material_instance_path": f"{params['folder']}/{params['asset_name']}"}
+                if command == "get_viewport_camera":
+                    return {"location": {"x": 0, "y": 0, "z": 0}, "rotation": {"yaw": 0}}
+                return {"get_project_info": {"content_root": "/Island"}, "forge_build_master": {"material_path": "/Island/M_Forge_Master"},
+                        "validate_uefn_asset": {"ok": True}}.get(command, {"ok": True})
+
+            with tempfile.TemporaryDirectory(prefix="forge-send-") as tmp, patch.dict(os.environ, {"FORGE_SCENES_DIR": tmp}):
+                dispatch("", "scene_new", {"name": "Pair"})
+                for k, w in enumerate(sizes):
+                    dispatch("Pair", "add", {"kind": "box", "params": {"w": w, "d": 50, "h": 50}, "pos": [300 * k, 0, 0]})
+                out = send_to_uefn("Pair", listener, place=True, location=[0, 0, 0], verbose=False)
+                forget("Pair")
+            imports = [p for c, p in calls if c == "import_asset" and p["source_file"].endswith(".glb")]
+            spawns = [p["location"] for c, p in calls if c == "spawn_actor"]
+            return out, imports, spawns
+
+        out, imports, spawns = run([50, 50])
+        self.assertEqual(len(imports), 1, out)
+        self.assertEqual(out["summary"], "sent 1 mesh (2 placements)")
+        self.assertEqual(sorted(s[0] for s in spawns), [0.0, 300.0])
+        self.assertLessEqual(len(str(out)), 300, out)
+        out, imports, spawns = run([50, 80])
+        self.assertEqual(len(imports), 2, out)
+        self.assertEqual(out["summary"], "sent 2 meshes (2 placements)")
+        self.assertEqual(len(spawns), 2)
+
 
 class StoredLodTests(unittest.TestCase):
     def send(self, hq, **kwargs):

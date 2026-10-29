@@ -68,6 +68,9 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
                     parts.append(part)
         return parts
 
+    def spot(n: dict) -> list[float]:
+        return [float(v) for v in ((n.get("transform") or {}).get("pos") or [0, 0, 0])][:3]
+
     def stored(nodes: list[dict]) -> dict:
         """The first node's HQ lods settings ({ratios, nanite}) among nodes, or {}."""
         return next((n["hq"]["lods"] for n in nodes if (n.get("hq") or {}).get("lods")), {})
@@ -76,7 +79,7 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
     if mode == "all":
         mesh = bake(visible)
         exports.append({"name": scene.name, "mesh": mesh, "collision": [scene.world_mesh(n) for n in collision if n],
-                        "lods": stored(visible)})
+                        "lods": stored(visible), "placements": [[0.0, 0.0, 0.0]]})
     elif mode == "group":
         groups = [n for n in scene.data["nodes"] if n.get("type") == "group"]
         grouped: set[str] = set()
@@ -86,24 +89,26 @@ def collect_exports(scene: Scene, mode: str = "each") -> list[dict[str, Any]]:
                 continue
             grouped.update(n["id"] for n in kids)
             exports.append({"name": g.get("name") or g["id"], "mesh": bake(kids), "collision": ucx_for(g["id"]),
-                            "lods": stored(kids)})
+                            "lods": stored(kids), "placements": [spot(g)]})
         loose = [n for n in visible if n["id"] not in grouped]
         for n in loose:
             exports.append({"name": n.get("name") or n["id"], "mesh": bake([n]), "collision": ucx_for(n.get("parent")),
-                            "lods": stored([n])})
+                            "lods": stored([n]), "placements": [spot(n)]})
     else:
-        # One SM per shared shape/material combination. Instances stay in the viewer.
-        seen: set[tuple] = set()
+        # One SM per shared shape/material combination; every node using it is a placement of that SM.
+        # ponytail: placements carry position only; per-instance rotation/scale waits until a send needs it.
+        seen: dict[tuple, dict] = {}
         for n in visible:
             key = (scene.display_key(n), n.get("material"), bool(n.get("material_override")))
             if key in seen:
+                seen[key]["placements"].append(spot(n))
                 continue
-            seen.add(key)
             mesh = scene.shaped_mesh(n)
             if mesh.verts:
                 set_origin(mesh, "base")
-            exports.append({"name": n.get("name") or n["id"], "mesh": mesh, "collision": ucx_for(n.get("parent")),
-                            "lods": stored([n])})
+            seen[key] = {"name": n.get("name") or n["id"], "mesh": mesh, "collision": ucx_for(n.get("parent")),
+                         "lods": stored([n]), "placements": [spot(n)]}
+            exports.append(seen[key])
     return [e for e in exports if e["mesh"].verts]
 
 
@@ -169,7 +174,7 @@ def export_glbs(scene: Scene, mode: str, folder: Path) -> list[dict[str, Any]]:
                 seen.add(mat)
                 order.append(mat)
         out.append({"name": name, "glb": str(path), "materials": order, "collision": item["collision"],
-                    "lods": item.get("lods") or {}})
+                    "lods": item.get("lods") or {}, "placements": item.get("placements") or [[0.0, 0.0, 0.0]]})
     return out
 
 
@@ -281,9 +286,11 @@ def _place(listener: Listener, landed: list[dict], location: list | None) -> tup
             device = f"{rows[0]['path']}.{rows[0]['name']}_C" if rows else None
         except Exception as exc:
             notes.append(f"Animated Mesh device lookup failed ({exc}); enable the Animation plugin to auto-wire clips.")
-    for i, asset in enumerate(landed):
-        at = [base[0] + i * 400.0, base[1], base[2]]
-        label = Path(asset["mesh"]).name
+    # static meshes keep the scene layout (Forge cm offsets from the drop point); skeletal ones line up 4 m apart
+    spots = [(i, asset, [base[0] + i * 400.0, base[1], base[2]] if p is None else [base[j] + p[j] for j in range(3)], k)
+             for i, asset in enumerate(landed) for k, p in enumerate(asset.get("placements") or [None])]
+    for i, asset, at, k in spots:
+        label = Path(asset["mesh"]).name + (f"_{k + 1}" if k else "")
         clips = asset.get("animations") or []
         try:
             if clips and device:
@@ -320,7 +327,7 @@ def brief(out: dict[str, Any], limit: int = 300) -> dict[str, Any]:
         names += _names([a["mesh"]] + a.get("animations", []) + a["materials"])
         if not (a.get("valid") or {}).get("ok", True):
             bad.append(_names([a["mesh"]])[0])
-    short = {"ok": not bad, "folder": out["folder"].rsplit("/", 1)[-1], "assets": names}
+    short = {"ok": not bad, "summary": out.get("summary", ""), "folder": out["folder"].rsplit("/", 1)[-1], "assets": names}
     if bad:
         short["invalid"] = bad
     if out.get("placed"):
@@ -412,8 +419,11 @@ def send_to_uefn(
             "valid": valid,
             "info": info_mesh,
             "collision_parts": len(item["collision"]),
+            "placements": item["placements"],
         })
-    out = {"folder": dest, "master": master_path, "assets": landed, "count": len(landed)}
+    spots = sum(len(a.get("placements") or [None]) for a in landed)
+    out = {"folder": dest, "master": master_path, "assets": landed, "count": len(landed), "placements": spots,
+           "summary": "sent %d mesh%s (%d placement%s)" % (len(landed), "" if len(landed) == 1 else "es", spots, "" if spots == 1 else "s")}
     if place:
         out["placed"], out["notes"] = _place(listener, landed, location)
     return out if verbose else brief(out)
