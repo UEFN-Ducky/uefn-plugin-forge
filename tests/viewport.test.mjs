@@ -2,15 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import * as THREE from "three";
 import { materialFor } from "../ui/src/material-display.js";
-import { loadView, saveView, shadingKey, shadingSettings, snapLabel, statsText } from "../ui/src/viewport.js";
+import { isCollision, loadView, saveView, shadingKey, shadingSettings, snapLabel, statsText } from "../ui/src/viewport.js";
 
 const memory = () => { const m = new Map(); return { getItem: k => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)) }; };
 
 test("view prefs round-trip through forge.view and reject bad values", () => {
   const store = memory();
-  assert.deepEqual(loadView(store), { shading: "rendered", wire: false, faces: false, normals: false, grid: true, stats: false });
+  assert.deepEqual(loadView(store), { shading: "rendered", wire: false, faces: false, normals: false, grid: true, stats: false, collision: false });
   saveView({ ...loadView(store), shading: "wireframe", stats: true, grid: false }, store);
-  assert.deepEqual(loadView(store), { shading: "wireframe", wire: false, faces: false, normals: false, grid: false, stats: true });
+  assert.deepEqual(loadView(store), { shading: "wireframe", wire: false, faces: false, normals: false, grid: false, stats: true, collision: false });
   store.setItem("forge.view", JSON.stringify({ shading: "toon", wire: "yes" }));
   assert.equal(loadView(store).shading, "rendered");
   assert.equal(loadView(store).wire, false);
@@ -46,6 +46,11 @@ test("modes map to materials: wireframe on black, solid grey, material without P
   assert.ok(flat.isMeshLambertMaterial && flat.map && !flat.normalMap);
   const lit = materialFor("fur", mats, { mode: "rendered" }, tex, cache);
   assert.ok(lit.isMeshStandardMaterial && lit.map && lit.normalMap);
+});
+
+test("collision hulls are recognised by prefix or layer", () => {
+  assert.ok(isCollision({ name: "UCX_Hood_00" }) && isCollision({ name: "usp_ball" }) && isCollision({ name: "Box", layer: "collision" }));
+  assert.ok(!isCollision({ name: "Hood", layer: "default" }) && !isCollision({ name: "MyUCX_thing" }) && !isCollision(null));
 });
 
 test("Snap button sums up the active snaps", () => {

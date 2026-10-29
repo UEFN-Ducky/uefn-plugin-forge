@@ -2,10 +2,15 @@
 
 export const SHADING = ["wireframe", "solid", "material", "rendered"];
 export const SHADING_LABEL = { wireframe: "Wireframe", solid: "Solid", material: "Material", rendered: "Rendered" };
-export const OVERLAYS = ["wire", "faces", "normals", "grid", "stats"];
-export const OVERLAY_LABEL = { wire: "Wireframe on top", faces: "Face orientation", normals: "Normals", grid: "Grid", stats: "Stats" };
+export const OVERLAYS = ["wire", "faces", "normals", "grid", "stats", "collision"];
+export const OVERLAY_LABEL = { wire: "Wireframe on top", faces: "Face orientation", normals: "Normals", grid: "Grid", stats: "Stats", collision: "Collision" };
 const KEY = "forge.view";
-const DEFAULT = { shading: "rendered", wire: false, faces: false, normals: false, grid: true, stats: false };
+const DEFAULT = { shading: "rendered", wire: false, faces: false, normals: false, grid: true, stats: false, collision: false };
+
+/** Unreal collision hulls (UCX_/UBX_/USP_/UCP_ or the collision layer): hidden unless the Collision overlay is on. */
+export function isCollision(node) {
+  return node?.layer === "collision" || /^(UCX|UBX|USP|UCP)_/i.test(String(node?.name || ""));
+}
 
 /** Saved choices with every field checked; bad or missing storage gives the defaults. */
 export function loadView(storage = globalThis.localStorage) {

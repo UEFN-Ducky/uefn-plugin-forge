@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import * as Brush from "./brush.js";
 import { colorOf, materialFor as buildMaterial } from "./material-display.js";
-import { OVERLAYS, OVERLAY_LABEL, SHADING, SHADING_LABEL, loadView, saveView, shadingKey, shadingSettings, snapLabel, statsText } from "./viewport.js";
+import { OVERLAYS, OVERLAY_LABEL, SHADING, SHADING_LABEL, isCollision, loadView, saveView, shadingKey, shadingSettings, snapLabel, statsText } from "./viewport.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { runMeshTask as compatibleMeshTask, setSimplified, isSimplified } from "./mesh-engine.js";
 import { drawGroups, sceneTris, SIMPLIFY_TRIS } from "./project-browser.js";
@@ -1174,7 +1174,7 @@ function buildBatches() {
     const seen = new Set();
     while (n && !seen.has(n.id)) {
       seen.add(n.id);
-      if (n.visible === false || layerOff.has(n.layer)) return true;
+      if (n.visible === false || layerOff.has(n.layer) || (!view.collision && isCollision(n))) return true;
       n = n.parent ? byId.get(n.parent) : null;
     }
     return false;
@@ -1201,7 +1201,7 @@ function buildBatches() {
     const proto = protos.get(rows[0][1]);
     if (!proto) continue;
     const geo = geometryFor(proto);
-    const mat = materialsForProto(proto, rows[0][12], payload.materials);
+    const mat = isCollision(byId.get(rows[0][0])) ? collisionWire : materialsForProto(proto, rows[0][12], payload.materials);
     for (let c = 0; c < rows.length; c += CHUNK) {
       const slice = rows.slice(c, c + CHUNK);
       const batchKey = `${rows[0][1]}\0${rows[0][12] || ""}\0${c}`;
@@ -1301,7 +1301,9 @@ faceOrientation.customProgramCacheKey = () => "forge-face-orientation";
 let normalLines = null, themeBackground = new THREE.Color();
 const NORMAL_CAP = 40000;
 
-const isHull = batch => [].concat(batch.material).every(m => m.userData?.outline || m.visible === false);
+// Collision hulls draw as a wire in the collision layer's colour when the Collision overlay is on.
+const collisionWire = new THREE.MeshBasicMaterial({ color: 0xee8855, wireframe: true });
+const isHull = batch => [].concat(batch.material).every(m => m === collisionWire || m.userData?.outline || m.visible === false);
 
 function buildNormals() {
   if (normalLines) { normalLines.geometry.dispose(); normalLines.removeFromParent(); normalLines = null; }
@@ -1363,7 +1365,8 @@ function setShading(mode) {
 function setOverlay(key, on) {
   view[key] = on;
   saveView(view);
-  paintOverlays();
+  if (key === "collision" && state.payload) buildBatches();
+  else paintOverlays();
 }
 
 function renderView() {

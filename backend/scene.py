@@ -1799,6 +1799,14 @@ def _op_fix(scene: Scene, p: dict) -> dict[str, Any]:
     return {"summary": f"Fix {len(fixed)}", "ids": [f["id"] for f in fixed], "fixed": fixed}
 
 
+_COLLISION_PREFIXES = ("UCX_", "UBX_", "USP_", "UCP_")
+
+
+def is_collision(n: dict) -> bool:
+    """An Unreal collision hull: exported and sent, never drawn in look, render or light."""
+    return n.get("layer") == "collision" or str(n.get("name") or "").upper().startswith(_COLLISION_PREFIXES)
+
+
 def _style(value: Any) -> str:
     """'pbr' (default, the engine's empty style), 'toon', or a QA look (wire, islands, silhouette, checker, xray)."""
     from .render import QA_STYLES
@@ -1820,7 +1828,8 @@ def _op_render(scene: Scene, p: dict) -> dict[str, Any]:
     folder = _captures()
     mats = scene.materials()
     nodes = [n for n in scene.data["nodes"] if n.get("type") == "object" and n.get("visible", True)
-             and (not p.get("id") or n["id"] == p["id"])]
+             and (not p.get("id") or n["id"] == p["id"])
+             and (p.get("show_collision") or n["id"] == p.get("id") or not is_collision(n))]
     if p.get("clip"):
         rig = find_rig(scene, str(p.get("rig") or ""))
         clip = find_clip(rig, str(p["clip"]))
@@ -1882,6 +1891,10 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
 
     nodes = [n for n in scene.data["nodes"] if n.get("type") == "object" and n.get("visible", True)
              and (not ids or wanted(n))]
+    show = p.get("show_collision") or (isinstance(p.get("look"), dict) and p["look"].get("show_collision"))
+    hidden = 0 if show else sum(1 for n in nodes if is_collision(n) and n["id"] not in ids)
+    if hidden:
+        nodes = [n for n in nodes if not is_collision(n) or n["id"] in ids]
     mesh = Mesh()
     for n in nodes:
         mesh.append(scene.world_mesh(n))
@@ -1898,6 +1911,8 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
         "; ".join(f"{k} x{c}" for k, c in list(kinds.items())[:3]) or "no issues", fill_pct(mesh, views[0]))
     if style:
         seen += ", style " + style
+    if hidden:
+        seen += f", {hidden} collision hidden"
     from . import render as rd
 
     path = render_tiles(mesh, _captures() / f"forge_{scene.name}_look.png", views, mats, scene.folder / "textures",

@@ -56,6 +56,18 @@ def test_look_styles() -> None:
             continue
         raise AssertionError(bad)
 
+    # A UCX_ hull is exported but never drawn: the box alone and box + hull render the same pixels.
+    sil_px = lambda name, **kw: Image.open(dispatch(name, "look", {"style": "silhouette", "px": 128, **kw})["paths"][0]).tobytes()
+    alone = sil_px("Looks")
+    dispatch("Looks", "add", {"kind": "box", "name": "UCX_Box_00", "params": {"w": 200, "d": 60, "h": 60}}, actor="agent")
+    hidden = dispatch("Looks", "look", {"style": "silhouette", "px": 128})
+    assert "1 collision hidden" in hidden["seen"], hidden["seen"]
+    assert sil_px("Looks") == alone and sil_px("Looks", show_collision=True) != alone
+    from backend.scene import load as load_scene
+    from backend.uefn import collect_exports
+    out = collect_exports(load_scene("Looks"), "all")[0]
+    assert len(out["mesh"].verts) + sum(len(c.verts) for c in out["collision"]) == 16  # box + hull both ship
+
 
 def test_camera_moves() -> None:
     from backend.tools import apply_move, lens_fov, move_keys
