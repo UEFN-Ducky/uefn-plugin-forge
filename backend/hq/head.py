@@ -18,8 +18,15 @@ EYES = ("brown", "hazel", "green", "blue", "grey", "amber")
 SLIDERS = ("face_width", "skull_depth", "jaw_width", "chin", "cheekbone", "brow", "nose_width", "nose_length",
            "nose_bridge", "lip_full", "mouth_width", "eye_size", "eye_tilt", "eye_spacing")
 HEIGHT = {"child": 19.0, "adult": 24.0, "elder": 23.5}
+# hair -> existing groom ops: hair(style, length cm, density) on the scalp faces, then hair_cards(cards). The groom
+# droops by gravity, not along the scalp, so short cuts are a dense short coat (crew / buzz) and only "long" droops;
+# the scalp under the hair is tinted to the hair colour so gaps between cards read as hair.
+HAIR = {"short": ({"style": "short", "length": 2.5, "density": 90, "clump": 0.1}, 220),
+        "buzz": ({"style": "short", "length": 0.9, "density": 100, "clump": 0.05}, 160),
+        "long": ({"style": "long", "length": 28.0}, 220), "none": (None, 0)}
+HAIR_COLORS = ("black", "brown", "auburn", "blonde", "red", "white", "gray")
 _DEFAULTS = {"sex": "neutral", "age": "adult", "build": "average", "shape": None, "height_cm": None, "tone": 0.3,
-             "eye_color": "brown", "name": "Head"}
+             "eye_color": "brown", "hair": "short", "hair_color": "brown", "name": "Head"}
 
 
 def params(given):
@@ -28,7 +35,8 @@ def params(given):
     if bad:
         raise ValueError("Unknown param %r for head. Params: %s" % (bad[0], ", ".join(_DEFAULTS)))
     p = {**_DEFAULTS, **given}
-    for key, options in (("sex", SEXES), ("age", AGES), ("build", BUILDS), ("eye_color", EYES)):
+    for key, options in (("sex", SEXES), ("age", AGES), ("build", BUILDS), ("eye_color", EYES), ("hair", tuple(HAIR)),
+                         ("hair_color", HAIR_COLORS)):
         if p[key] not in options:
             raise ValueError("%s must be one of: %s" % (key, ", ".join(options)))
     shape = dict(p["shape"] or {})
@@ -65,8 +73,17 @@ def roughness(u, v):
 _LIGHT, _DEEP = (0.68, 0.45, 0.36), (0.13, 0.065, 0.04)  # linear albedo at tone 0 and 1 (same as the engine's)
 
 
-def colour(u, v, tone, male):
-    """Linear skin albedo at head UV: redder nose, cheeks and lips' surround; blue-grey beard shadow on a male jaw."""
+def scalp(u, v):
+    """0..1 under the hair: hairline 0.80 at the forehead, 0.66 over the ears, 0.42 at the nape (engine scalp_faces)."""
+    phi = abs(u - 0.5) * 2 * math.pi
+    knots = [(0, 0.80), (0.6, 0.78), (1.6, 0.66), (math.pi, 0.42)]
+    line = next(a[1] + (b[1] - a[1]) * (phi - a[0]) / (b[0] - a[0]) for a, b in zip(knots, knots[1:]) if phi <= b[0])
+    return max(0.0, min(1.0, (v - line + 0.01) / 0.03))
+
+
+def colour(u, v, tone, male, hair=None):
+    """Linear skin albedo at head UV: redder nose, cheeks and lips' surround; blue-grey beard shadow on a male jaw;
+    the scalp tinted toward the hair colour (hair: rgb) so gaps between cards read as hair, not skin."""
     c = [a + (b - a) * tone for a, b in zip(_LIGHT, _DEEP)]
     red = 0.9 * math.exp(-0.5 * ((u - 0.5) / 0.03) ** 2) * (0.29 <= v <= 0.5) \
         + 0.7 * (_g(u, v, 0.41, 0.4, 0.04, 0.05) + _g(u, v, 0.59, 0.4, 0.04, 0.05)) \
@@ -75,6 +92,9 @@ def colour(u, v, tone, male):
     if male:
         beard = _g(u, v, 0.5, 0.12, 0.12, 0.1) * (1 - 0.8 * _g(u, v, 0.5, 0.21, 0.07, 0.035))  # jaw + upper lip, not the lips
         c = [a * (1 - 0.35 * beard) + g * 0.35 * beard for a, g in zip(c, (0.2, 0.21, 0.24))]
+    if hair:
+        s = 0.85 * scalp(u, v)
+        c = [a * (1 - s) + h * s for a, h in zip(c, hair)]
     return c
 
 
@@ -99,8 +119,8 @@ def _srgb(c):
 
 
 @op("head", "head(sex=male|female|neutral, age=child|adult|elder, build=slim|average|heavy, shape={slider:-1..1}, height_cm=24, "
-            "tone=0.3, eye_color=brown|hazel|green|blue|grey|amber, name=Head) realistic quad head: eye/mouth/nasolabial loops, "
-            "eyeballs (sclera, iris, cornea), brow+lash cards, nostrils, teeth, tongue, mouth bag, ears, SSS skin with colour zones; groups eyes lips brows jaw nose cheeks")
+            "tone=0.3, eye_color, hair=short|buzz|long|none, hair_color=brown, name=Head) realistic quad head + neck: eye/mouth loops, "
+            "eyeballs with cornea, brow+lash cards, nostrils, teeth, tongue, mouth bag, ears, SSS skin, scalp hair cards; groups eyes lips brows jaw nose cheeks")
 def head(scene, p):
     q = params({k: v for k, v in p.items() if k not in ("id", "wait")})
     result, changed = engine(scene, "head", [], q)
@@ -108,8 +128,19 @@ def head(scene, p):
     if skin is not None and skin.get("spec"):
         layers = [layer for layer in skin["spec"]["layers"] if layer.get("type") != "image"]
         male = q["sex"] == "male" and q["age"] != "child"
-        col = _png(scene, "T_%s_Skin_C.png" % q["name"], lambda u, v: [_srgb(c) for c in colour(u, v, q["tone"], male)], True)
+        from ..engine.ops.groom import rgb
+        tint = rgb(q["hair_color"]) if q["hair"] != "none" else None
+        col = _png(scene, "T_%s_Skin_C.png" % q["name"], lambda u, v: [_srgb(c) for c in colour(u, v, q["tone"], male, tint)], True)
         rough = _png(scene, "T_%s_Skin_R.png" % q["name"], roughness, False)
         layers[1:1] = [{"type": "image", "image": col, "target": "color"}, {"type": "image", "image": rough, "target": "roughness"}]
         skin["spec"]["layers"] = layers
-    return {"summary": result["summary"], "ids": changed, "stats": {k: result[k] for k in ("tris", "quads", "groups") if k in result}}
+    summary, ids = result["summary"], list(changed)
+    strands, cards = HAIR[q["hair"]]
+    if strands and result.get("scalp"):  # the existing groom ops, on the scalp faces the engine picked
+        from .groom import hair, hair_cards
+        head_id = next(i for i in changed if (scene.node(i) or {}).get("name") == q["name"])
+        hair(scene, {**strands, "id": head_id, "region": result["scalp"], "color": q["hair_color"]})
+        made = hair_cards(scene, {"id": head_id, "cards": cards})
+        ids += made["ids"]
+        summary += ", %s hair %d cards" % (q["hair"], made["cards"])
+    return {"summary": summary, "ids": ids}  # tris/quads/groups are in the summary; stats would push the result past 300 chars

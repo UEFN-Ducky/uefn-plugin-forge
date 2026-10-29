@@ -79,16 +79,18 @@ def _raw(p, k):
     d = d / np.linalg.norm(d, axis=1, keepdims=True)
     dx, dy, dz = d.T
     front, back, low, up = (np.clip(v, 0, 1) for v in (-dy, dy, -dz, dz))
-    gonial = 0.13 * np.exp(-((dz + 0.62) / 0.13) ** 2) * (1 - back)              # jaw angle
-    rx = 0.31 * k["width"] * (1 - k["taper"] * low ** 3 + 0.09 * up + gonial)    # cubic taper: square jaw, not an egg
-    x = np.sign(dx) * np.abs(dx) ** (0.9 - 0.3 * up) * rx                      # upper skull: round crown, not an egg
+    gonial = 0.07 * np.exp(-((dz + 0.62) / 0.13) ** 2) * (1 - back)              # jaw angle
+    zyg = 0.07 * np.exp(-((dz + 0.04) / 0.16) ** 2) * (1 - back)                 # zygomatic arch: widest of the face
+    parietal = 0.12 * up * (1 - up) * 4 * (0.6 + 0.4 * back)                     # temples + parietal eminence
+    rx = 0.31 * k["width"] * (1 - k["taper"] * low ** 3 + parietal + gonial + zyg)  # cubic taper: square jaw
+    x = np.sign(dx) * np.abs(dx) ** (0.9 - 0.45 * up) * rx                     # upper skull: broad crown, not an egg
     y = np.sign(dy) * np.abs(dy) ** 0.85 * np.where(dy < 0, 0.35, 0.385 * k["depth"])
-    z = np.sign(dz) * np.abs(dz) ** (0.95 + 0.3 * up) * np.where(dz > 0, 0.53, 0.47)  # exponent blends: no squashed band
+    z = np.sign(dz) * np.abs(dz) ** (0.95 + 0.6 * up) * np.where(dz > 0, 0.53, 0.47)  # flatter crown; blends: no squashed band
     y = y - k["jaw_fwd"] * low ** 1.5 * front                                   # mandible and chin come forward
     z = z + low ** 1.5 * (0.2 * _smooth(-0.55, 0.3, dy) + 0.5 * back)         # under-jaw rises to the skull base
     y = y + 0.03 * up ** 3 * front                                             # forehead slopes to the crown
-    y = y - 0.05 * front * up * (1 - up) * 4 * 0.5                             # but stays full: upright forehead
-    y = y + 0.035 * np.exp(-((dz - 0.25) / 0.3) ** 2) * back                    # occiput
+    y = y - 0.07 * front * np.sin(np.pi * np.clip(up / 0.85, 0, 1))            # but stays full: upright forehead
+    y = y + 0.015 * np.exp(-((dz - 0.25) / 0.3) ** 2) * back                    # occiput (flat-ish)
     return np.stack([x, y, z + 0.47], 1)
 
 
@@ -140,26 +142,29 @@ def _relief(x, z, k, socket=True):
     ax, f = np.abs(x), k["f"]
     d = 0.035 * _g(ax, z, k["ex"], 0.5 * f, 0.055, 0.042) if socket else np.zeros_like(x)
     # brow ridge: sharp lower edge over the eye, soft slope up the forehead
-    ridge = np.where(z < 0.585 * f, 0.014, 0.03)
-    d = d - 0.024 * k["brow"] * np.exp(-0.5 * (((ax - 0.115) / 0.075) ** 2 + ((z - 0.585 * f) / ridge) ** 2))
-    d = d - 0.012 * k["brow"] * _g(x, z, 0, 0.575 * f, 0.03, 0.03)              # glabella
-    d = d + 0.006 * _g(x, z, 0, 0.545 * f, 0.022, 0.014)                        # nasion dip
-    zt, zr = 0.322 * f, 0.55 * f                                                # nose tip, root (nasion)
+    # landmarks (Farkas adult averages over head height): nasion 0.52, glabella 0.55, brow ridge 0.555
+    ridge = np.where(z < 0.555 * f, 0.014, 0.03)
+    d = d - 0.024 * k["brow"] * np.exp(-0.5 * (((ax - 0.115) / 0.075) ** 2 + ((z - 0.555 * f) / ridge) ** 2))
+    d = d - 0.012 * k["brow"] * _g(x, z, 0, 0.55 * f, 0.03, 0.03)               # glabella
+    d = d + 0.006 * _g(x, z, 0, 0.52 * f, 0.022, 0.014)                         # nasion dip
+    zt, zr = 0.322 * f, 0.52 * f                                                # nose tip, root (nasion)
     t = np.clip((zr - z) / (zr - zt), 0, 1)
-    reach = 0.085 * k["nose_l"] * (0.12 * k["bridge"] + 0.88 * t ** 1.1)
+    reach = 0.1 * k["nose_l"] * (0.2 * k["bridge"] + 0.8 * t ** 1.1)           # bridge projects from the eye corners
     wid = (0.014 + 0.016 * t) * k["nose_w"]
     below = np.where(z < zt, np.exp(-0.5 * ((z - zt) / (0.013 * f)) ** 2), 1.0)
     above = np.where(z > zr, np.exp(-0.5 * ((z - zr) / 0.02) ** 2), 1.0)
     d = d - reach * np.exp(-(np.abs(x) / wid) ** 3) * below * above             # bridge: flat sides, defined edges
     d = d + 0.004 * _g(x, z, 0, 0.36 * f, 0.02, 0.012) * k["nose_l"]            # supratip break
-    d = d - 0.022 * k["nose_l"] * _g(x, z, 0, zt, 0.017 * k["nose_w"], 0.016)   # tip lobule
-    ala = (0.047 * k["nose_w"], 0.31 * f)
-    d = d - 0.045 * k["nose"] * _g(ax, z, ala[0], ala[1], 0.016 * k["nose_w"], 0.015)  # alar wings
+    d = d - 0.03 * k["nose_l"] * _g(x, z, 0, zt, 0.019 * k["nose_w"], 0.017)    # tip lobule (ball)
+    col = np.clip((z - 0.296 * f) / 0.01, 0, 1) * np.clip((zt - z) / 0.008 + 1, 0, 1)
+    d = d - 0.035 * k["nose_l"] * np.exp(-(x / 0.008) ** 2) * col * (z < zt)    # columella down to the lip
+    ala = (0.052 * k["nose_w"], 0.31 * f)
+    d = d - 0.055 * k["nose"] * _g(ax, z, ala[0], ala[1], 0.018 * k["nose_w"], 0.016)  # alar wings: read from the front
     r_ala = np.hypot((ax - ala[0]) / k["nose_w"], z - ala[1])
     d = d + 0.006 * np.exp(-0.5 * ((r_ala - 0.02) / 0.004) ** 2) * (z > 0.29 * f)   # alar groove round each wing
     d = d - 0.03 * _g(x, z, 0, 0.215 * f, 0.11 * k["mw"], 0.065)                 # maxilla / dental arch
     d = d - 0.005 * _g(ax, z, 0.009, 0.255 * f, 0.004, 0.02)                     # philtrum columns
-    d = d + 0.002 * _g(x, z, 0, 0.255 * f, 0.004, 0.02)                         # philtrum groove
+    d = d + 0.004 * _g(x, z, 0, 0.255 * f, 0.004, 0.02)                         # philtrum groove
     d = d + 0.008 * _g(ax, z, 0.104 * k["mw"], 0.205 * f, 0.01, 0.01)           # mouth-corner pits
     d = d - 0.012 * k["lips"] * _g(x, z, 0, 0.217 * f, 0.07 * k["mw"], 0.011)   # upper lip
     d = d - 0.015 * k["lips"] * _g(x, z, 0, 0.19 * f, 0.06 * k["mw"], 0.013)    # lower lip
@@ -375,9 +380,6 @@ def build_shell(k):
         np.column_stack([bx * 0.7, np.full_like(c, ys + 0.095), mz - 0.006 + 1.1 * bz]),
         np.column_stack([0.045 * k["mw"] * c, np.full_like(c, ys + 0.14), mz + 0.022 * sn]),  # ellipse: no flat run
     ]
-    zig = np.where(np.arange(len(c)) % 2, 0.003, -0.003)  # hidden bag: alternate depth, no coplanar runs
-    bag_rings[2][:, 1] += zig
-    bag_rings[3][:, 1] += zig
     bag = []
     for i, pts in enumerate(bag_rings):
         prev = _ring(bm, prev, pts, 1 if i == 0 else 2, info["mat_faces"][1 if i == 0 else 2])
@@ -403,12 +405,51 @@ def build_shell(k):
         info["nostrils"].append(prev)
     info.update(ys=ys, mz=mz, ez=ez, n=n)
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
+    _unfight(bm, [fc for fc in bm.faces if fc.material_index in (2, 3)], k.get("cell", 0.1 / 24))
     bm.verts.index_update()
     info["rings"] = {name: [[v.index for v in r] for r in rs] for name, rs in info["rings"].items()}
     info["nostrils"] = [[v.index for v in r] for r in info["nostrils"]]
     info["bag"] = {name: ([[v.index for v in r] for r in b] if name == "mouth" else [v.index for v in b])
                    for name, b in info["bag"].items()}
     return bm, info
+
+
+def _unfight(bm, faces, cell, rounds=12):
+    """qa flags parallel faces whose centres share a cell (z-fight). These faces are hidden (mouth bag, eye
+    sockets, nostril tunnels), so push one vertex of each offender along its normal until none are left."""
+    for _ in range(rounds):
+        seen, bad = {}, []
+        for fc in faces:
+            fc.normal_update()
+            key = tuple(round(v / cell) for v in fc.calc_center_median())
+            if any(abs(fc.normal.dot(o)) > 0.99 for o in seen.get(key, ())):
+                bad.append(fc)
+            seen.setdefault(key, []).append(fc.normal.copy())
+        if not bad:
+            return
+        for fc in bad:
+            v = fc.verts[len(bad) % len(fc.verts)]
+            v.co += fc.normal * cell * 0.8
+
+
+def _unfight_arrays(co, faces, cell, rounds=12):
+    """_unfight for plain arrays (hair cards): the nudges stay under 1 mm."""
+    co = co.copy()
+    for r in range(rounds):
+        seen, bad = {}, []
+        for fi, f in enumerate(faces):
+            p = co[f]
+            n = np.cross(p[2] - p[0], p[-1] - p[1] if len(f) == 4 else p[1] - p[0])
+            n = n / max(np.linalg.norm(n), 1e-12)
+            key = tuple(np.round(p.mean(0) / cell).astype(int))
+            if any(abs(n @ o) > 0.99 for o in seen.get(key, ())):
+                bad.append((f, n))
+            seen.setdefault(key, []).append(n)
+        if not bad:
+            break
+        for f, n in bad:
+            co[f[r % len(f)]] += n * cell * 0.8
+    return co
 
 
 def _lips_mask(x, z, k):
@@ -547,6 +588,49 @@ def _arch(y0, z_top, z_bot, k, gum_z, upper):
         verts.append([x * 1.04, y0 + c * x * x + 0.006, gum_z])
         faces += [[r + j, r + (j + 1) % 6, len(verts) - 1] for j in range(6)]
     return verts, faces, tooth_faces
+
+
+def _neck(k, segs=20, rows=10):
+    """Closed neck stub, 0.5 H (12 cm) below the chin up into the skull: leans forward going up, with a
+    sternocleidomastoid ridge per side from behind the ear down to the sternum. Cone caps (flat fans z-fight)."""
+    rx, ry = 0.22 * k["width"], 0.22
+    verts, faces, rings = [], [], []
+    for r in range(rows):
+        t = r / (rows - 1)                       # 0 bottom .. 1 top
+        z, yc = -0.5 + 0.72 * t, 0.08 - 0.08 * t
+        a = np.linspace(0, 2 * math.pi, segs, endpoint=False)
+        bump = np.zeros(segs)
+        for s in (1, -1):                        # muscle line: side-back at the top, front-centre at the bottom
+            line = 0.35 + (-math.pi / 2 + 0.3 - 0.35) * (1 - t)
+            line = line if s > 0 else math.pi - line
+            gap = (a - line + math.pi) % (2 * math.pi) - math.pi
+            bump += 0.07 * np.exp(-0.5 * (gap / 0.22) ** 2) * math.sin(math.pi * min(1.0, 0.15 + 0.85 * t))
+        scale = (1 + bump) * (1 + 0.3 * (1 - t) ** 3)  # trapezius flare toward the shoulders
+        rings.append(len(verts))
+        verts += np.column_stack([rx * np.cos(a) * scale, yc + ry * np.sin(a) * scale, np.full(segs, z)]).tolist()
+    for r in range(rows - 1):
+        a0, b0 = rings[r], rings[r + 1]
+        faces += [[a0 + j, a0 + (j + 1) % segs, b0 + (j + 1) % segs, b0 + j] for j in range(segs)]
+    for ring, z, yc in ((rings[0], -0.56, 0.08), (rings[-1], 0.3, 0.0)):
+        verts.append([0.0, yc, z])
+        faces += [[ring + j, ring + (j + 1) % segs, len(verts) - 1] for j in range(segs)]
+    return verts, faces
+
+
+def scalp_faces(me):
+    """Skin faces above the hairline (0.80 H at the forehead, 0.66 over the ears, 0.42 at the nape)."""
+    out = []
+    zmin = min(v.co.z for v in me.vertices)
+    H = max(v.co.z for v in me.vertices) - zmin
+    for q in me.polygons:
+        if q.material_index != 0:
+            continue
+        c = q.center
+        phi = abs(math.atan2(c.x, -c.y))
+        line = float(np.interp(phi, [0, 0.6, 1.6, math.pi], [0.80, 0.78, 0.66, 0.42]))
+        if (c.z - zmin) / H > line:
+            out.append(q.index)
+    return out
 
 
 def _ear(side, centre, k):
@@ -690,7 +774,7 @@ def _brows(k, info):
                 if row == 2 and u > 0.55:
                     continue  # the tail thins to two rows
                 x = 0.052 + 0.17 * u
-                z = 0.583 * f + 0.022 * math.sin(math.pi * min(u / 0.65, 1.0) * 0.5) - 0.012 * max(u - 0.65, 0) / 0.35 \
+                z = 0.56 * f + 0.022 * math.sin(math.pi * min(u / 0.65, 1.0) * 0.5) - 0.012 * max(u - 0.65, 0) / 0.35 \
                     + (row - 1) * 0.006 * thick * (1.2 - 0.5 * u)
                 ang = math.radians(75 - 70 * min(u / 0.6, 1.0) - 10 * max(u - 0.6, 0) / 0.4)  # up at the head, out at the tail
                 d = np.array([s * math.cos(ang), math.sin(ang)])
@@ -754,7 +838,7 @@ def _groups(ob, info, k):
     w = {
         "eyes": np.zeros(len(co)),
         "lips": np.where(_lips_mask(x, z, k), 1.0, 0.0) * front,
-        "brows": _g(ax, z, 0.12, 0.6 * f, 0.06, 0.03) * front,
+        "brows": _g(ax, z, 0.12, 0.565 * f, 0.06, 0.03) * front,
         "jaw": _smooth(0.32 * f, 0.12 * f, z) * np.clip((0.12 - y) / 0.2, 0, 1),
         "nose": _g(x, z, 0, 0.38 * f, 0.05 * k["nose_w"], 0.09) * front,
         "cheeks": _g(ax, z, 0.17, 0.36 * f, 0.06, 0.06) * front,
@@ -787,6 +871,7 @@ def build_head(p):
     k = shape(p)
     unit = float(p.get("unit", 0.01))
     H = float(p.get("height_cm") or 24.0) * unit
+    k["cell"] = 0.1 * 0.01 / H  # qa's 0.1 cm z-fight cell in head heights
     prefix = str(p.get("name") or "Head")
     mats = materials(prefix, float(p.get("tone", 0.3)), p.get("eye_color", "brown"))
     bm, info = build_shell(k)
@@ -816,9 +901,9 @@ def build_head(p):
         centre = np.array([s * k["ex"], k["ey"], ez])
         inner = margin[np.argmin(np.abs(margin[:, 0]))]
         cpos = inner + [s * 0.006, 0.002, -0.001]
-        v, fc, _ = _lathe([(0, 0.004)] + [(0.004 * math.sin(math.pi * i / 4), 0.004 * math.cos(math.pi * i / 4)) for i in range(1, 4)] + [(0, -0.004)], 8)
+        v, fc, _ = _lathe([(0, 0.009), (0.005, 0.0), (0, -0.009)], 6)  # coarse double cone: a fine one z-fights on a child
         n0 = len(wv)
-        wv += [(cpos[0] + a * 1.4, cpos[1] + b, cpos[2] + c * 1.2) for a, b, c in v]
+        wv += [(cpos[0] + a * 1.3, cpos[1] + b * 0.5, cpos[2] + c) for a, b, c in v]
         wf += [[i + n0 for i in q] for q in fc]
         wm += [0] * len(fc)
         low = margin[(margin[:, 2] < ez + k["tilt"] * 0.5) & (np.abs(margin[:, 0] - inner[0]) > 0.014)]  # clear of the caruncle
@@ -836,7 +921,8 @@ def build_head(p):
         wv += verts
         wf += [[i + n0 for i in q] for q in faces]
         wm += [mat] * len(faces)
-    wv = _spread(np.array(wv), 0.0006 / H)
+    for _ in range(3):  # each pass can undo the other a little: alternate until both hold
+        wv = _spread(_unfight_arrays(np.array(wv), wf, k["cell"]), 0.0006 / H)
     parts["details"] = _object(prefix + "_details", wv, wf, [mats[m] for m in ("Caruncle", "TearLine", "Brow", "Lash")], wm)
     # teeth, gums, tongue
     ys, mz = info["ys"], info["mz"]
@@ -850,7 +936,7 @@ def build_head(p):
     # ears: on the skull side, brow to nose base, a little behind the head centre
     ev, ef = [], []
     co = np.array([tuple(v.co) for v in me.vertices])
-    ze = (0.585 + 0.30) / 2 * k["f"] + 0.01
+    ze = (0.555 + 0.30) / 2 * k["f"] + 0.01
     near = co[(np.abs(co[:, 2] - ze) < 0.03) & (np.abs(co[:, 1] - 0.03) < 0.04)]
     side_x = float(np.abs(near[:, 0]).max()) if len(near) else 0.3
     for s in (1, -1):
@@ -859,7 +945,9 @@ def build_head(p):
         ev += v
         ef += [[i + n0 for i in q] for q in fc]
     parts["ears"] = _object(prefix + "_ears", ev, ef, [mats["Ears"]])
-    for name in ("details", "teeth_U", "teeth_L", "tongue", "ears"):  # pivot on the part's base (qa); eyes keep a centre pivot to aim
+    nv, nf = _neck(k)
+    parts["neck"] = _object(prefix + "_neck", nv, nf, [mats["Skin"]])
+    for name in ("details", "teeth_U", "teeth_L", "tongue", "ears", "neck"):  # pivot on the part's base (qa); eyes keep a centre pivot to aim
         ob = parts[name]
         co = np.array([tuple(v.co) for v in ob.data.vertices])
         base = Vector(((co[:, 0].min() + co[:, 0].max()) / 2, (co[:, 1].min() + co[:, 1].max()) / 2, co[:, 2].min()))
@@ -885,4 +973,4 @@ def op_head(p):
     s = stats(parts)
     summary = "head %s %s %.1fk tris %d%% quads, eyes 2, teeth, mouth bag, %d groups" % (
         p.get("age", "adult"), p.get("sex", "neutral"), s["tris"] / 1000, s["quads"], s["groups"])
-    return {"summary": summary, **s, "scene": bridge.dump(p["scene"])}
+    return {"summary": summary, **s, "scalp": scalp_faces(parts["head"].data), "scene": bridge.dump(p["scene"])}

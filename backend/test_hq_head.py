@@ -72,6 +72,18 @@ def test_proportions():
     assert co[np.argmin(co[:, 2]), 1] < -0.03, "lowest point should be the chin, not the under-jaw"
     nose_tip = co[np.argmin(co[:, 1])]
     assert abs(nose_tip[0]) < 0.004 and 0.28 < nose_tip[2] / 0.24 < 0.4, "nose tip at %s" % nose_tip
+    # cranium (crown - nasion) vs face (nasion - chin): real adults 0.85-1.1, a doll's egg is ~1.35
+    mid = co[(np.abs(co[:, 0]) < 0.006) & (co[:, 1] < -0.05) & (co[:, 2] > 0.45 * 0.24) & (co[:, 2] < 0.58 * 0.24)]
+    nasion = mid[np.argmax(mid[:, 1])][2]
+    ratio = (hi - nasion) / (nasion - lo)
+    assert 0.85 <= ratio <= 1.1, "cranium / face height %.2f (want 0.85-1.1)" % ratio
+    # nose projects >= 1.6 cm in front of the inner eye corners
+    canthi = [co[r][np.argmin(np.abs(co[r][:, 0]))][1] for r in (info["rings"]["eye_L"][-1], info["rings"]["eye_R"][-1])]
+    assert np.mean(canthi) - nose_tip[1] >= 0.016, "nose projects %.1f cm (want 1.6+)" % ((np.mean(canthi) - nose_tip[1]) * 100)
+    # cheekbones at least 10 % wider than the jaw
+    zyg = np.abs(co[(co[:, 2] > 0.40 * 0.24) & (co[:, 2] < 0.48 * 0.24) & (co[:, 1] < 0.05), 0]).max()
+    jaw = np.abs(co[(co[:, 2] > 0.10 * 0.24) & (co[:, 2] < 0.20 * 0.24), 0]).max()
+    assert zyg >= 1.1 * jaw, "bizygomatic %.1f cm vs bigonial %.1f cm (want +10%%)" % (zyg * 100, jaw * 100)
 
 
 def test_loops_valence_4():
@@ -110,6 +122,11 @@ def test_manifold_and_nostrils():
         assert abs(c[0]) < 0.05 and 0.27 < c[2] < 0.36 and c[1] < -0.2, "nostril loop outside the nose at %s H" % c
     assert sorted(len(loop) for loop in loops) == [4, 4] and len(info["nostrils"]) == 2
     bm.free()
+    bm = _bm(parts["neck"])
+    assert all(len(e.link_faces) == 2 for e in bm.edges), "neck must be closed"
+    bm.free()
+    low = min((parts["neck"].matrix_world @ v.co).z for v in parts["neck"].data.vertices)
+    assert low <= -0.10, "neck reaches %.1f cm below the chin (want 10+)" % (-low * 100)
     for name in ("eye_L", "eye_R", "ears", "tongue"):
         bm = _bm(parts[name])
         shells = [e for e in bm.edges if len(e.link_faces) not in (1, 2)]
@@ -119,7 +136,7 @@ def test_manifold_and_nostrils():
 
 def test_parts_and_materials():
     parts, _ = build()
-    assert {"head", "eye_L", "eye_R", "details", "teeth_U", "teeth_L", "tongue", "ears"} <= set(parts)
+    assert {"head", "eye_L", "eye_R", "details", "teeth_U", "teeth_L", "tongue", "ears", "neck"} <= set(parts)
     det = parts["details"]
     mw = det.matrix_world
     by = {}
@@ -271,11 +288,14 @@ def test_through_forge_batch():
         try:
             out = t["forge_batch"](name="HeadTest", steps=[{"tool": "forge_hq", "op": "head", "params": {"sex": "male"}}])
             assert out.get("ok", True), out
-            hq_out = t["forge_hq"](name="HeadTest", op="head", params={"sex": "female", "name": "Her"})
+            hq_out = t["forge_hq"](name="HeadTest", op="head", params={"sex": "female", "name": "Her", "hair": "none"})
             assert hq_out.get("ok") and len(json.dumps(hq_out)) <= 300, hq_out
             scene = load("HeadTest")
             names = {n.get("name") for n in scene.data["nodes"] if n.get("type") == "object"}
-            assert {"Head", "Head_eye_L", "Head_eye_R", "Head_teeth_U", "Head_tongue", "Head_ears", "Her"} <= names, names
+            assert {"Head", "Head_eye_L", "Head_eye_R", "Head_teeth_U", "Head_tongue", "Head_ears", "Head_neck", "Her"} <= names, names
+            assert "Head_cards" in names and "Her_cards" not in names, "hair cards only when hair != none: %s" % names
+            cards = next(n for n in scene.data["nodes"] if n.get("name") == "Head_cards")
+            assert len(scene.local_mesh(cards).faces) >= 100, "hair cards are nearly empty"
             skin = next(m for m in scene.data["materials"] if m["name"] == "Head_Skin")
             images = {layer["target"]: layer["image"] for layer in skin["spec"]["layers"] if layer["type"] == "image"}
             assert set(images) == {"color", "roughness"} and all((scene.folder / "textures" / f).is_file() for f in images.values())
@@ -283,7 +303,11 @@ def test_through_forge_batch():
             ids = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith("Head")]
             qa = t["forge_hq"](name="HeadTest", op="qa", params={"ids": ids, "profile": "uefn", "budget": "char", "verbose": True})
             print("qa:", qa.get("summary"))
-            assert qa.get("score", 0) >= 85 and qa.get("errors") == 0, qa
+            assert qa.get("errors") == 0, qa  # with hair cards: open-card and pivot warnings only
+            hers = [n["id"] for n in scene.data["nodes"] if n.get("type") == "object" and str(n.get("name")).startswith("Her")]
+            bald = t["forge_hq"](name="HeadTest", op="qa", params={"ids": hers, "profile": "uefn", "budget": "char"})
+            print("qa hair=none:", bald.get("summary"))
+            assert bald.get("score", 0) >= 85 and bald.get("errors") == 0, bald
             head = next(n["id"] for n in scene.data["nodes"] if n.get("name") == "Head")
             alone = t["forge_hq"](name="HeadTest", op="qa", params={"id": head, "profile": "uefn", "budget": "char"})
             print("qa head:", alone.get("summary"))
@@ -308,9 +332,8 @@ def render_demos(out, **head):
         t = api.fns
         t["forge_scene_new"](name="HeadDemo")
         try:
-            ids = t["forge_hq"](name="HeadDemo", op="head", params=head, verbose=True) if False else \
-                t["forge_hq"](name="HeadDemo", op="head", params=head)["ids"]
-            print(ids)
+            print(t["forge_hq"](name="HeadDemo", op="head", params=head)["summary"])
+            ids = [n["id"] for n in load("HeadDemo").data["nodes"] if n.get("type") == "object"]
             for view in ("front", "three", "side"):
                 r = t["forge_hq"](name="HeadDemo", op="light", params={"ids": ids, "preset": "soft", "view": view,
                                                                        "quality": "final", "size": [900, 900]})
