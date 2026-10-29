@@ -1,5 +1,5 @@
 ---
-description: "Forge baking: high-to-low normal, AO, curvature, ID and thickness maps with cage, extrusion and ray distance, the miss % check, bake prep (seams on hard edges, _low/_high, explode) and an artefact → fix table"
+description: "Forge baking: high-to-low normal, AO, curvature, ID and thickness maps with cage, extrusion and ray distance, the miss % check, lightmaps, sculpt_hd multires normals, bake prep (seams on hard edges, _low/_high, explode) and an artefact → fix table"
 metadata:
   label: "Baking"
   default_enabled: false
@@ -33,7 +33,30 @@ Done when: the result says `miss` under 3 % with no warning, and `look` shows no
 
 `maps: "all"` bakes all nine.
 
-`to: "vcol"` bakes `ao`, `base_color`, `curvature`, `thickness` or `id` into point colours `bake_<map>` instead of a texture: no UVs needed, good for mobile AO and LOD tints. `{"op": "bake", "params": {"id": "rock", "to": "vcol", "maps": ["ao"]}}`. Forge keeps one UV set, so there is no lightmap bake onto UV2; UEFN builds lightmaps itself. `target`: ue / dx (DirectX green, default), unity, godot, gl.
+`to: "vcol"` bakes `ao`, `base_color`, `curvature`, `thickness` or `id` into point colours `bake_<map>` instead of a texture: no UVs needed, good for mobile AO and LOD tints. `{"op": "bake", "params": {"id": "rock", "to": "vcol", "maps": ["ao"]}}`. `target`: ue / dx (DirectX green, default), unity, godot, gl.
+
+## Lightmap
+
+`to: "lightmap"` bakes combined light (Cycles, 32 samples) into `T_<name>_LM.png`, on the UV set `uv(lightmap=true)` makes (no overlaps, 0-1, wide gutters; Forge keeps that one set as the lightmap UV). The light is the scene's last `light` preset or env, else `noon`. Overlap over 0.5 % warns.
+
+```json
+forge_batch(steps=[
+  {"tool": "forge_hq", "op": "uv", "params": {"id": "crate", "method": "smart", "lightmap": true, "res": 512}},
+  {"tool": "forge_hq", "op": "light", "params": {"id": "crate", "env": "golden"}},
+  {"tool": "forge_hq", "op": "bake", "params": {"id": "crate", "to": "lightmap", "size": 512}}
+])
+```
+
+Done when: `lightmap 512px T_Crate_LM.png` with no warning. UEFN builds its own lightmaps: bake one only for unlit or mobile materials.
+
+## Multires (sculpt_hd)
+
+`source: "multires"` bakes the normal from the `sculpt_hd` sidecar after checking it is this mesh's own Catmull-Clark levels (faces = corners × 4^(levels-1)); it says `N multires levels`. Blender 5 dropped the legacy Bake from Multires, so the top level reaches the base by rays: `miss`, `extrusion` and `ray` work as below. Other maps listed bake from the same sidecar.
+
+```json
+{"op": "sculpt_hd", "params": {"id": "rock", "levels": 3, "detail": "rock"}},
+{"op": "bake", "params": {"id": "rock", "source": "multires", "maps": ["normal", "ao"], "size": 2048}}
+```
 
 ## Cage and rays
 

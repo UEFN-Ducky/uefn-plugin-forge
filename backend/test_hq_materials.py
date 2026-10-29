@@ -260,6 +260,29 @@ class BakeTests(SceneCase):
         with self.assertRaisesRegex(ValueError, "vertex-colour map"):
             self.bake(scene, nid, to="vcol", maps=["normal"])
 
+    def test_bake_lightmap(self):
+        scene, nid = self.scene("box", w=100, d=100, h=100)
+        hq.HQ_OPS["material"](scene, {"material": "Hull", "preset": "plastic_white", "id": nid})
+        hq.HQ_OPS["uv"](scene, {"id": nid, "method": "smart", "lightmap": True, "res": 128})
+        r = self.bake(scene, nid, size=128, to="lightmap")
+        self.assertFalse(r["warnings"], r)
+        self.assertIn("_LM.png", r["summary"])
+        lit = [px[0] for px in _pixels(r["path"])]
+        self.assertGreater(statistics.pstdev(lit), 5, r)  # sun side and shade side differ
+        self.assertLessEqual(len(json.dumps(hq.compact(r))), 300, r)
+
+    def test_bake_normal_from_multires(self):
+        scene, nid = self.scene("box", w=100, d=100, h=100)
+        hq.HQ_OPS["material"](scene, {"material": "Hull", "preset": "plastic_white", "id": nid})
+        hq.HQ_OPS["uv"](scene, {"id": nid, "method": "smart", "texel": 0, "res": 128})
+        with self.assertRaisesRegex(ValueError, "run sculpt_hd"):
+            self.bake(scene, nid, size=64, source="multires")
+        hq.HQ_OPS["sculpt_hd"](scene, {"id": nid, "levels": 3, "detail": "rock"})
+        r = self.bake(scene, nid, size=128, source="multires", target="gl")
+        self.assertIn("3 multires levels", r["summary"])
+        bumpy = [px[0] for px in _pixels(scene.folder / "textures" / "T_Hull_N.png") if px[2] > 128]
+        self.assertGreater(statistics.pstdev(bumpy), 4, r)
+
     def test_bake_speed(self):
         import time
         scene, nid = self.scene()

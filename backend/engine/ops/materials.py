@@ -458,8 +458,79 @@ def _to_vcol(p, low, mats, high, diag, kw):
     return {"vcol": made, "textures": {}, "unwrapped": False, "miss_pct": None, "scene": bridge.dump(p["scene"])}
 
 
+def _shared_image(mats, size, srgb):
+    """One image active in every material (a bake writes all slots into it): (image, cleanup)."""
+    import bpy
+    img = bpy.data.images.new("hq_bake", size, size, alpha=False)
+    img.colorspace_settings.name = "sRGB" if srgb else "Non-Color"
+    nodes = []
+    for mat in mats:
+        tex = mat.node_tree.nodes.new("ShaderNodeTexImage")
+        tex.image = img
+        mat.node_tree.nodes.active = tex
+        nodes.append((mat, tex))
+
+    def cleanup():
+        for mat, tex in nodes:
+            mat.node_tree.nodes.remove(tex)
+        bpy.data.images.remove(img)
+    return img, cleanup
+
+
+def _pixels(img, size):
+    import numpy as np
+    px = np.empty(size * size * 4, np.float32)
+    img.pixels.foreach_get(px)
+    return px.reshape(-1, 4)
+
+
+def _lightmap(p, low, mats, size, margin):
+    """Combined light (the scene's light preset or noon sun + sky) onto the UV set made by uv(lightmap=true)."""
+    import bpy
+    from mathutils import Vector
+    from . import lighting, render
+    from .bake import _safe, _save, _select
+    from .uv import stats
+    overlap = stats(low, size, min(size, 256))["overlap_pct"]
+    look = p.get("light") or {}
+    d = Vector(render._DIRS["three"]).normalized()
+    if look.get("preset") and not look.get("env"):
+        preset = lighting.PRESETS[look["preset"]]
+        lighting._world(*preset["world"])
+        for name, az, el, energy, soft in preset["lights"]:
+            lighting._sun(name, lighting._dir(d, az, el), energy, soft)
+    else:
+        el, energy, color, sky, strength, _ = lighting.ENVS[look.get("env") or "noon"]
+        lighting._world(sky, strength)
+        lighting._sun("sun", lighting._dir(d, 60, el), energy, 3, color)
+    bpy.context.scene.cycles.samples = int(p.get("samples", 32))
+    img, cleanup = _shared_image(mats, size, True)
+    try:
+        _select(low, active=low)
+        bpy.ops.object.bake(type="COMBINED", margin=margin, margin_type="EXTEND", use_clear=True)
+        px = _pixels(img, size)
+    finally:
+        cleanup()
+    fname = "T_%s_LM.png" % _safe(p.get("name") or low.name)
+    _save(Path(p["out_dir"]) / fname, px, True)
+    return {"lightmap": fname, "overlap_pct": overlap}
+
+
+def _levels(low, high):
+    """Multires levels between low and its sculpt_hd mesh (Catmull-Clark: level k has corners * 4^(k-1) quads).
+    Blender 5 dropped the legacy Bake from Multires, so the top level bakes onto the base by rays."""
+    if high is None:
+        raise ValueError("source=multires needs the sculpt_hd sidecar; run sculpt_hd(id) first")
+    corners, faces = len(low.data.loops), len(high.data.polygons)
+    levels = next((k for k in range(1, 7) if corners * 4 ** (k - 1) == faces), None)
+    if levels is None:
+        raise ValueError("%s has %d faces: not a sculpt_hd of %s (levels 1-6); bake from_high=true instead" % (high.name, faces, low.name))
+    return levels
+
+
 def op_bake_maps(p):
-    """ao, curvature, id, thickness and a cage/ray normal, plus miss % (texels whose rays found no high-poly)."""
+    """ao, curvature, id, thickness and a cage/ray normal, plus miss % (texels whose rays found no high-poly);
+    to=lightmap bakes combined light; source=multires checks the high is the sculpt_hd levels of this mesh."""
     import bpy
     from . import bridge
     from .bake import _device, _ensure_uv, _high, _safe, _save
@@ -476,6 +547,14 @@ def op_bake_maps(p):
     scene.cycles.use_denoising = False
     scene.cycles.use_adaptive_sampling = False
     device = _device(size)
+    if p.get("to") == "lightmap":
+        if high is not None and not p.get("high_id"):
+            bpy.data.objects.remove(high, do_unlink=True)
+        unwrapped = _ensure_uv(low)
+        out = dict(_lightmap(p, low, mats, size, margin), device=device, unwrapped=unwrapped, textures={}, miss_pct=None)
+        if unwrapped:
+            out["scene"] = bridge.dump(p["scene"])
+        return out
     diag = low.dimensions.length
     kw = {}
     if high is not None:
@@ -485,6 +564,7 @@ def op_bake_maps(p):
     if p.get("to") == "vcol":
         return dict(_to_vcol(p, low, mats, high, diag, kw), device=device)
     unwrapped = _ensure_uv(low)
+    levels = _levels(low, high) if p.get("source") == "multires" else None
 
     def emit(kind, samples=1, edge=margin, src=high):
         scene.cycles.samples = samples
@@ -536,7 +616,7 @@ def op_bake_maps(p):
         textures[record.get("id") or mat.name] = files
     if high is not None and not p.get("high_id"):
         bpy.data.objects.remove(high, do_unlink=True)  # a sidecar reference never comes back as a Forge object
-    out = {"textures": textures, "size": size, "device": device, "unwrapped": unwrapped, "miss_pct": miss}
+    out = {"textures": textures, "size": size, "device": device, "unwrapped": unwrapped, "miss_pct": miss, "levels": levels}
     if unwrapped:
         out["scene"] = bridge.dump(p["scene"])
     return out

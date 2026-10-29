@@ -232,7 +232,7 @@ def _high(scene, node, given):
     if not given:
         return None, None
     if given is True or given == "auto":
-        path = scene.folder / "sculpt_hd" / (node["id"] + ".blend")
+        path = scene.folder / "hd" / (node["id"] + ".blend")  # where sculpt_hd writes it
     elif str(given).lower().endswith(".blend"):
         path = Path(str(given))
     else:
@@ -244,7 +244,7 @@ def _high(scene, node, given):
     return None, str(path)
 
 
-@op("bake", "bake(id, size=1024, maps?, from_high?, cage?=<id>, extrusion=.03, ray=0, margin_px=16, target=ue, to=texture|vcol) BaseColor/Normal/ORM/Emissive/Opacity + ao/curvature/id/thickness PNGs; reports miss % from high; see skill forge/baking", long=True)
+@op("bake", "bake(id, size=1024, maps?, from_high?, source=mesh|multires, cage?=<id>, extrusion=.03, ray=0, margin_px=16, target=ue, to=texture|vcol|lightmap) BaseColor/Normal/ORM/Emissive/Opacity + ao/curvature/id/thickness PNGs; reports miss % from high; lightmap = combined light on the uv(lightmap=true) set; see skill forge/baking", long=True)
 def bake(scene, p):
     node = scene.node(str(p.get("id") or scene.data["selection"].get("object") or ""))
     if node is None or node.get("type") != "object":
@@ -258,7 +258,10 @@ def bake(scene, p):
     for m in maps or []:
         _pick(m, _MAPS, "map")
     target = _pick(p.get("target", "ue"), _TARGETS, "target")
-    high_id, high_path = _high(scene, node, p.get("from_high"))
+    multires = _pick(p.get("source", "mesh"), ("mesh", "multires"), "source") == "multires"
+    high_id, high_path = _high(scene, node, p.get("from_high") or multires)
+    if multires and not high_path:
+        raise ValueError("source=multires bakes from the sculpt_hd sidecar: drop from_high=<object id> or pass its .blend")
     cage = str(p.get("cage") or "")
     if cage and cage != "auto" and scene.node(cage) is None:
         raise ValueError("cage %r is no object: pass cage=auto or the id of a copy of the low-poly pushed out" % cage)
@@ -269,6 +272,14 @@ def bake(scene, p):
               "textures_dir": str(textures), "high_id": high_id, "high_path": high_path, "cage_id": cage or None,
               "extrusion": float(p.get("extrusion", 0.03)), "ray": float(p.get("ray", 0)), "margin": int(p.get("margin_px", 16))}
     ids = [node["id"]] + [i for i in (high_id, cage) if i]
+    if p.get("to") == "lightmap":
+        r, changed = engine(scene, "bake_maps", [node["id"]], dict(params, high_id=None, high_path=None, to="lightmap",
+                                                                     name=node.get("name") or node["id"], light=scene.data.get("light")))
+        if r["unwrapped"]:
+            scene.touch_geom()
+        warn = ["UVs overlap %.1f%%: run uv(id, lightmap=true) first" % r["overlap_pct"]] if r["overlap_pct"] > 0.5 else []
+        return {"summary": "lightmap %dpx %s on %s" % (size, r["lightmap"], r["device"]), "ids": [node["id"]],
+                "path": str(textures / r["lightmap"]), "warnings": warn, "stats": {"size": size, "overlap_pct": r["overlap_pct"]}}
     if p.get("to") == "vcol":  # baked into point colours bake_<map>: no UVs, no textures (LOD tints, mobile AO)
         vmaps = list(maps or ["ao"])
         for m in vmaps:
@@ -278,7 +289,20 @@ def bake(scene, p):
         return {"summary": "%s into vertex colours on %s" % (", ".join(r["vcol"]), r["device"]), "ids": changed or [node["id"]],
                 "stats": {"maps": len(r["vcol"])}}
     if p.get("to", "texture") != "texture":
-        raise ValueError("to=%r: use texture (default) or vcol" % p["to"])
+        raise ValueError("to=%r: use texture (default), vcol or lightmap" % p["to"])
+    if multires:  # the normal comes from multires levels; other maps bake from the low-poly alone
+        maps = list(maps or ["normal"])
+        classic = [m for m in maps if m in _MAPS[:5] and m != "normal"]
+        extra = [m for m in maps if m not in classic]
+        result, merged = {"device": "CPU", "unwrapped": False}, {}
+        if classic:
+            result, _ = engine(scene, "bake", [node["id"]], dict(params, maps=classic, high_path=None))
+            merged = result["textures"]
+        more, _ = engine(scene, "bake_maps", ids, dict(params, maps=extra, source="multires"))
+        for mid, files in more["textures"].items():
+            merged.setdefault(mid, {}).update(files)
+        result = dict(more, unwrapped=result["unwrapped"] or more["unwrapped"])
+        return _done(scene, size, textures, merged, result, ", %d multires levels, miss %.1f%%" % (more["levels"], more["miss_pct"]))
     # the classic engine bake keeps its own cage and margin; a cage, ray, extrusion or margin moves normal to bake_maps
     tuned = any(k in p for k in ("cage", "extrusion", "ray", "margin_px"))
     classic = None if maps is None else [m for m in maps if m in _MAPS[:5] and not (m == "normal" and tuned)]
@@ -292,6 +316,11 @@ def bake(scene, p):
         for mid, files in more["textures"].items():
             merged.setdefault(mid, {}).update(files)
         result = dict(more, unwrapped=result["unwrapped"] or more["unwrapped"])
+    miss = result.get("miss_pct")
+    return _done(scene, size, textures, merged, result, ", miss %.1f%%" % miss if miss is not None else "")
+
+
+def _done(scene, size, textures, merged, result, note):
     mats = scene.materials()
     for mid, files in merged.items():
         if mid in mats:
@@ -300,7 +329,6 @@ def bake(scene, p):
     files = [f for fs in merged.values() for f in fs.values()]
     miss = result.get("miss_pct")
     warnings = ["%.1f%% of texels missed the high-poly: raise extrusion or ray, or use a cage" % miss] if miss and miss > 3 else []  # a clean bake still drops ~2% at cage corners
-    return {"summary": "%d maps %dpx on %s%s (%s)" % (len(files), size, result["device"], ", miss %.1f%%" % miss if miss is not None else "",
-                                                    ", ".join(files[:4])),
+    return {"summary": "%d maps %dpx on %s%s (%s)" % (len(files), size, result["device"], note, ", ".join(files[:4])),
             "ids": list(merged), "path": str(textures), "warnings": warnings,
             "stats": {"size": size, "files": len(files), "uv": bool(result["unwrapped"]), "miss_pct": miss}}
