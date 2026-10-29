@@ -20,6 +20,7 @@ from .uv import _edit, _pack, _unwrap
 
 # slot: (realistic rgba, stylized rgba, metallic, roughness)
 _MATS = {"metal": ((0.045, 0.047, 0.05, 1), (0.42, 0.45, 0.5, 1), 1.0, 0.38),
+         "steel": ((0.72, 0.72, 0.7, 1), (0.82, 0.84, 0.88, 1), 1.0, 0.42),  # polished blade: reads light, not gunmetal
          "polymer": ((0.035, 0.035, 0.032, 1), (0.16, 0.17, 0.2, 1), 0.0, 0.62),
          "wood": ((0.28, 0.13, 0.05, 1), (0.55, 0.28, 0.1, 1), 0.0, 0.55),
          "grip": ((0.02, 0.02, 0.02, 1), (0.08, 0.06, 0.05, 1), 0.0, 0.88),
@@ -365,7 +366,7 @@ def _knife(k, j):
     k.box("bolster", (1.0, 2.2, 4.6), (5.9, 0, 0.2), "metal")
     k.box("pommel", (1.2, 2.6, 3.2), (-6.0, 0, 0), "metal")
     tip = j(24.6, 0.04)
-    k.prism("blade", [(6.2, 1.3), (tip - 5.1, 1.3), (tip, 0.2), (tip - 2.1, -0.9), (16, -1.6), (6.2, -1.6)], 0.45, "metal",
+    k.prism("blade", [(6.2, 1.3), (tip - 5.1, 1.3), (tip, 0.2), (tip - 2.1, -0.9), (16, -1.6), (6.2, -1.6)], 0.45, "steel",
             sharp=(2, 3, 4))
     k.sockets.update(Grip=(0, 0, 0), TrailBase=(6.2, 0, -0.2), TrailTip=(tip, 0, 0.2))
 
@@ -381,7 +382,7 @@ def _sword(k, j):
     tip = (base + blade, zc(1) + 0.55)
     edge = [(base + blade * 0.96, zc(0.96) - 0.6)] + [(base + blade * i / n, zc(i / n) - 1.8 + 0.45 * i / n) for i in reversed(range(n))]
     pts = spine + [tip] + edge
-    k.prism("blade", pts, 0.7, "metal", sharp=range(n, len(pts) - 1))
+    k.prism("blade", pts, 0.7, "steel", sharp=range(n, len(pts) - 1))
     k.sockets.update(Grip=(0, 0, 0), TrailBase=(base + 1, 0, 0), TrailTip=(tip[0], 0, tip[1]))
 
 
