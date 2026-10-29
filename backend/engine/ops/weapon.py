@@ -18,20 +18,32 @@ from . import bridge
 from .mesh import _ctx, _object_from, _shape, _tris, boolean, hardsurface, manifold
 from .uv import _edit, _pack, _unwrap
 
-# slot: (realistic rgba, stylized rgba, metallic, roughness)
-_MATS = {"metal": ((0.045, 0.047, 0.05, 1), (0.42, 0.45, 0.5, 1), 1.0, 0.38),
+# slot: (realistic rgba, stylized rgba, metallic, roughness). Gun finishes are dielectric coats over metal
+# (hard anodise, phosphate): dark, satin vs matte; the bare metal shows only where the edge wear cuts through.
+_MATS = {"anodized": ((0.045, 0.047, 0.05, 1), (0.3, 0.32, 0.36, 1), 0.0, 0.3),  # aluminium receiver, satin black
+         "metal": ((0.12, 0.12, 0.11, 1), (0.42, 0.45, 0.5, 1), 0.0, 0.7),  # parkerised / nitrided steel, matte grey
          "steel": ((0.72, 0.72, 0.7, 1), (0.82, 0.84, 0.88, 1), 1.0, 0.42),  # polished blade: reads light, not gunmetal
-         "polymer": ((0.035, 0.035, 0.032, 1), (0.16, 0.17, 0.2, 1), 0.0, 0.62),
+         "polymer": ((0.022, 0.022, 0.02, 1), (0.16, 0.17, 0.2, 1), 0.0, 0.8),  # matte black
          "wood": ((0.28, 0.13, 0.05, 1), (0.55, 0.28, 0.1, 1), 0.0, 0.55),
          "grip": ((0.02, 0.02, 0.02, 1), (0.08, 0.06, 0.05, 1), 0.0, 0.88),
          "glow": ((0.05, 0.6, 1.0, 1), (0.1, 0.9, 1.0, 1), 0.0, 0.3)}
+# realistic wear, material layers (engine/ops/materials.py): bright metal on convex edges, rub marks on polymer
+_WEAR = {"anodized": [{"type": "edge_wear", "color": [0.62, 0.63, 0.65], "amount": 0.55, "metal": True},
+                      {"type": "scratches", "amount": 0.25}],
+         "metal": [{"type": "edge_wear", "color": [0.5, 0.5, 0.52], "amount": 0.45, "metal": True},
+                   {"type": "noise", "target": "roughness", "amount": 0.15, "scale": 40.0}],
+         "steel": [{"type": "scratches", "amount": 0.35}],
+         "polymer": [{"type": "noise", "target": "roughness", "amount": 0.12, "scale": 60.0}, {"type": "dirt", "amount": 0.25}],
+         "grip": [{"type": "noise", "target": "bump", "amount": 0.4, "scale": 120.0}],
+         "wood": [{"type": "noise", "target": "color", "amount": 0.25, "scale": 5.0},
+                  {"type": "edge_wear", "color": [0.4, 0.22, 0.1], "amount": 0.4, "metal": False}]}
 
 # Long guns, nominal cm. rec (x0, x1, z0, z1, width), split = lower/upper z, axis = bore z, bar (end x, r[, muzzle r]),
 # hg (x0, x1, r, sides, dz), mag (x, length, width, height, tilt deg), butt x, grip tilt deg, material per role.
 _LONG = {
     "rifle": dict(rec=(-6, 20, -2.0, 10.4, 5.2), split=4.0, axis=7.2, bar=(58, 0.95), hg=(19.5, 46, 3.2, 8, 0),
                   mag=(12, 6.2, 2.4, 14, -12), butt=-33, grip=18, stock="ar", sight="iron", muzzle="flash", magkind="std",
-                  rail=True, furn="polymer", gripm="grip", pad="grip", hgm="metal", magm="polymer"),
+                  rail=True, furn="polymer", gripm="polymer", pad="polymer", hgm="anodized", magm="polymer", recm="anodized"),
     "smg": dict(rec=(-6, 20, -1.5, 8.6, 4.8), split=3.4, axis=5.8, bar=(34, 0.75), hg=(16, 30, 2.3, 12, 0),
                 mag=(12.5, 4.2, 2.2, 19, -14), butt=-30, grip=16, stock="skeleton", sight="red_dot", muzzle="none",
                 magkind="std", rail=True, furn="polymer", gripm="polymer", pad="polymer", hgm="polymer", magm="metal"),
@@ -58,9 +70,13 @@ def _material(slot, style):
     glow = slot == "glow"
     mat = bpy.data.materials.get(name) or bpy.data.materials.new(name)
     mat.diffuse_color = color
-    mat["forge"] = json.dumps({"id": "m" + hashlib.sha1(name.encode()).hexdigest()[:6], "name": name, "base_color": color,
-                               "metallic": metal, "roughness": rough, "emissive": color[:3] if glow else [0, 0, 0],
-                               "emissive_strength": 8.0 if glow else 0.0, "opacity": 1.0, "textures": {}})
+    forge = {"id": "m" + hashlib.sha1(name.encode()).hexdigest()[:6], "name": name, "base_color": color,
+             "metallic": metal, "roughness": rough, "emissive": color[:3] if glow else [0, 0, 0],
+             "emissive_strength": 8.0 if glow else 0.0, "opacity": 1.0, "textures": {}}
+    if style == "realistic" and slot in _WEAR:
+        forge["spec"] = {"layers": [{"type": "base", "color": color[:3], "metallic": metal, "roughness": rough}]
+                         + json.loads(json.dumps(_WEAR[slot]))}
+    mat["forge"] = json.dumps(forge)
     return mat
 
 
@@ -73,7 +89,7 @@ class _Kit:
 
     def __init__(self, style):
         self.style, self.parts, self.sockets, self.mats = style, {}, {}, {}
-        self.bevel, self.segments = (0.4, 3) if style == "stylized" else (0.18, 2)
+        self.bevel, self.segments = (0.4, 3) if style == "stylized" else (0.22, 3)  # 2.2 mm: wide enough to catch light
 
     def _new(self, name, mat, build, bevel=True):
         bm = bmesh.new()
@@ -163,9 +179,9 @@ def _sight(k, kind, sx, top, sc=1.0, front=None, ftop=None):
         k.cut("optic", [("cylinder", (3.0 * sc, 3.0 * sc, 1.2 * sc), (sx + 2.8 * sc, 0, zc), (0, 90, 0))])
         return (sx, 0, zc)
     if kind == "holo":
-        k.box("optic_mount", (6.0 * sc, 3.2 * sc, 1.4 * sc), (sx, 0, top + 0.6 * sc), "metal")
+        k.box("optic_mount", (5.0 * sc, 3.2 * sc, 1.4 * sc), (sx, 0, top + 0.6 * sc), "metal")  # shorter than the hood: no coplanar ends
         k.box("optic", (6.0 * sc, 3.4 * sc, 4.2 * sc), (sx, 0, top + 3.0 * sc), "metal")
-        k.cut("optic", [("box", (8.0 * sc, 2.6 * sc, 2.8 * sc), (sx, 0, top + 3.2 * sc), (0, 0, 0))])
+        k.cut("optic", [("box", (8.0 * sc, 2.4 * sc, 2.8 * sc), (sx, 0, top + 3.2 * sc), (0, 0, 0))])  # 5 mm walls: bevels clear
         return (sx, 0, top + 3.2 * sc)
     if kind == "scope":
         zc = top + 3.2
@@ -178,8 +194,8 @@ def _sight(k, kind, sx, top, sc=1.0, front=None, ftop=None):
         k.cyl("scope_objective", (sx + 16.5, 0, zc), (sx + 20, 0, zc), 2.5, "metal")
         k.cyl("scope_eye_bell", (sx - 9.5, 0, zc), (sx - 15.6, 0, zc), 1.15, "metal", r2=1.65)
         k.cyl("scope_ocular", (sx - 14.5, 0, zc), (sx - 19, 0, zc), 2.0, "metal")
-        k.cyl("turret_up", (sx, 0, zc), (sx, 0, zc + 2.6), 1.0, "metal", seg=12)
-        k.cyl("turret_side", (sx, 0, zc), (sx, -2.6, zc), 1.0, "metal", seg=12)
+        k.cyl("turret_up", (sx, 0, zc + 0.6), (sx, 0, zc + 2.6), 1.0, "metal", seg=12)  # start apart inside the tube:
+        k.cyl("turret_side", (sx, -0.6, zc), (sx, -2.6, zc), 1.0, "metal", seg=12)  # crossing caps weld into slivers
         k.cut("scope_objective", [("cylinder", (4.4, 4.4, 1.0), (sx + 20, 0, zc), (0, 90, 0))])
         return (sx - 19, 0, zc)
     return (sx, 0, top + 1.0)
@@ -214,25 +230,29 @@ def _long(k, kind, parts, j):
     ax, sci = n["axis"], kind.startswith("scifi")
     stock, sight, muzzle = parts.get("stock", n["stock"]), parts.get("sight", n["sight"]), parts.get("muzzle", n["muzzle"])
     mag, rail = parts.get("mag", n["magkind"]), parts.get("rail", n["rail"])
+    rm = n.get("recm", "metal")
     if n["split"]:  # AR-style lower + upper receiver
         s = n["split"]
-        k.box("upper", (x1 - x0, w * 0.94, z1 - s + 0.2), ((x0 + x1) / 2, 0, (s - 0.2 + z1) / 2), "metal")
-        k.box("lower", (x1 - x0 - 4, w, s - z0 + 0.2), ((x0 + x1 - 4) / 2, 0, (z0 + s + 0.2) / 2), "metal")
+        k.box("upper", (x1 - x0, w * 0.94, z1 - s + 0.2), ((x0 + x1) / 2, 0, (s - 0.2 + z1) / 2), rm)
+        k.box("lower", (x1 - x0 - 4, w, s - z0 + 0.2), ((x0 + x1 - 4) / 2, 0, (z0 + s + 0.2) / 2), rm)
         upper = "upper"
     else:
-        k.box("receiver", (x1 - x0, w, z1 - z0), ((x0 + x1) / 2, 0, (z0 + z1) / 2), "metal")
+        k.box("receiver", (x1 - x0, w, z1 - z0), ((x0 + x1) / 2, 0, (z0 + z1) / 2), rm)
         upper = "receiver"
     if sci:
         k.box("glow_receiver", (x1 - x0 - 6, w + 0.3, 0.5), ((x0 + x1) / 2, 0, ax + 1.6), "glow")
     else:  # ejection port on the right (-Y) side
         k.cut(upper, [("box", (6.0, 2.0, 2.2), (x0 + (x1 - x0) * 0.45, -w / 2, ax + 0.5), (0, 0, 0))])
     if kind in ("rifle", "scifi_rifle"):
-        k.box("charging_handle", (2.2, w * 0.9, 0.9), (x0 - 0.6, 0, z1 - 0.6), "metal")
+        k.box("charging_handle", (2.2, w * 0.9, 0.9), (x0 - 0.6, 0, z1 - 0.6), rm)
     # pistol grip, trigger guard, trigger
-    k.box("grip", (3.2, 3.0, 11.0), (-1.2, 0, -4.6), n["gripm"], rot=(0, j(n["grip"], 0.1), 0))
+    grot = (0, j(n["grip"], 0.1), 0)
+    k.box("grip", (3.2, 3.0, 11.0), (-1.2, 0, -4.6), n["gripm"], rot=grot)
+    if kind == "rifle":  # front-strap finger grooves
+        _grooves(k, "grip", Vector((-1.2, 0, -4.6)), grot, [(1.6, 0, dz) for dz in (-0.8, -2.6, -4.4)], (0.7, 3.4, 0.5))
     zg = z0 - 2.8
-    k.box("guard", (8.6, 1.2, 0.7), (4.6, 0, zg), "metal")
-    k.box("guard_post", (0.7, 1.2, 3.2), (8.6, 0, zg + 1.4), "metal")
+    k.box("guard", (8.6, 1.2, 0.7), (4.6, 0, zg), rm)
+    k.box("guard_post", (0.7, 1.2, 3.2), (8.6, 0, zg + 1.4), rm)
     k.box("trigger", (0.5, 0.6, 2.4), (4.0, 0, z0 - 1.1), "metal", rot=(0, -12, 0))
     # magazine
     bx, br = n["bar"][:2]
@@ -251,7 +271,10 @@ def _long(k, kind, parts, j):
             k.cyl("drum", (low.x, -mw * 1.3, low.z - 4.0), (low.x, mw * 1.3, low.z - 4.0), 6.0, n["magm"], seg=20)
         else:
             k.box("mag_base", (ml + 0.6, mw + 0.5, 0.9), low, n["magm"], rot)
-        k.box("magwell", (ml + 1.4, w + 0.3, 3.2), (mx, 0, z0 - 0.8), "metal")
+            if kind == "rifle":  # grip ribs on both mag sides
+                _grooves(k, "mag", top, rot, [(0, s * mw / 2, -mh * t) for t in (0.55, 0.65, 0.75, 0.85) for s in (-1, 1)],
+                         (ml * 0.7, 0.3, 0.35))
+        k.box("magwell", (ml + 1.4, w + 0.3, 3.2), (mx, 0, z0 - 0.8), rm)
         k.sockets["Magazine"] = (mx, 0, z0)
     # barrel and handguard
     k.cyl("barrel", (x1 - 1, 0, ax), (bx, 0, ax), br, "metal", r2=n["bar"][2] if len(n["bar"]) > 2 else None)
@@ -276,7 +299,7 @@ def _long(k, kind, parts, j):
     if rail:
         rx0, rx1 = x0 + 1, (hx1 - 1) if kind in ("rifle", "scifi_rifle") else x1 - 1
         rz = z1 + 0.2
-        k.box("rail", (rx1 - rx0, 2.2, 1.4), ((rx0 + rx1) / 2, 0, rz), "metal")
+        k.box("rail", (rx1 - rx0, 2.2, 1.4), ((rx0 + rx1) / 2, 0, rz), rm)
         slots = int((rx1 - rx0 - 1.0) / 1.6)
         k.cut("rail", [("box", (0.55, 3.0, 0.9), (rx0 + 1.0 + i * 1.6, 0, rz + 0.7), (0, 0, 0)) for i in range(slots)])
         top, front, ftop = rz + 0.7, rx1 - 1.2, rz + 0.7
@@ -315,9 +338,39 @@ def _long(k, kind, parts, j):
     else:
         k.box("end_cap", (1.0, w, z1 - z0), (x0 - 0.4, 0, (z0 + z1) / 2), "metal")
     if kind == "sniper":  # bolt handle on the right
-        k.cyl("bolt", (x0 + 4, -w / 2, z1 - 2.0), (x0 + 3, -w / 2 - 3.8, z1 - 3.6), 0.38, "metal", seg=8)
-        k.cyl("bolt_knob", (x0 + 3, -w / 2 - 3.4, z1 - 3.5), (x0 + 3, -w / 2 - 4.6, z1 - 3.7), 0.9, "metal", seg=12)
+        k.cyl("bolt", (x0 + 3.5, -w / 2 + 0.6, z1 - 2.2), (x0 + 3.5, -w / 2 - 3.6, z1 - 2.2), 0.38, "metal", seg=8)
+        k.cyl("bolt_knob", (x0 + 3.5, -w / 2 - 3.2, z1 - 2.2), (x0 + 3.5, -w / 2 - 4.6, z1 - 2.2), 0.9, "metal", seg=12)
+    if kind == "rifle":
+        _ar_details(k, n, stock, hx1, hr)
     k.sockets["Grip"] = (0, 0, 0)
+
+
+def _grooves(k, name, at, rot, local, size):
+    """Shallow grooves cut into a rotated part: local points are offsets from its centre at, before rot."""
+    R = _R(rot)
+    k.cut(name, [("box", size, at + R @ Vector(p), rot) for p in local])
+
+
+def _ar_details(k, n, stock, hx1, hr):
+    """AR-15 small parts (nominal cm, right side = -Y). Each one sinks 0.05-0.15 into its host: a flush
+    contact would put verts within qa's 0.05 cm weld of the host's and read as non-manifold."""
+    x0, x1, z0, z1, w = n["rec"]
+    ax, rm, mx, ml = n["axis"], n["recm"], n["mag"][0], n["mag"][1]
+    uy = w * 0.47  # upper half-width
+    k.box("dust_cover", (6.2, 0.3, 1.5), (5.7, -uy - 0.1, ax - 1.35), "metal")  # hinged open under the port
+    k.box("deflector", (1.4, 1.2, 1.8), (1.9, -uy - 0.45, ax + 1.0), rm)
+    k.cyl("forward_assist", (x0 + 0.6, -uy - 0.35, ax + 1.4), (x0 + 4.0, -uy - 0.35, ax + 1.4), 0.75, rm, seg=12)  # axis-aligned:
+    k.cyl("fa_button", (x0 + 0.2, -uy - 0.35, ax + 1.4), (x0 + 1.0, -uy - 0.35, ax + 1.4), 0.5, "metal", seg=12)  # tilted caps z-fight
+    k.box("bolt_catch", (2.2, 0.35, 1.2), (mx - ml / 2 - 0.6, w / 2 + 0.05, 3.0), rm)
+    k.cyl("mag_release", (mx - ml / 2 - 1.3, -w / 2 + 0.15, 1.2), (mx - ml / 2 - 1.3, -w / 2 - 0.45, 1.2), 0.5, "metal", seg=12)
+    k.cyl("selector", (1.4, w / 2 - 0.15, 2.4), (1.4, w / 2 + 0.35, 2.4), 0.75, "metal", seg=12)
+    k.box("selector_lever", (2.0, 0.25, 0.55), (2.2, w / 2 + 0.4, 2.4), "metal")
+    for name, x, z in (("pin_rear", x0 + 1.5, 3.2), ("pin_front", x1 - 5.4, 3.2), ("pin_hammer", 1.0, 0.9), ("pin_trigger", 3.4, 0.4)):
+        k.cyl(name, (x, -w / 2 - 0.15, z), (x, w / 2 + 0.15, z), 0.28, "metal", seg=8)
+    k.cyl("sling_stud", (hx1 - 3, 0, ax - hr + 0.4), (hx1 - 3, 0, ax - hr - 0.7), 0.55, rm, seg=12)
+    if stock == "ar":  # QD end plate (rear sling point) and the stock's adjustment notches under the buffer tube
+        k.cyl("end_plate", (x0 + 0.2, 0, ax), (x0 - 0.5, 0, ax), 2.0, rm)
+        k.cut("buffer_tube", [("box", (0.45, 1.2, 0.7), (x0 - 4.5 - i * 1.4, 0, ax - 1.5), (0, 0, 0)) for i in range(6)])
 
 
 def _pistol(k, kind, parts, j):
@@ -329,6 +382,10 @@ def _pistol(k, kind, parts, j):
     k.box("frame", (sl - 2.6, sw + 0.4, 2.2), (sx0 + 0.6 + (sl - 2.6) / 2, 0, 0.5), "polymer")
     rot = (0, j(18, 0.1), 0)
     k.box("grip", (3.3, sw + 0.4, 10.5), (-1.0, 0, -4.6), "polymer", rot=rot)
+    if not sci:  # finger grooves on the front strap, stipple panels on both sides
+        _grooves(k, "grip", Vector((-1.0, 0, -4.6)), rot, [(1.65, 0, dz) for dz in (-0.6, -2.3, -4.0)], (0.7, sw + 0.8, 0.45))
+        for side in (-1, 1):
+            k.kit("grip", "grille", Vector((-1.0, 0, -4.6)) + _R(rot) @ Vector((0, side * (sw + 0.4) / 2, -1.6)), 2.2, 0.12, 4)
     low = Vector((-1.0, 0, -4.6)) + _R(rot) @ Vector((0, 0, -5.4))
     k.box("mag_base", (3.9, sw + 0.6, 0.9), low, "polymer", rot)
     k.box("guard", (5.6, 1.0, 0.6), (3.0, 0, -2.6), "polymer")
@@ -342,7 +399,14 @@ def _pistol(k, kind, parts, j):
     k.cut("barrel", [bore])
     k.cut("slide", [("box", (3.6, 1.6, 1.4), (sx0 + sl * 0.5, -sw / 2 + 0.3, sz0 + sh), (0, 0, 0))]
           + [("box", (0.35, 0.5, sh * 0.8), (sx0 + 0.8 + i * 0.6, s * sw / 2, sz0 + sh / 2), (0, 0, 0))
-             for i in range(6) for s in (-1, 1)])  # rear serrations
+             for i in range(6) for s in (-1, 1)]  # rear serrations
+          + ([("box", (0.35, 0.5, sh * 0.6), (front - 1.8 - i * 0.6, s * sw / 2, sz0 + sh * 0.6), (0, 0, 0))
+              for i in range(4) for s in (-1, 1)] if not sci else []))  # front serrations
+    if not sci:  # extractor, slide stop, takedown lever, mag release
+        k.box("extractor", (2.4, 0.3, 0.5), (sx0 + sl * 0.5 - 3.0, -sw / 2 - 0.1, sz0 + sh * 0.6), "metal")
+        k.box("slide_stop", (2.6, 0.3, 0.5), (5.0, (sw + 0.4) / 2 + 0.05, 1.3), "metal")
+        k.box("takedown", (1.0, sw + 0.7, 0.35), (8.0, 0, 0.9), "metal")
+        k.cyl("mag_release", (1.4, (sw + 0.4) / 2 - 0.15, -0.3), (1.4, (sw + 0.4) / 2 + 0.3, -0.3), 0.45, "metal", seg=12)
     k.box("rear_sight", (0.9, 2.0, 0.7), (sx0 + 0.8, 0, sz0 + sh + 0.25), "metal")
     k.box("front_sight", (0.6, 0.5, 0.7), (front - 0.9, 0, sz0 + sh + 0.25), "metal")
     sight = parts.get("sight", "iron")
@@ -420,7 +484,7 @@ _MELEE = {"knife": _knife, "sword": _sword, "axe": _axe, "hammer": _hammer}
 # ---- finish -------------------------------------------------------------------------------------
 
 
-def _finish(ob, scale):
+def _finish(ob, scale, weld):
     """Slivers out, to final size, smooth + weighted normals (the midpoly game look), smart UVs.
 
     Planar caps stay n-gons: UE triangulates on import, and fanning a 3 mm bolt hole into slivers
@@ -428,8 +492,22 @@ def _finish(ob, scale):
     bm = bmesh.new()
     bm.from_mesh(ob.data)
     bmesh.ops.dissolve_degenerate(bm, dist=0.01, edges=bm.edges[:])
+    # touching parts weld where qa welds (vehicle._emit does the same): edges then shared by 3+ faces keep
+    # their two biggest, the rest are sub-mm contact slivers
+    bm.transform(scale)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=weld)
+    bmesh.ops.dissolve_degenerate(bm, dist=weld, edges=bm.edges[:])
+    extra = {f for e in bm.edges if len(e.link_faces) > 2 for f in sorted(e.link_faces, key=lambda f: -f.calc_area())[2:]}
+    if extra:
+        bmesh.ops.delete(bm, geom=list(extra), context="FACES_ONLY")
+        bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
+    thr = 2e-4 * (weld / 0.06) ** 2  # qa's zero-area test (corner 0 cross < 1e-4 cm2), in scene units
     corner = lambda vs, i: (vs[(i + 1) % len(vs)].co - vs[i].co).cross(vs[(i + 2) % len(vs)].co - vs[i].co).length  # noqa: E731
-    for face in [f for f in bm.faces if len(f.verts) > 3 and corner(list(f.verts), 0) < 2e-4]:
+    slivers = [f for f in bm.faces if len(f.verts) == 3 and corner(list(f.verts), 0) < thr]
+    if slivers:  # collapse each sliver's shortest edge
+        short = {min(f.edges, key=lambda e: e.calc_length()) for f in slivers}
+        bmesh.ops.collapse(bm, edges=list(short), uvs=False)
+    for face in [f for f in bm.faces if len(f.verts) > 3 and corner(list(f.verts), 0) < thr]:
         vs = list(face.verts)  # a boolean T-junction first: start the face on a real corner (qa reads corner 0)
         best = max(range(len(vs)), key=lambda i: corner(vs, i))
         mat = face.material_index
@@ -438,7 +516,6 @@ def _finish(ob, scale):
     bmesh.ops.recalc_face_normals(bm, faces=bm.faces[:])
     bm.to_mesh(ob.data)
     bm.free()
-    ob.data.transform(scale)
     ob.data.shade_smooth()
     m = ob.modifiers.new("wp_normals", "WEIGHTED_NORMAL")
     m.mode, m.keep_sharp, m.weight = "FACE_AREA", True, 50
@@ -471,7 +548,7 @@ def weapon(p):
     length = float(p["length"])
     f = length / (max(xs) - min(xs))  # fit the asked overall length; the grip origin stays put
     sy, sz = (1.25, 1.2) if style == "stylized" else (1.0, 1.0)  # stylized: chunkier cross-sections
-    _finish(ob, Matrix.Diagonal((f * u, f * sy * u, f * sz * u, 1.0)))
+    _finish(ob, Matrix.Diagonal((f * u, f * sy * u, f * sz * u, 1.0)), 0.06 * u)  # qa welds at 0.05 cm
     ob.location = Vector(p.get("at") or [0, 0, 0]) * u
     sockets = {name: [round(c, 1) for c in (v[0] * f, v[1] * f * sy, v[2] * f * sz)] for name, v in sorted(k.sockets.items())}
     tris = _tris(ob)

@@ -113,8 +113,23 @@ class Build(unittest.TestCase):
         scene = load(scene.name)
         after = set(scene.world_mesh(scene.node(node["id"])).face_mat)
         self.assertEqual((len(before), after), (3, before))
-        metal = next(m for m in scene.data["materials"] if m["name"] == "Weapon_Metal_Realistic")
-        self.assertLess(metal["base_color"][0], 0.1, metal)
+        first = next(m for m in scene.data["materials"] if m["name"] == wear[0]["params"]["material"])
+        self.assertLess(first["base_color"][0], 0.1, first)
+
+    def test_rifle_detail(self):
+        """The detail pass: >= 25 parts, 3 finishes (anodised receiver, parkerised steel, polymer) with wear layers."""
+        out, scene, node = self.build({"kind": "rifle"})
+        import re
+        self.assertGreaterEqual(int(re.search(r"(\d+) parts", out["summary"]).group(1)), 25, out)
+        used = {m["name"] for m in scene.data["materials"] if m["id"] in set(scene.world_mesh(node).face_mat)}
+        self.assertEqual(used, {"Weapon_Anodized_Realistic", "Weapon_Metal_Realistic", "Weapon_Polymer_Realistic"})
+        for m in scene.data["materials"]:
+            if m["name"] in used:
+                self.assertIn("edge_wear" if "Polymer" not in m["name"] else "dirt",
+                              [layer["type"] for layer in m["spec"]["layers"]], m["name"])
+        self.assertLessEqual(scene.world_mesh(node).tri_count(), 15000)
+        qa = hq_qa.qa(scene, {"id": node["id"], "profile": "uefn", "budget": "weapon"})
+        self.assertGreaterEqual(qa["score"], 85, qa["summary"])
 
 
 class DocCalls(unittest.TestCase):
@@ -143,7 +158,7 @@ class Demo(Build):
             self.addCleanup(forget, name)
             self.t["forge_scene_new"](name=name)
             self.t["forge_batch"](name=name, steps=[{"tool": "forge_hq", "op": "weapon", "params": {"kind": kind}}])
-            for view, suffix in (("three", ""), ("side", "_side")):
+            for view, suffix in (("three", ""), ("front", "_side")):  # front = from -Y: the profile, ejection-port side
                 got = self.t["forge_batch"](name=name, steps=[{"tool": "forge_hq", "op": "light", "params": {"preset": "product"}}],
                                             look=view)
                 self.assertTrue(got.get("path"), got)

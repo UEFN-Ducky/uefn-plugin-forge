@@ -8,17 +8,17 @@ metadata:
 
 # Weapons
 
-One `forge_hq` step makes the whole weapon: ~5-25 parts (receiver, barrel, handguard, stock, grip, magazine, sights, muzzle, rail, trigger guard; blade, guard, handle, pommel), each chamfered and then cut with `boolean` / `hardsurface` details. The parts are joined into one `SM_Weapon_<Kind>` with up to 3 material slots, given weighted normals and smart UVs. Lengths are cm.
+One `forge_hq` step makes the whole weapon: ~5-35 parts (receiver, barrel, handguard, stock, grip, magazine, sights, muzzle, rail, trigger guard; the rifle adds the dust cover open under the ejection port, forward assist, brass deflector, bolt catch, mag release, selector, 4 pins, a sling stud, a QD end plate, buffer-tube notches, mag ribs and grip grooves; the pistol adds front and rear serrations, extractor, slide stop, takedown lever, mag release, grip grooves and stipple; blade, guard, handle, pommel), each chamfered and then cut with `boolean` / `hardsurface` details. The parts are joined into one `SM_Weapon_<Kind>` with up to 3 material slots, given weighted normals and smart UVs. Lengths are cm.
 
 ```json
 {"tool": "forge_hq", "op": "weapon", "params": {"kind": "rifle", "style": "realistic"}}
 ```
-→ `rifle realistic 92 cm, 19 parts, 3.2k tris, sockets Grip Magazine Muzzle Sight`
+→ `rifle realistic 92 cm, 33 parts, 5.9k tris, sockets Grip Magazine Muzzle Sight`
 
 | param | values (default) |
 |---|---|
 | `kind` | rifle, pistol, shotgun, smg, sniper, scifi_rifle, scifi_pistol, knife, sword, axe, hammer |
-| `style` | `realistic` (1.8 mm chamfer, dark gunmetal) \| `stylized` (4 mm 3-segment chamfer, cross-sections x1.25 wide x1.2 tall, lighter colours) |
+| `style` | `realistic` (2.2 mm 3-segment chamfer; satin-black anodised receiver, matte grey parkerised steel, matte black polymer, wear layers) \| `stylized` (4 mm 3-segment chamfer, cross-sections x1.25 wide x1.2 tall, lighter colours) |
 | `length_cm` | the kind's default below; 0.5-2x allowed; the whole weapon scales, the grip stays at 0 |
 | `parts` (guns) | `stock` ar\|skeleton\|wood\|precision\|block\|none · `sight` iron\|red_dot\|holo\|scope\|bead\|none · `muzzle` flash\|brake\|suppressor\|emitter\|none · `mag` std\|extended\|drum\|tube\|none · `rail` true\|false. Pistols: `sight` iron\|red_dot\|none, `muzzle` suppressor\|emitter\|none |
 | `seed` | 0 = canonical; other values vary handguard, grip angle, mag tilt, stock and blade by 4-15 % |
@@ -47,17 +47,17 @@ Change any of these through `length_cm`: a "compact rifle" is `length_cm: 78`, a
 - **Origin at the grip** (pistol grip top / where the main hand holds a melee weapon), **+X = muzzle / tip**, Z up. The ue5 export maps Forge +X to UE +X, so the mesh attaches to a hand socket without re-orienting.
 - **Sockets** are stored on the node (`node.hq.weapon.sockets`, cm): guns get `Muzzle` (barrel exit: muzzle flash, tracer, projectile spawn), `Grip` (0,0,0), `Magazine` (mag well: reload VFX), `Sight` (eye line: ADS camera). Melee gets `Grip`, `TrailBase` and `TrailTip` (the two points of a swing trail). In UE, add them in the Static Mesh editor (Socket Manager) or as `SOCKET_<Name>` empties in a .blend export.
 - **Budgets:** FPS hero 8-20k tris, third person 3-6k, pickups / mobile 1-3k. Forge weapons come out at 0.3-6k, already third-person ready. Use `qa budget=weapon` (15k, 3 materials).
-- **Materials:** 3 slots or fewer: metal + polymer + grip (rifle), metal + wood + grip (shotgun, axe), metal + polymer + glow (sci-fi). Slots are named `Weapon_<Slot>_<Style>` (`Weapon_Metal_Realistic`, `Weapon_Polymer_Realistic`, `Weapon_Grip_Realistic`, `Weapon_Wood_*`, `Weapon_Steel_*`, `Weapon_Glow_*`). Wear goes on the edges in the material, not in geometry.
+- **Materials:** 3 slots or fewer: anodized + metal + polymer (rifle), metal + polymer (pistol: grey slide, black frame), metal + wood + grip (shotgun, axe), metal + polymer + glow (sci-fi). Slots are named `Weapon_<Slot>_<Style>` (`Weapon_Anodized_Realistic`, `Weapon_Metal_Realistic`, `Weapon_Polymer_Realistic`, `Weapon_Grip_Realistic`, `Weapon_Wood_*`, `Weapon_Steel_*`, `Weapon_Glow_*`). Wear goes on the edges in the material, not in geometry. Realistic slots already carry light `edge_wear` / `scratches` / `dirt` layers. Those masks use Pointiness and AO, which only Cycles computes, so they show after `bake` (and in UE once baked), not in an Eevee `look`.
 
 **Wear:** edit each slot by name, **without `id`** (`id` assigns that one material to the whole weapon and the 3 slots become 1). Pass the slot's base values so the layers sit on its colour:
 
 ```json
 [
-  {"tool": "forge_hq", "op": "material", "params": {"material": "Weapon_Metal_Realistic", "overrides": {"color": [0.045, 0.047, 0.05], "metallic": 1.0, "roughness": 0.38}, "layers": [{"type": "edge_wear", "metal": true}, {"type": "scratches"}]}},
-  {"tool": "forge_hq", "op": "material", "params": {"material": "Weapon_Polymer_Realistic", "overrides": {"color": [0.035, 0.035, 0.032], "metallic": 0.0, "roughness": 0.62}, "layers": [{"type": "dirt", "amount": 0.3}]}}
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Weapon_Anodized_Realistic", "overrides": {"color": [0.045, 0.047, 0.05], "metallic": 0.0, "roughness": 0.3}, "layers": [{"type": "edge_wear", "color": [0.62, 0.63, 0.65], "amount": 0.9, "metal": true}, {"type": "scratches", "amount": 0.6}]}},
+  {"tool": "forge_hq", "op": "material", "params": {"material": "Weapon_Polymer_Realistic", "overrides": {"color": [0.022, 0.022, 0.02], "metallic": 0.0, "roughness": 0.8}, "layers": [{"type": "dirt", "amount": 0.6}]}}
 ]
 ```
-→ rifle keeps 3 slots (metal, polymer, grip).
+→ rifle keeps 3 slots (anodized, metal, polymer); this is "battle-worn", the built-in wear is lighter.
 - **Hard surface:** the chamfer (bevel) and weighted normals are what make a gun read as metal; panel lines and vents are `hardsurface` cuts; n-gons stay only on flat caps (UE triangulates on import). Keep details at 2 mm or more: anything finer is texture.
 
 ## Recipe: rifle to game, one batch
