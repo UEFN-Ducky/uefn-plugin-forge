@@ -548,3 +548,133 @@ def op_fur_bake(p):
     _png(folder / p["color_file"], size, size, color_rows, 3)
     _png(folder / p["normal_file"], size, size, normal_rows, 3)
     return {"size": size, "color_file": p["color_file"], "normal_file": p["normal_file"]}
+
+
+# ---- fabric cloth: the cloth.py sheet with per-fabric stiffness, damping and weight ----------------
+
+# Blender's cloth presets (tension = compression stiffness, shear, bending, tension damping) plus weight in g/m2
+FABRICS = {
+    "cotton": dict(gsm=150, tension=15, shear=15, bending=0.5, damping=5),
+    "denim": dict(gsm=400, tension=40, shear=40, bending=10, damping=25),
+    "leather": dict(gsm=900, tension=80, shear=80, bending=150, damping=25),
+    "silk": dict(gsm=60, tension=5, shear=5, bending=0.05, damping=0),
+    "rubber": dict(gsm=1200, tension=15, shear=15, bending=25, damping=25),
+}
+
+
+def fabric_of(name):
+    """Per-pass link stiffness 0..1 (stiffer fabric stretches less per pass), velocity keep, wind scale (heavier = less)."""
+    key = str(name or "").lower()
+    if key not in FABRICS:
+        import difflib
+        close = difflib.get_close_matches(key, FABRICS, n=1)
+        raise ValueError("No fabric %r.%s Fabrics: %s" % (key, " Did you mean %r?" % close[0] if close else "", ", ".join(FABRICS)))
+    f = FABRICS[key]
+    stiff = lambda v, s: 1 - math.exp(-v / s)
+    return dict(name=key, gsm=f["gsm"], struct=stiff(f["tension"], 15.0), shear=stiff(f["shear"], 15.0),
+                bend=stiff(f["bending"], 5.0), keep=0.998 - 0.0004 * f["damping"], wind=150.0 / f["gsm"])
+
+
+def simulate_fabric(p):
+    """cloth.simulate with fabric knobs on the links, damping and wind. ponytail: a copy of that loop because
+    cloth.py sits in another lane; fold the knobs into cloth.simulate when both are in one hand."""
+    from . import cloth as sheet
+    pre, fab = sheet.preset_of(p.get("preset")), fabric_of(p.get("fabric"))
+    pin = [float(v) for v in p["pin"]]
+    rows, cols = pre["segs"] + 1, pre["cols"]
+    fps = int(p.get("fps") or 30)
+    frames = max(2, min(240, int(p.get("frames") or 32)))
+    sway = float(p.get("sway", 4.0))
+    spheres = [[float(v) for v in s] for s in p.get("spheres") or []]
+    rest = sheet._grid(pre, pin)
+    pos = [[list(q) for q in row] for row in rest]
+    old = [[list(q) for q in row] for row in rest]
+    links = []
+    for r in range(rows):
+        for c in range(cols):
+            for dr, dc, k in ((1, 0, fab["struct"]), (0, 1, fab["struct"]), (1, 1, fab["shear"]), (1, -1, fab["shear"]), (2, 0, fab["bend"])):
+                r2, c2 = r + dr, c + dc
+                if r2 < rows and 0 <= c2 < cols:
+                    links.append((r, c, r2, c2, math.dist(rest[r][c], rest[r2][c2]), k))
+    dt = 1.0 / fps / sheet.SUB
+    keep, clearance = fab["keep"], [1e9]
+
+    def step(t):
+        wind = pre["wind"] * fab["wind"] * (300 + 250 * math.sin(t * 3.0))
+        for r in range(1, rows):
+            for c in range(cols):
+                q, o = pos[r][c], old[r][c]
+                v = [(q[i] - o[i]) * keep for i in range(3)]
+                o[:] = q
+                q[0] += v[0]
+                q[1] += v[1] + wind * dt * dt * (1 + 0.3 * math.sin(r * 0.8 + t * 5.0))
+                q[2] += v[2] - sheet.GRAVITY * dt * dt
+        shift = sway * math.sin(2 * math.pi * t / (frames / fps))
+        for c in range(cols):
+            pos[0][c] = [rest[0][c][0] + shift, rest[0][c][1], rest[0][c][2]]
+        for it in range(sheet.ITER):
+            for r, c, r2, c2, length, stiff in links:
+                a, b = pos[r][c], pos[r2][c2]
+                d = [b[i] - a[i] for i in range(3)]
+                dist = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) or 1e-9
+                k = (dist - length) / dist * stiff
+                wa, wb = (0.0 if r == 0 else 1.0), (0.0 if r2 == 0 else 1.0)
+                if wa + wb == 0:
+                    continue
+                wa, wb = wa / (wa + wb), wb / (wa + wb)
+                for i in range(3):
+                    a[i] += d[i] * k * wa
+                    b[i] -= d[i] * k * wb
+            if it % 2 == 0:
+                continue
+            for r in range(1, rows):
+                for c in range(cols):
+                    q = pos[r][c]
+                    for s in spheres:
+                        d = [q[0] - s[0], q[1] - s[1], q[2] - s[2]]
+                        dist = math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2])
+                        if dist < s[3] + sheet.THICK:
+                            if dist < 1e-6:
+                                d, dist = [0.0, 1.0, 0.0], 1.0
+                            for i in range(3):
+                                q[i] = s[i] + d[i] / dist * (s[3] + sheet.THICK)
+
+    t = 0.0
+    for _ in range(sheet.PREROLL * sheet.SUB):
+        step(t)
+        t += dt
+    out = []
+    for _ in range(frames):
+        for _ in range(sheet.SUB):
+            step(t)
+            t += dt
+        out.append([[[round(v, 4) for v in q] for q in row] for row in pos])
+        for row in pos[1:]:
+            for q in row:
+                for s in spheres:
+                    clearance[0] = min(clearance[0], math.dist(q, s[:3]) - s[3])
+    drop = max(rest[0][0][2] - q[2] for grid in out for row in grid for q in row)
+    return {"rest": rest, "frames": out, "clearance": clearance[0] if spheres else None, "pre": pre, "fabric": fab["name"], "drop": round(drop, 2)}
+
+
+def op_cloth_fabric(p):
+    """op_cloth for a fabric: the same bake (bones or shapes), plus fabric and drop (cm below the pin)."""
+    from . import cloth as sheet
+    sim = simulate_fabric(p)
+    pre = sim["pre"]
+    out = {"preset": pre["name"], "fabric": sim["fabric"], "drop": sim["drop"], "frame_count": len(sim["frames"]),
+           "clearance": sim["clearance"], "rest": sim["rest"], "cols": pre["cols"], "segs": pre["segs"]}
+    verts = p.get("verts")
+    if verts is None:
+        rows, cols = pre["segs"] + 1, pre["cols"]
+        verts = [q for row in sim["rest"] for q in row]
+        out["grid_faces"] = [[r * cols + c, r * cols + c + 1, (r + 1) * cols + c + 1, (r + 1) * cols + c]
+                             for r in range(rows - 1) for c in range(cols - 1)]
+        out["grid_verts"] = verts
+    if str(p.get("bake_to") or "bones") == "bones":
+        tracks, bones = sheet.bake_bones(sim, str(p.get("prefix") or "cloth"))
+        out.update(bones=bones, tracks=tracks, weights=sheet.weights_for(sim, verts))
+    else:
+        shapes, names = sheet.bake_shapes(sim, verts)
+        out.update(shapes=shapes, shape_frames={str(k): v for k, v in names.items()})
+    return out

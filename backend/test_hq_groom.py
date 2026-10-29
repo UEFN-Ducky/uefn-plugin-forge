@@ -16,7 +16,7 @@ from .hq import groom as hqg
 from .kernel.mesh import Mesh
 from .scene import dispatch, forget, load
 
-OPS = {"hair": eg.op_hair, "hair_cards": eg.op_hair_cards, "cloth": ec.op_cloth, "fur_shells": eg.op_fur_shells, "fur_bake": eg.op_fur_bake}
+OPS = {"hair": eg.op_hair, "hair_cards": eg.op_hair_cards, "cloth": ec.op_cloth, "cloth_fabric": eg.op_cloth_fabric, "fur_shells": eg.op_fur_shells, "fur_bake": eg.op_fur_bake}
 
 
 def direct(name, params, timeout=600.0):
@@ -145,6 +145,22 @@ class GroomTests(unittest.TestCase):
         weights = [scene.local_mesh(cape).attrs["wt:" + b["name"]] for b in rig["bones"]]
         self.assertTrue(all(abs(sum(w[v] for w in weights) - 1.0) < 1e-6 for v in range(len(weights[0]))))
         self.assertLessEqual(len(json.dumps(hq.compact(result))), 300)
+
+    def test_cloth_fabric_presets(self):
+        body = self.add("capsule", radius=25, height=180)
+        scene = load("Groom")
+        denim = hqg.cloth(scene, {"preset": "denim", "pin": "shoulders", "collide": body, "frames": 8})
+        self.assertEqual(denim["fabric"], "denim")
+        self.assertIn("cape denim", denim["summary"])
+        self.assertEqual(scene.local_mesh(scene.node(denim["ids"][0])).tri_count() > 0, True)
+        silk = hqg.cloth(scene, {"preset": "cape", "fabric": "silk", "pin": "shoulders", "collide": body, "frames": 8})
+        self.assertLess(denim["drop"], silk["drop"])  # denim stretches less under its own weight
+        drops = {f: eg.simulate_fabric({"preset": "cape", "fabric": f, "pin": [0, 0, 150], "frames": 4})["drop"] for f in eg.FABRICS}
+        self.assertLess(drops["leather"], drops["cotton"])
+        self.assertLess(drops["cotton"], drops["silk"])
+        with self.assertRaisesRegex(ValueError, "Did you mean 'denim'"):
+            hqg.cloth(scene, {"fabric": "demin", "pin": "shoulders", "collide": body})
+        self.assertLessEqual(len(json.dumps(hq.compact(denim))), 300)
 
     def test_cloth_bake_shapes(self):
         body = self.add("capsule", radius=25, height=180)

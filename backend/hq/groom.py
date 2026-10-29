@@ -199,10 +199,15 @@ def _free_prefix(rig, base):
     return prefix
 
 
-@op("cloth", "cloth(preset=cape|scarf|skirt|flag, pin, collide, frames=32, bake_to=bones|shapes) -> clip")
+@op("cloth", "cloth(preset=cape|scarf|skirt|flag (or a fabric: hangs as a cape), fabric?=cotton|denim|leather|silk|rubber, pin, collide, frames=32, bake_to=bones|shapes) -> clip")
 def cloth(scene, p):
     from ..scene import _nid
-    pre = sheet.preset_of(p.get("preset"))
+    fabric, shape = p.get("fabric"), p.get("preset")
+    if str(shape or "").lower() in strand.FABRICS:
+        fabric, shape = fabric or shape, "cape"
+    if fabric:
+        strand.fabric_of(fabric)  # unknown fabric fails before the body is read
+    pre = sheet.preset_of(shape)
     cloth_id = p.get("id")
     cloth_node = _node(scene, cloth_id) if cloth_id else None
     collide = p.get("collide")
@@ -229,7 +234,7 @@ def cloth(scene, p):
         rig = {"id": _nid("r"), "name": "Cloth rig", "bones": [], "actions": []}
     prefix = _free_prefix(rig, pre["name"])
     verts = [list(v) for v in scene.world_mesh(cloth_node).verts] if cloth_node else None
-    result = _call("cloth", {"preset": pre["name"], "pin": pin, "spheres": make_spheres(body, pin, pre["length"] + pre["width"]),
+    result = _call("cloth_fabric" if fabric else "cloth", {"preset": pre["name"], "fabric": fabric, "pin": pin, "spheres": make_spheres(body, pin, pre["length"] + pre["width"]),
                              "frames": frames, "bake_to": mode, "verts": verts, "prefix": prefix, "sway": p.get("sway", 4.0)}, 600.0)
     warnings = []
     if cloth_node is None:
@@ -272,8 +277,12 @@ def cloth(scene, p):
     scene.touch_geom()
     if result["clearance"] is not None and result["clearance"] < 0:
         warnings.append("cloth penetrates the body by %.2f cm" % -result["clearance"])
-    return {"ids": [cloth_node["id"], rig["id"]], "clip": clip["id"], "frames": frames, "clearance": result["clearance"] or 0.0,
-            "summary": "%s: %s, %d-frame clip %s" % (pre["name"], what, frames, clip["id"]), "warnings": warnings}
+    name = pre["name"] + (" " + result["fabric"] if fabric else "")
+    out = {"ids": [cloth_node["id"], rig["id"]], "clip": clip["id"], "frames": frames, "clearance": result["clearance"] or 0.0,
+           "summary": "%s: %s, %d-frame clip %s" % (name, what, frames, clip["id"]), "warnings": warnings}
+    if fabric:
+        out.update(fabric=result["fabric"], drop=result["drop"])
+    return out
 
 
 # ---- fur --------------------------------------------------------------------
