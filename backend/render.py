@@ -39,12 +39,65 @@ _VIEWS = {
 # Turntable stills: az0 is the front, then every 45 degrees clockwise seen from above.
 _VIEWS.update({f"az{a}": (2.2 * math.sin(math.radians(a)), -2.2 * math.cos(math.radians(a)), 0.45) for a in range(0, 360, 45)})
 
+# QA looks show topology, UVs and outline, not lighting, so the soft renderer draws them (no Eevee wait, no stamp).
+QA_STYLES = ("wire", "islands", "silhouette", "checker", "xray")
+_BG = (22, 22, 26)
+_INK = (235, 235, 235)
+
+
+def _qa(style: str) -> bool:
+    global last_renderer, last_note
+    if style not in QA_STYLES:
+        return False
+    last_renderer, last_note = "soft", ""
+    return True
+
+
+def _checker(n: int = 8, px: int = 256) -> Image.Image:
+    im = Image.new("RGB", (px, px), (40, 40, 44))
+    draw = ImageDraw.Draw(im)
+    s = px // n
+    for i in range(n):
+        for j in range(n):
+            if (i + j) % 2 == 0:
+                draw.rectangle((i * s, j * s, i * s + s - 1, j * s + s - 1), fill=(225, 225, 225))
+    draw.rectangle((0, 0, s - 1, s - 1), fill=(220, 60, 60))  # UV origin corner, so flips read
+    return im
+
+
+def _islands(mesh: Mesh) -> list[int]:
+    """UV island per face: faces meeting at a vertex with the same UV belong together."""
+    parent = list(range(len(mesh.faces)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    first: dict = {}
+    for fi, face in enumerate(mesh.faces):
+        uvs = mesh.uvs[fi] if fi < len(mesh.uvs) and len(mesh.uvs[fi]) == len(face) else [(0, 0)] * len(face)
+        for v, uv in zip(face, uvs):
+            key = (v, round(uv[0], 4), round(uv[1], 4))
+            other = first.setdefault(key, fi)
+            parent[root(fi)] = root(other)
+    return [root(fi) for fi in range(len(mesh.faces))]
+
+
+def fill_pct(mesh: Mesh, view: str, size: tuple[int, int] = (160, 120)) -> int:
+    """Object pixels / frame, from a small silhouette in the soft renderer's framing."""
+    im = render_mesh(mesh, view, size, style="silhouette")
+    return round(100 * sum(1 for p in im.getdata() if p != _BG) / (size[0] * size[1]))
+
 
 def render_mesh(mesh: Mesh, view: str = "three", size: tuple[int, int] = (320, 240), materials: dict | None = None,
-                textures: Path | None = None) -> Image.Image:
-    """textures is the scene's texture folder: painted and generated base colours show through the UVs."""
+                textures: Path | None = None, style: str = "") -> Image.Image:
+    """textures is the scene's texture folder: painted and generated base colours show through the UVs.
+
+    style is one of QA_STYLES for a QA look; anything else is the shaded material look.
+    """
     w, h = size
-    im = Image.new("RGB", (w, h), (22, 22, 26))
+    im = Image.new("RGB", (w, h), _BG)
     if not mesh.verts:
         return im
     lo, hi = mesh.bounds()
@@ -83,6 +136,9 @@ def render_mesh(mesh: Mesh, view: str = "three", size: tuple[int, int] = (320, 2
             tris.append((facing, -depth, pts, shade, mat, (a, b, c), fi))
     tris.sort(key=lambda t: (t[0], t[1]))
     draw = ImageDraw.Draw(im)
+    if style in QA_STYLES:
+        _draw_qa(im, draw, mesh, tris, style)
+        return im
     palette: dict = {}
     images: dict = {}
     blend = mesh.attrs.get("col:blend")
@@ -98,6 +154,40 @@ def render_mesh(mesh: Mesh, view: str = "three", size: tuple[int, int] = (320, 2
         if tex is None or not _paste(im, tex, pts, [uv[0:2], uv[2:4], uv[4:6]], shade):
             draw.polygon(pts, fill=_shaded(base, shade))
     return im
+
+
+def _draw_qa(im: Image.Image, draw: ImageDraw.ImageDraw, mesh: Mesh, tris: list, style: str) -> None:
+    if style == "silhouette":
+        for t in tris:
+            draw.polygon(t[2], fill=_INK)
+        return
+    edges = set(mesh.edge_keys())
+
+    def lines(pts, corners, col):
+        for k in range(3):
+            a, b = corners[k], corners[(k + 1) % 3]
+            if ((a, b) if a < b else (b, a)) in edges:
+                draw.line([pts[k], pts[(k + 1) % 3]], fill=col)
+    if style == "xray":  # see-through: dim body, hidden edges faint, visible edges bright
+        for t in tris:
+            draw.polygon(t[2], fill=(46, 56, 74))
+        for facing, _d, pts, _s, _m, corners, _fi in tris:
+            lines(pts, corners, (210, 225, 255) if facing else (95, 110, 140))
+        return
+    island = _islands(mesh) if style == "islands" else None
+    checker = _checker() if style == "checker" else None
+    for facing, _d, pts, shade, _m, corners, fi in tris:
+        if style == "wire":  # hidden-line: faces hide what is behind them, real edges only (no fan diagonals)
+            draw.polygon(pts, fill=_shaded((70, 74, 84), shade))
+            lines(pts, corners, (240, 240, 240) if facing else (120, 120, 120))
+        elif checker is not None:
+            uv = mesh.tri_uv(fi, corners)
+            if not facing or not _paste(im, checker, pts, [uv[0:2], uv[2:4], uv[4:6]], shade):
+                draw.polygon(pts, fill=_shaded((120, 120, 120), shade))
+        else:
+            h = (island[fi] * 2654435761) & 0xFFFFFF
+            col = (70 + (h & 0xFF) % 170, 70 + ((h >> 8) & 0xFF) % 170, 70 + ((h >> 16) & 0xFF) % 170)
+            draw.polygon(pts, fill=_shaded(col, shade))
 
 
 def _engine_views(mesh: Mesh, views: list[str], size: tuple[int, int], materials: dict | None, textures: Path | None,
@@ -177,11 +267,14 @@ def render_png(mesh: Mesh, path: Path, views: list[str] | None = None, materials
     views = views or ["three"]
     path.parent.mkdir(parents=True, exist_ok=True)
     out = []
-    shots = _engine_views(mesh, views, (480, 360), materials, textures, cold_ok=False, style=style)  # ponytail: first png call is the soft one
+    qa = _qa(style)
+    shots = None if qa else _engine_views(mesh, views, (480, 360), materials, textures, cold_ok=False, style=style)  # ponytail: first png call is the soft one
     for i, view in enumerate(views):
         dest = path if len(views) == 1 else path.with_name(f"{path.stem}_{view}{path.suffix}")
         if shots:
             shutil.copyfile(shots[i], dest)
+        elif qa:
+            render_mesh(mesh, view, (480, 360), materials, textures, style).save(dest)
         else:
             _stamp(render_mesh(mesh, view, materials=materials, textures=textures)).save(dest)
         out.append(str(dest))
@@ -204,12 +297,15 @@ def render_tiles(mesh: Mesh, path: Path, views: list[str], materials: dict | Non
     th = tw * 3 // 4
     if th * rows > long_side:
         th = long_side // rows
-    sheet = Image.new("RGB", (tw * cols, th * rows), (22, 22, 26))
-    shots = _engine_views(mesh, views, (tw, th), materials, textures, quality, style=style)
+    sheet = Image.new("RGB", (tw * cols, th * rows), _BG)
+    qa = _qa(style)
+    shots = None if qa else _engine_views(mesh, views, (tw, th), materials, textures, quality, style=style)
     for i, view in enumerate(views):
         if shots:
             with Image.open(shots[i]) as tile:
                 tile = tile.convert("RGB")
+        elif qa:
+            tile = render_mesh(mesh, view, (tw, th), materials, textures, style)
         else:
             tile = _stamp(render_mesh(mesh, view, (tw, th), materials, textures))
         sheet.paste(tile, ((i % cols) * tw, (i // cols) * th))

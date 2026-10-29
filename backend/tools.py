@@ -421,7 +421,7 @@ def register_tools(api: Any) -> None:
     @api.tool(**host)
     def forge_render(name: str = "", views: list | None = None, id: str = "", clip: str = "", frames: list | None = None,
                      style: str = "pbr") -> dict:
-        """Render PNGs: three|front|side|top|left|back|three_back|az0..az315; clip= renders frames of a motion; style=pbr|toon."""
+        """Render PNGs: three|front|side|top|left|back|three_back|az0..az315; clip= renders frames of a motion; style=pbr|toon|wire|islands|silhouette|checker|xray."""
         if clip:
             return _run(api, name, "render", _given(views=views or ["three"], id=id, clip=clip, frames=frames, style=style))
         return _run(api, name, "render", {"views": views or ["three", "front", "top"], "id": id, "style": style})
@@ -453,7 +453,7 @@ def register_tools(api: Any) -> None:
 
     @api.tool(**host)
     def forge_batch(name: str = "", steps: list | None = None, verbose: bool = False, look: Any = "") -> dict:
-        """Many edits as one undo step: steps=[{tool, ...args}], "$0"/"$0.ids" refs; look=three|ai|ids|{view,style:toon} adds 1 image. See forge/modeling_recipes."""
+        """Many edits as one undo step: steps=[{tool, ...args}], "$0"/"$0.ids" refs; look=three|ai|ids|{view,style:toon|wire|islands|silhouette|checker|xray,px:128..1024} adds 1 image. See forge/modeling_recipes."""
         return _run(api, name, "batch", {"steps": steps, "verbose": verbose}, look)
 
     @api.tool(**host)

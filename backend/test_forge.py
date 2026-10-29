@@ -33,6 +33,30 @@ def test_dock_parts_keep_every_triangle() -> None:
     assert acc == blob and len(acc) > _GEOM_PART
 
 
+def test_look_styles() -> None:
+    root = Path(tempfile.mkdtemp(prefix="forge-look-"))
+    os.environ["FORGE_SCENES_DIR"] = str(root)
+    os.environ["FORGE_CAPTURES_DIR"] = str(root / "caps")
+    dispatch("", "scene_new", {"name": "Looks"}, actor="user")
+    dispatch("Looks", "add", {"kind": "box", "name": "Box", "params": {"w": 80, "d": 80, "h": 80}}, actor="agent")
+    wire = dispatch("Looks", "look", {"look": "three", "style": "wire"})
+    assert "fill " in wire["seen"] and wire["seen"].endswith("style wire"), wire["seen"]
+    with Image.open(wire["paths"][0]) as im:
+        assert sum(1 for p in im.convert("RGB").getdata() if p == (240, 240, 240)) > 50  # edge pixels
+    sil = dispatch("Looks", "look", {"look": {"view": "front", "style": "silhouette", "px": 128}})
+    with Image.open(sil["paths"][0]) as im:
+        assert max(im.size) == 128, im.size
+        assert len(im.convert("RGB").getcolors()) == 2
+    for style in ("islands", "checker", "xray"):
+        assert Path(dispatch("Looks", "look", {"style": style})["paths"][0]).is_file()
+    for bad in ({"style": "neon"}, {"px": 64}):
+        try:
+            dispatch("Looks", "look", bad)
+        except ValueError:
+            continue
+        raise AssertionError(bad)
+
+
 def test_kernel_and_scene() -> None:
     root = Path(tempfile.mkdtemp(prefix="forge-"))
     os.environ["FORGE_SCENES_DIR"] = str(root)
@@ -590,6 +614,7 @@ def test_send() -> None:
 
 if __name__ == "__main__":
     test_dock_parts_keep_every_triangle()
+    test_look_styles()
     test_kernel_and_scene()
     test_rig_anim_batch()
     test_sculpt_paint_shapes()

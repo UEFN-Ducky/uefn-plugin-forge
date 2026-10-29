@@ -1800,10 +1800,12 @@ def _op_fix(scene: Scene, p: dict) -> dict[str, Any]:
 
 
 def _style(value: Any) -> str:
-    """'pbr' (default, the engine's empty style) or 'toon'."""
+    """'pbr' (default, the engine's empty style), 'toon', or a QA look (wire, islands, silhouette, checker, xray)."""
+    from .render import QA_STYLES
+
     v = str(value or "pbr").strip().lower()
-    if v not in ("pbr", "toon"):
-        raise ValueError(f"style={value!r} is not a render style. Use pbr or toon")
+    if v not in ("pbr", "toon", *QA_STYLES):
+        raise ValueError(f"style={value!r} is not a render style. Use pbr, toon or {', '.join(QA_STYLES)}")
     return "" if v == "pbr" else v
 
 
@@ -1849,14 +1851,22 @@ _LOOK_VIEWS = {"ai": ["three", "front", "side", "top"], "around": ["front", "sid
 
 def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
     """One tiled preview plus a 'seen' line: bounds cm, tris, materials, check issues. look = a view, "ai", or ids."""
-    from .render import _VIEWS, render_tiles
+    from .render import _VIEWS, fill_pct, render_tiles
 
     look = p.get("look") or "three"
     style = p.get("style")
-    if isinstance(look, dict):  # {view, style}
+    px = p.get("px")
+    if isinstance(look, dict):  # {view, style, px}
         style = look.get("style") or style
+        px = look.get("px") or px
         look = look.get("view") or "three"
     style = _style(style)
+    try:
+        px = int(px or 768)
+    except (TypeError, ValueError):
+        raise ValueError(f"px={px!r} is not a size. Use 128 to 1024") from None
+    if not 128 <= px <= 1024:
+        raise ValueError(f"px={px} is out of range. Use 128 to 1024")
     ids = set(look) if isinstance(look, list) else set()
     views = ["three"] if ids else _LOOK_VIEWS.get(look, [look])
     bad = [v for v in views if v not in _VIEWS]
@@ -1883,13 +1893,15 @@ def _op_look(scene: Scene, p: dict) -> dict[str, Any]:
     kinds: dict = {}
     for i in issues:
         kinds[i["id"]] = kinds.get(i["id"], 0) + 1
-    seen = "%s cm, %d tris, %s, %s" % (
+    seen = "%s cm, %d tris, %s, %s, fill %d%%" % (
         "x".join(str(round(hi[k] - lo[k])) for k in range(3)), mesh.tri_count(), ", ".join(used[:4]) or "no materials",
-        "; ".join(f"{k} x{c}" for k, c in list(kinds.items())[:3]) or "no issues")
+        "; ".join(f"{k} x{c}" for k, c in list(kinds.items())[:3]) or "no issues", fill_pct(mesh, views[0]))
+    if style:
+        seen += ", style " + style
     from . import render as rd
 
     path = render_tiles(mesh, _captures() / f"forge_{scene.name}_look.png", views, mats, scene.folder / "textures",
-                        style=style)
+                        long_side=px, style=style)
     return _noted({"summary": seen, "seen": seen, "ids": [], "paths": [path]}, rd)
 
 
