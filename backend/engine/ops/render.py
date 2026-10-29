@@ -81,6 +81,8 @@ def op_render(p):
     meshes = [o for o in objs.values() if o.type == "MESH"]
     if not meshes:
         raise ValueError("Nothing to render: the asked ids have no meshes")
+    from .materials import build_all  # late: materials imports render helpers via lighting
+    build_all(p.get("textures_dir"))  # layer specs and emissive vertex masks show in look, as in light
     _cutouts()
     toon.apply(p)
     lo, hi = _bounds(meshes)

@@ -171,6 +171,11 @@ class EndToEnd(unittest.TestCase):
             ("stress", {}),
             ("retarget", {"src": str(bvh)}),
             ("bake_clip", {"clip": "Run"}),
+            ("car_part", {"kind": "wheel", "tire": "225/45R17", "spokes": "10"}),
+            ("car", {"body": "kart"}),
+            ("car_swap", {"car": "Car_Kart", "slot": "rim", "spokes": "mesh"}),
+            ("weapon", {"kind": "rifle", "parts": {"sight": "red_dot", "muzzle": "suppressor"}}),
+            ("head", {"hair": "none"}),
             ("export", {"target": "generic"}),
             ("convert", {"path": str(load(name).folder / "exports" / (name + ".glb")), "to": "obj"}),
         ]
