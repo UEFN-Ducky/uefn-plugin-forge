@@ -110,9 +110,31 @@ def _tidy(ob):
     ob.data.update()
 
 
+def _decimate(ob, p, faces):
+    """decimate: collapse to ratio (or faces/tris), seams pinned; planar: limited dissolve 5 deg
+    that stops at seams and sharp edges. Both keep UVs (no reprojection needed)."""
+    m = ob.modifiers.new("hq_retopo", "DECIMATE")
+    if p["method"] == "planar":
+        m.decimate_type, m.angle_limit, m.delimit = "DISSOLVE", math.radians(5), {"SEAM", "SHARP"}
+        label = "planar 5deg"
+    else:
+        r = float(p.get("ratio") or min(1.0, faces / max(1, _stats(ob)["tris"])))
+        m.decimate_type, m.ratio = "COLLAPSE", r
+        _pin_seams(ob, m)
+        label = "decimate %g" % round(r, 3)
+    with _ctx(ob):
+        bpy.ops.object.modifier_apply(modifier=m.name)
+    vg = ob.vertex_groups.get("hq_lod_free")
+    if vg:
+        ob.vertex_groups.remove(vg)
+    return {"summary": "retopo " + label, "uvs": len(ob.data.uv_layers), **_stats(ob)}
+
+
 def retopo(ob, p):
-    """Quadriflow retopo to ~faces quads."""
+    """method quadriflow (default): ~faces quads, needs a closed mesh; decimate | planar: see _decimate."""
     faces = int(p.get("faces", 4000))
+    if p.get("method", "quadriflow") != "quadriflow":
+        return _decimate(ob, p, faces)
     src = _snapshot(ob)
     _collapse_tiny_edges(ob)
     try:
@@ -269,10 +291,28 @@ def _pin_seams(lod, m):
     m.vertex_group = vg.name
 
 
+def _cleanup(ob, dist):
+    """Pre-LOD pass: weld doubles within dist, dissolve degenerate, delete loose. Returns verts removed."""
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    n = len(bm.verts)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts[:], dist=dist)
+    bmesh.ops.dissolve_degenerate(bm, dist=dist, edges=bm.edges[:])
+    bmesh.ops.delete(bm, geom=[e for e in bm.edges if not e.link_faces], context="EDGES")
+    bmesh.ops.delete(bm, geom=[v for v in bm.verts if not v.link_faces], context="VERTS")
+    n -= len(bm.verts)
+    bm.to_mesh(ob.data)
+    bm.free()
+    ob.data.update()
+    return n
+
+
 def lods(ob, p):
-    """Seam-preserving decimate chain, objects <name>_LOD<i>; returns node payload."""
+    """Seam-preserving decimate chain, objects <name>_LOD<i>; returns node payload.
+    cleanup=True first cleans the base mesh itself (merge 0.01 cm), so export's rebuild sees it too."""
     ratios = p.get("ratios") or [1, 0.5, 0.25, 0.1]
     nanite = bool(p.get("nanite", False))
+    removed = _cleanup(ob, 0.01 * p.get("unit", 1.0)) if p.get("cleanup") else 0
     out, counts = [], []
     for i, r in enumerate(ratios):
         lod = ob.copy()
@@ -289,8 +329,8 @@ def lods(ob, p):
         counts.append(_stats(lod)["tris"])
         if not p.get("keep"):  # Export rebuilds LODs from node_data; keep=True leaves the objects
             bpy.data.objects.remove(lod, do_unlink=True)
-    return {"summary": "/".join(map(str, counts)) + (" nanite" if nanite else ""),
-            "lods": out, "tris": counts, "nanite": nanite, "ratios": ratios,
+    return {"summary": "/".join(map(str, counts)) + (" nanite" if nanite else "") + (" cleaned -%d verts" % removed if removed else ""),
+            "lods": out, "tris": counts, "nanite": nanite, "ratios": ratios, "removed": removed,
             "node_data": {"ratios": ratios, "tris": counts, "nanite": nanite}}
 
 
@@ -596,7 +636,7 @@ def op_modifiers(p):
 
 
 def op_lods(p):
-    return _each("lods", p, False)
+    return _each("lods", p, bool(p.get("cleanup")))
 
 
 def op_hardsurface(p):

@@ -84,7 +84,7 @@ def test_retopo_quads():
     fresh()
     ob = blob()
     hq.run("remesh", ob, {"voxel": 0.04})
-    r = hq.run("retopo", ob, {"faces": 4000, "symmetry": True})
+    r = hq.run("retopo", ob, {"faces": 4000, "symmetry": True, "method": "quadriflow"})
     assert r["quads"] / r["faces"] >= 0.9, r
     assert watertight(ob), "retopo left open edges"
     assert len(ob.material_slots) >= 2
@@ -196,6 +196,49 @@ def test_lods_ratios():
     lod = bpy.data.objects[r["lods"][-1]]
     have = {tuple(round(c, 3) for c in v.co) for v in lod.data.vertices}
     assert seam <= have, f"{len(seam - have)} seam verts lost"
+
+
+def test_lods_cleanup():
+    fresh()
+    ob = sphere("rock", seg=32)
+    bm = bmesh.new()
+    bm.from_mesh(ob.data)
+    bmesh.ops.split_edges(bm, edges=bm.edges[:])  # every face its own island: thousands of doubles
+    bm.verts.new((5, 5, 5))  # a loose vert
+    bm.to_mesh(ob.data)
+    bm.free()
+    before = len(ob.data.vertices)
+    plain = hq.run("lods", ob, {"ratios": [1, 0.5]})
+    assert len(ob.data.vertices) == before and "removed" in plain and plain["removed"] == 0
+    r = hq.run("lods", ob, {"ratios": [1, 0.5], "cleanup": True})
+    short(r)
+    assert r["removed"] > 0 and len(ob.data.vertices) < before, r
+    assert watertight(ob) and len(ob.data.vertices) == 32 * 15 + 2, len(ob.data.vertices)
+
+
+def test_retopo_methods():
+    fresh()
+    ob = sphere("s", seg=32)
+    full = sum(len(p.vertices) - 2 for p in ob.data.polygons)
+    r = hq.run("retopo", ob, {"method": "decimate", "ratio": 0.5})
+    short(r)
+    assert r["summary"] == "retopo decimate 0.5" and abs(r["tris"] / full - 0.5) <= 0.1, r
+    assert len(ob.data.uv_layers) == 1 and r["uvs"] == 1 and not ob.vertex_groups, "UVs lost"
+    fresh()
+    ob = sphere("s", seg=32)
+    r = hq.run("retopo", ob, {"method": "decimate", "faces": 300})
+    assert abs(r["tris"] - 300) <= 40, r
+    fresh()
+    bpy.ops.mesh.primitive_grid_add(x_subdivisions=20, y_subdivisions=20)
+    ob = bpy.context.active_object
+    r = hq.run("retopo", ob, {"method": "planar"})
+    short(r)
+    assert r["faces"] < 20 and len(ob.data.uv_layers) == 1, r
+    try:
+        hq.params("retopo", {"method": "wobble"})
+        assert False
+    except ValueError as e:
+        assert "planar" in str(e)
 
 
 def test_ops_registered():

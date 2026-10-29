@@ -13,10 +13,10 @@ NAME = "mesh"
 # op -> {param: default}; unknown params are rejected with the valid list.
 _DEFAULTS = {
     "remesh": {"voxel": 5.0, "adaptivity": 0.0},
-    "retopo": {"faces": 4000, "symmetry": False},
+    "retopo": {"faces": 4000, "symmetry": False, "method": "quadriflow", "ratio": None},
     "sculpt_hd": {"levels": 3, "detail": "rock", "strokes": None, "path": None},
     "modifiers": {"stack": []},
-    "lods": {"ratios": [1, 0.5, 0.25, 0.1], "nanite": False},
+    "lods": {"ratios": [1, 0.5, 0.25, 0.1], "nanite": False, "cleanup": False},
     "boolean": {"cutters": [], "mode": "difference", "solver": "exact", "hide": True},
     "hardsurface": {"preset": "panel", "at": None, "size": None, "depth": None, "count": None, "radius": None},
     "sculpt": {"ops": []},
@@ -38,6 +38,10 @@ def params(name, given):
         raise ValueError("voxel must be > 0 (cm, e.g. 5)")
     if name == "lods" and not (p["ratios"] and all(0 < float(r) <= 1 for r in p["ratios"])):
         raise ValueError("ratios must be fractions in (0, 1], e.g. [1, 0.5, 0.25, 0.1]")
+    if name == "retopo" and p["method"] not in ("quadriflow", "decimate", "planar"):
+        raise ValueError("method must be quadriflow, decimate or planar")
+    if name == "retopo" and p["ratio"] is not None and not 0 < float(p["ratio"]) <= 1:
+        raise ValueError("ratio must be in (0, 1], e.g. 0.5")
     if name == "modifiers" and isinstance(p["stack"], str) and p["stack"] not in STACKS:
         raise ValueError("stack is a list or a preset: %s" % ", ".join(STACKS))
     if name == "boolean":
@@ -81,7 +85,7 @@ def remesh(scene, p):
     return _go(scene, "remesh", p)
 
 
-@op("retopo", "retopo(id, faces=4000, symmetry=false) quadriflow quad retopology; remesh first if the mesh is open")
+@op("retopo", "retopo(id, method=quadriflow|decimate|planar, faces=4000, ratio?, symmetry=false) quadriflow quads (remesh first if open); decimate keeps UVs+seams; planar dissolves flat areas, keeps seams/sharp")
 def retopo(scene, p):
     return _go(scene, "retopo", p)
 
@@ -96,7 +100,7 @@ def modifiers(scene, p):
     return _go(scene, "modifiers", p)
 
 
-@op("lods", "lods(id, ratios=[1,.5,.25,.1], nanite=false) seam-preserving LOD chain, stored on the node for export")
+@op("lods", "lods(id, ratios=[1,.5,.25,.1], nanite=false, cleanup=false) seam-preserving LOD chain, stored on the node for export; cleanup welds 0.01cm doubles, drops degenerate/loose first")
 def lods(scene, p):
     return _go(scene, "lods", p)
 
