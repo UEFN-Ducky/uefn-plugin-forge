@@ -279,7 +279,11 @@ class RecipeTests(unittest.TestCase):
             dispatch("", "scene_new", {"name": scene})
             with self.subTest(recipe=name):
                 try:
-                    out = dispatch(scene, "hq", {"op": "recipe", "params": {"recipe": name}})
+                    params = {"recipe": name}
+                    if name == "ai_cleanup":  # cleans an existing mesh: give it one
+                        made = dispatch(scene, "add", {"kind": "box"})
+                        params["mesh"] = made.get("id") or made["ids"][0]
+                    out = dispatch(scene, "hq", {"op": "recipe", "params": params})
                     self.assertTrue(out["ids"], name)
                     checked = dispatch(scene, "check", {})
                     self.assertFalse(checked.get("errors"), (name, checked))

@@ -86,8 +86,7 @@ def expand(name, given=None):
     return steps
 
 
-@op("recipe", "recipe(recipe, params?) whole asset in one undo step, e.g. params={recipe:'humanoid_base', height:180, hair:'ponytail'}. "
-              "Recipes: %s. see skill forge/recipes" % " ".join(recipes()))
+@op("recipe", "recipe(recipe, params?) whole asset in one undo step. Recipes: %s. skill forge/recipes" % " ".join(recipes()))
 def recipe(scene, p):
     name = str(p.get("recipe") or "")
     if not name:

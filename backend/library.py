@@ -457,7 +457,7 @@ def register(api: Any) -> None:
     def forge_library(action: str = "list", kind: str = "", id: str = "", name: str = "", from_scene: str = "",
                       object: str = "", scene: str = "", path: str = "", pos: list | None = None, force: bool = False,
                       project: str = "") -> dict:
-        """Shared project library: action=list|add|link|make_local|remove|thumb, kind=material|texture|part|rig. add copies object (a material, object or rig of from_scene, or path= an image) as id; link puts it in scene (edits to the library update every linked scene); make_local(scene, object) makes an editable copy."""
+        """Project library of materials, textures, parts, rigs: list|add|link|make_local|remove|thumb; linked copies follow library edits."""
         try:
             return act(action, kind, id, name, from_scene, object, scene, path, pos, force, project)
         except ValueError as exc:

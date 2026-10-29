@@ -118,8 +118,7 @@ def _r(x):
 
 @op("car_part", "car_part(kind=wheel|rim|tire|brake_disc|caliper|headlight|taillight|grille|mirror|door|hood|trunk|bumper_front|"
                 "bumper_rear|fender|spoiler|diffuser|exhaust|seat|steering_wheel|dashboard|engine|suspension|license_plate|wiper|window, "
-                "style=sport|sedan|suv|truck|classic|scifi, tire=225/45R17, spokes=5|10|mesh|dish|n, side=left|right, width|height|length cm, "
-                "disc mm, text?, materials=hero|full, at?, name?) one part in real cm, origin = its socket (Hub/Hinge/Mount); see skill forge/vehicles")
+                "style=sport|sedan|suv|truck|classic|scifi, tire, spokes, side, size cm, materials=hero|full) origin = its socket; skill forge/vehicles")
 def car_part(scene, p):
     _check(p, _PART_KEYS, "car_part")
     q = _spec(p)
