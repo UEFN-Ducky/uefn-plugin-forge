@@ -44,6 +44,10 @@ Adds `UCX_<name>_01` next to the object on the `collision` layer: a convex hull 
 
 Any `fbx glb gltf obj stl usd usdz abc` file into `glb fbx obj stl usdz gltf`, no scene needed: `{"op": "convert", "params": {"path": "C:/in/chair.fbx", "to": "glb"}}`.
 
+## lods(id, ratios=[1,.5,.25,.1], cleanup=false, nanite=false)
+
+Reduction order: `cleanup=true` first (welds 0.01 cm doubles, drops degenerate faces and loose verts, so decimate never collapses on junk), then the seam-preserving decimate per ratio, then normals (weighted normals stay on hard edges). Screen sizes for the engine's LOD settings: LOD1 .5, LOD2 .25, LOD3 .125. `nanite=true` on UE5 hero meshes skips the chain.
+
 ## Order
 
 Bake textures (`hq_materials`) and `lods` first, `qa` before export, `collision` before export. For a UEFN project use `forge_send_to_uefn` (skill `send_to_game`).

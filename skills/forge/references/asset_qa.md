@@ -54,6 +54,27 @@ Bone names (UE5 Manny for uefn/ue5/unity; R15 `LowerTorso`… for roblox), one r
 
 Projects the mesh (front = X across, side = -Y across) and compares it with the drawing's silhouette (alpha, or the colour away from the border): IoU, 10 height bands within 5 %, width/height drift over 3 %. Under `min_iou` is an error. Pair it with `blockout_from_refs`: build, compare, reshape, compare.
 
+## Looks for review
+
+`look` is a view name or `{"view", "style", "px"}` on any forge tool or `forge_batch`. Every look's `seen` line ends with `fill N%` (object pixels in the frame).
+
+| look | Gives |
+|---|---|
+| `"three"` (default), `"front"`, `"side"`, `"top"`, `"back"`, `"left"`, `"three_back"` | one view |
+| `"ai"` | three + front + side + top tiled |
+| `"around"` | front, side, back, left tiled |
+| `"turntable"` | 8 stills az0, az45 … az315 tiled |
+
+| style | Shows | Use for |
+|---|---|---|
+| `wire` | hidden-line edges, real edges only | topology, edge flow, n-gons |
+| `islands` | each UV island its own colour | seams, island count |
+| `silhouette` | flat white shape | reading at 128 px, `ref_compare` by eye |
+| `checker` | checker through the UVs, red UV origin square | stretch, texel density, flipped islands |
+| `xray` | see-through body, hidden edges faint | inside faces, overlapping parts |
+
+`px` = long side 128..1024 (default 768). `{"look": "turntable"}` → 8 stills. `{"look": {"view": "three", "style": "silhouette", "px": 128}}` → the gameplay-size read. QA styles skip lighting, so they are instant.
+
 ## Checklist after each look
 
 Silhouette reads at 128 px; pivot on the floor; front faces -Y; nothing floats or sinks; no flicker where parts overlap; budget fits the class; `qa` passes.

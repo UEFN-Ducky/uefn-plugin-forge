@@ -13,7 +13,9 @@ metadata:
 | `hair` | id (the head), style short\|long\|ponytail\|afro\|fur\|beard, region, color | strands grown on the head region |
 | `hair_cards` | id, cards 120, atlas 1K | strands to alpha cards: the engine-ready form |
 | `cloth` | preset cape\|scarf\|skirt\|flag, fabric cotton\|denim\|leather\|silk\|rubber, pin, collide, frames 32, bake_to bones\|shapes | simulated, then baked to bones or shape keys as a clip; `preset="denim"` alone = a denim cape |
-| `fur_shells` | id, layers 8, length 2 | alpha-noise shells for short fur |
+| `fur_shells` | id, layers 8, length 2, budget 20000 | alpha-noise shells for short fur |
+| `fur_bake` | id, size 1024, coat lion | fur colour streaks + direction normal baked into BaseColor and Normal: texture-only fur, 0 extra tris |
+| `tufts` | id, mane lion \| target tail + at, style leaf (default) \| flame, count 160, rows 6, length | layered leaf tufts (mane, tail tip) on their own Mane material; flame = pointed blades fused into the host |
 
 ## Fabrics
 
