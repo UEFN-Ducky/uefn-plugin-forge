@@ -22,12 +22,33 @@ def _issue(kind: str, message: str, obj: str, *, severity: str = "warn", element
     }
 
 
+WELD = 0.05  # cm
+
+
+def weld_map(mesh: Mesh, dist: float = WELD) -> list[int]:
+    """Each vertex's lowest-index twin within dist, so seam-split imports count edges as one surface."""
+    cells: dict[tuple[int, int, int], list[int]] = {}
+    out = list(range(len(mesh.verts)))
+    for i, v in enumerate(mesh.verts):
+        c = (int(v[0] // dist), int(v[1] // dist), int(v[2] // dist))
+        hit = next((j for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                    for j in cells.get((c[0] + dx, c[1] + dy, c[2] + dz), ()) if vlen(vsub(v, mesh.verts[j])) < dist), None)
+        if hit is None:
+            cells.setdefault(c, []).append(i)
+        else:
+            out[i] = hit
+    return out
+
+
 def check_mesh(mesh: Mesh, obj_id: str, *, has_collision: bool, pivot_is_base: bool) -> list[dict[str, Any]]:
     issues: list[dict[str, Any]] = []
     edge_count: dict[tuple[int, int], int] = {}
+    weld = weld_map(mesh)
     for face in mesh.faces:
         for i, a in enumerate(face):
-            b = face[(i + 1) % len(face)]
+            a, b = weld[a], weld[face[(i + 1) % len(face)]]
+            if a == b:
+                continue
             key = (a, b) if a < b else (b, a)
             edge_count[key] = edge_count.get(key, 0) + 1
     boundary = [e for e, n in edge_count.items() if n == 1]
@@ -61,12 +82,7 @@ def check_mesh(mesh: Mesh, obj_id: str, *, has_collision: bool, pivot_is_base: b
             degenerate.append(fi)
     if degenerate:
         issues.append(_issue("degenerate", f"{len(degenerate)} zero-area faces", obj_id, severity="error", elements={"faces": degenerate[:40]}, fix="degenerate"))
-    dup = 0
-    for i, v in enumerate(mesh.verts):
-        for w in mesh.verts[i + 1:i + 8]:
-            if vlen(vsub(v, w)) < 0.05:
-                dup += 1
-                break
+    dup = sum(1 for i, j in enumerate(weld) if i != j)
     if dup:
         issues.append(_issue("duplicates", f"{dup} vertices within 0.05 cm of another", obj_id, fix="duplicates"))
     used = {i for face in mesh.faces for i in face}
@@ -95,8 +111,9 @@ def check_mesh(mesh: Mesh, obj_id: str, *, has_collision: bool, pivot_is_base: b
 
 def fix_mesh(mesh: Mesh, kinds: set[str]) -> dict[str, int]:
     done: dict[str, int] = {}
-    if "duplicates" in kinds or "all" in kinds:
-        done["duplicates"] = merge_by_distance(mesh, 0.05)
+    # Welding first: normals and n-gon fixes need one connected surface, not seam-split islands.
+    if {"duplicates", "normals", "all"} & set(kinds):
+        done["duplicates"] = merge_by_distance(mesh, WELD)
     if "degenerate" in kinds or "all" in kinds:
         drop = []
         for fi, face in enumerate(mesh.faces):

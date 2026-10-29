@@ -279,6 +279,17 @@ def test_kernel_and_scene() -> None:
     after = check_mesh(bad, "x", has_collision=True, pivot_is_base=True)
     assert not any(i["id"] == "degenerate" for i in after)
 
+    split = Mesh()  # a cube cut along every UV seam: 6 faces, 24 verts, no shared index
+    for face in box(100, 100, 100).faces:
+        split.add_face([split.add_vert(box(100, 100, 100).verts[i]) for i in face])
+    kinds = lambda m: {i["id"] for i in check_mesh(m, "x", has_collision=True, pivot_is_base=True)}
+    assert not kinds(split) & {"boundary", "nonmanifold"} and "duplicates" in kinds(split)
+    assert fix_mesh(split, {"normals"})["duplicates"] == 16 and len(split.verts) == 8
+    assert not kinds(split) & {"boundary", "nonmanifold", "duplicates"}
+    lid = box(100, 100, 100)
+    lid.faces.pop(0), lid.face_mat.pop(0), lid.uvs.pop(0)
+    assert "boundary" in kinds(lid)  # a really open mesh still reports its edges
+
 
 def _glb_json(path: Path) -> tuple[dict, bytes]:
     blob = path.read_bytes()
