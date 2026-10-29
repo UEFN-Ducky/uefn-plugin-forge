@@ -312,6 +312,78 @@ def relink_scene(old: Path, new: Path, name: str) -> None:
             _write_json(path, idx)
 
 
+# ---- linked library parts: stored once in the project library, never in the scene ----------------
+# A linked part's prototype is {lib: <part id>, mesh: ...} and its library is the scene's own project. The mesh lives in
+# memory only: strip_lib() drops it before a scene or an undo snapshot is written, resolve_libs() fills it back.
+# Prototypes whose library part is gone keep their embedded mesh when saved, so nothing is ever lost.
+
+_PARTS: dict[tuple[str, str], tuple[tuple[int, int], dict]] = {}
+
+
+def _part_file(project: str, iid: str) -> Path | None:
+    folder = projects_root() / project / "library" / "parts" / iid
+    for name in ("mesh.fmesh", "mesh.json"):
+        if (folder / name).is_file():
+            return folder / name
+    return None
+
+
+def project_of(folder) -> str:
+    """projects/<P>/scenes/<Scene> -> P; '' for a scene outside a project (flat override folders)."""
+    folder = Path(folder)
+    return folder.parent.parent.name if folder.parent.name == "scenes" else ""
+
+
+def strip_lib(data: dict, folder) -> dict:
+    """`data` without the meshes of linked prototypes whose library part exists (a shallow copy; data is untouched)."""
+    protos = data.get("prototypes") or []
+    if not any(p.get("lib") and p.get("mesh") for p in protos):
+        return data
+    project = project_of(folder)
+    return {**data, "prototypes": [
+        {**p, "mesh": None} if project and p.get("lib") and p.get("mesh") and _part_file(project, p["lib"]) else p
+        for p in protos]}
+
+
+def _part_mesh(project: str, iid: str) -> dict:
+    path = _part_file(project, iid)
+    if path is None:
+        raise FileNotFoundError("%s/%s" % (project, iid))
+    st = path.stat()
+    stamp = (st.st_mtime_ns, st.st_size)
+    hit = _PARTS.get((project, iid))
+    if hit is None or hit[0] != stamp:
+        from . import storage
+
+        mesh = storage.decode(path.read_bytes()) if path.suffix == ".fmesh" else json.loads(path.read_text(encoding="utf-8"))
+        hit = _PARTS[(project, iid)] = (stamp, mesh)
+    return hit[1]
+
+
+def resolve_libs(data: dict, folder) -> list[str]:
+    """Fill the mesh of every linked prototype from its library; returns warnings for parts that went missing.
+    One decoded copy per library part is shared by every scene; only face_mat is remapped to this scene's materials."""
+    warnings: list[str] = []
+    project = project_of(folder)
+    for proto in data.get("prototypes") or []:
+        if not project or not proto.get("lib") or proto.get("mesh"):
+            continue
+        iid = proto["lib"]
+        try:
+            base = _part_mesh(project, iid)
+        except (OSError, ValueError, KeyError):
+            from .kernel.mesh import build_primitive
+
+            proto["mesh"] = build_primitive("box", {}, mat="default").to_dict()
+            warnings.append("Library part %r is missing from project %r: showing a placeholder box. "
+                            "Restore it with forge_library(action=\"add\", ...) or make the node local" % (iid, project))
+            continue
+        ids = {m["lib"].split(":", 1)[1]: m["id"] for m in data.get("materials") or []
+               if str(m.get("lib") or "").startswith(iid + ":")}
+        proto["mesh"] = {**base, "face_mat": [ids.get(m, m) for m in base.get("face_mat") or []]}
+    return warnings
+
+
 def _safe_scene(name: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in (name or "").strip())[:64] or _bad()
 

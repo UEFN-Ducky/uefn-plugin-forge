@@ -254,6 +254,7 @@ class Scene:
         self._payload_versions = {}
         self._geom_hold = {}
         self._stamp_transforms = True  # transforms.json may exist from an earlier session until the first save
+        self.warnings: list[str] = []  # e.g. a linked library part that went missing
 
     @property
     def name(self) -> str:
@@ -263,7 +264,7 @@ class Scene:
         if self._stamp is None:
             self.folder.mkdir(parents=True, exist_ok=True)
         tmp = self.folder / "scene.json.tmp"
-        tmp.write_text(json.dumps(storage.pack(self.data, self.folder)), encoding="utf-8")
+        tmp.write_text(json.dumps(storage.pack(projects.strip_lib(self.data, self.folder), self.folder)), encoding="utf-8")
         tmp.replace(self.folder / "scene.json")
         self._stamp = (self.folder / "scene.json").stat().st_mtime_ns
         if self._transforms or self._stamp_transforms:
@@ -307,9 +308,10 @@ class Scene:
 
     def _snapshot(self) -> dict[str, Any]:
         # Authored geometry is immutable: mesh operations obtain their own Mesh copy.
+        data = projects.strip_lib(self.data, self.folder)  # linked library meshes stay out of undo snapshots
         memo = {id(item["mesh"]): item["mesh"] for collection in ("prototypes", "nodes")
-                for item in self.data.get(collection, []) if item.get("mesh")}
-        return copy.deepcopy(self.data, memo)
+                for item in data.get(collection, []) if item.get("mesh")}
+        return copy.deepcopy(data, memo)
 
     def _note(self, actor: str, op: str, summary: str, ids: list, kind: str) -> None:
         self.data["rev"] = int(self.data.get("rev") or 0) + 1
@@ -403,7 +405,10 @@ class Scene:
         # Geometry edits recompute normals; untouched shared imports keep theirs.
         mesh.attrs.pop("nrm:source", None)
         proto = self.proto(node)
-        if proto and self.user_count(proto["id"]) <= 1:
+        if proto and proto.get("lib"):  # editing a linked part detaches it: the library copy is never rewritten here
+            node.pop("lib", None)
+            node["prototype"] = self.adopt_mesh(mesh)
+        elif proto and self.user_count(proto["id"]) <= 1:
             proto["mesh"] = mesh.to_dict()
             proto["kind"] = "mesh"
             proto["params"] = {}
@@ -605,6 +610,7 @@ class Scene:
             "nodes": nodes,
             "objects": objects,
             "activity": self.data.get("activity") or [],
+            **({"warnings": self.warnings} if self.warnings else {}),
         }
 
     def _views(self, prim_of: dict, tris_of: dict, bounds_of: dict) -> tuple[list, list]:
@@ -781,7 +787,10 @@ def load(name: str) -> Scene:
         return hit
     if not path.is_file():
         raise ValueError(f"No Forge scene named {name!r}")
-    scene = Scene(storage.unpack(json.loads(path.read_text(encoding="utf-8")), folder), folder)
+    data = storage.unpack(json.loads(path.read_text(encoding="utf-8")), folder)
+    warnings = projects.resolve_libs(data, folder)
+    scene = Scene(data, folder)
+    scene.warnings = warnings
     scene._stamp = path.stat().st_mtime_ns
     changes = folder / "transforms.json"
     if changes.is_file():
@@ -1529,6 +1538,7 @@ def _restore(scene: Scene, target: dict, label: str) -> None:
         scene.patch_payload_transform(node["id"])
         return _transform_result(scene, node["id"], label)
     rev, geom = scene.data.get("rev", 0), scene.data.get("geom", 0)
+    projects.resolve_libs(target, scene.folder)
     scene.data = target
     scene.data["rev"] = rev
     scene.data["geom"] = geom + 1
@@ -1537,7 +1547,7 @@ def _restore(scene: Scene, target: dict, label: str) -> None:
 
 
 def _op_undo(scene: Scene, _p: dict) -> dict[str, Any]:
-    prev = history.undo(scene._hist(), scene.data)
+    prev = history.undo(scene._hist(), projects.strip_lib(scene.data, scene.folder))
     if prev is None:
         return {"summary": "Nothing to undo", "ids": []}
     result = _restore(scene, prev, "Undo")
@@ -1546,7 +1556,7 @@ def _op_undo(scene: Scene, _p: dict) -> dict[str, Any]:
 
 
 def _op_redo(scene: Scene, _p: dict) -> dict[str, Any]:
-    nxt = history.redo(scene._hist(), scene.data)
+    nxt = history.redo(scene._hist(), projects.strip_lib(scene.data, scene.folder))
     if nxt is None:
         return {"summary": "Nothing to redo", "ids": []}
     result = _restore(scene, nxt, "Redo")
@@ -1555,7 +1565,7 @@ def _op_redo(scene: Scene, _p: dict) -> dict[str, Any]:
 
 
 def _op_revert(scene: Scene, p: dict) -> dict[str, Any]:
-    target = history.revert_to(scene._hist(), scene.data, int(p.get("rev") or 0))
+    target = history.revert_to(scene._hist(), projects.strip_lib(scene.data, scene.folder), int(p.get("rev") or 0))
     if target is None:
         return {"summary": "No snapshot at that rev", "ids": []}
     _restore(scene, target, "Revert")
@@ -2273,6 +2283,7 @@ def _op_merge(scene: Scene, p: dict, source_scene=None) -> dict[str, Any]:
     proto_map: dict[str, str] = {}
     for proto in data.get("prototypes") or []:
         proto_map[proto["id"]] = proto["id"] = _nid("p")
+        proto.pop("lib", None)  # merged copies are embedded: their materials were renumbered
         if proto.get("mesh"):
             proto["mesh"] = dict(proto["mesh"], face_mat=[mat_map.get(m, m) for m in proto["mesh"].get("face_mat") or []])
     layers = scene.data.setdefault("layers", [])

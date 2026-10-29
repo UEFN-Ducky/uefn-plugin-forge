@@ -149,6 +149,8 @@ def _attach_captures(result: dict) -> dict:
 def register_tools(api: Any) -> None:
     host = {"listener": False}
     live_view.bind(api)
+    from . import library
+    library.register(api)
 
     @api.tool(**host)
     def forge_import_mesh(path: str, name: str = "", destination: str = "", scale: float = 1.0, preview: bool = False) -> dict:

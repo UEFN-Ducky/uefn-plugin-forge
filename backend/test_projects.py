@@ -203,6 +203,80 @@ class ProjectStorage(unittest.TestCase):
         bad = panel_rpc.forge_library(action="link", id="asphalt", kind="texture", scene="Nope/X")
         self.assertFalse(bad["ok"])
 
+    def _library_part(self, kind="sphere"):
+        """Race/Src holds one object; it becomes library part 'wheel' of project Race."""
+        from backend import library
+
+        projects.new_project("Race")
+        if not (self.root / "projects" / "Race" / "scenes" / "Src").exists():
+            scene.create("Race/Src")
+        ids = scene.dispatch("Race/Src", "add", {"kind": kind})["ids"]
+        library.act("add", kind="part", id="wheel", from_scene="Race/Src", object=ids[0])
+        return library
+
+    def _link(self, library, scene_name, n=1):
+        scene.create(scene_name)
+        for _ in range(n):
+            library.act("link", kind="part", id="wheel", scene=scene_name)
+        return scene.load(scene_name)
+
+    @staticmethod
+    def _size(folder: Path) -> int:
+        """Scene bytes without the (capped) undo snapshots, which hold the node list but no meshes."""
+        return sum(f.stat().st_size for f in folder.rglob("*") if f.is_file() and "history-snapshots" not in f.parts)
+
+    def test_linked_part_not_stored_in_scene(self):
+        library = self._library_part()
+        car = self._link(library, "Race/Car", 1)
+        one = self._size(car.folder)
+        for _ in range(99):
+            library.act("link", kind="part", id="wheel", scene="Race/Car")
+        car = scene.load("Race/Car")
+        self.assertEqual(sum(1 for n in car.data["nodes"] if n.get("lib") == "wheel"), 100)
+        self.assertEqual(len([p for p in car.data["prototypes"] if p.get("lib") == "wheel"]), 1)  # instanced
+        self.assertEqual(list((car.folder / "mesh-blobs").glob("*")) if (car.folder / "mesh-blobs").is_dir() else [], [])
+        self.assertLess(self._size(car.folder) - one, 120_000)  # 99 nodes + undo index, no mesh copies
+        scene._OPEN.clear()
+        again = scene.load("Race/Car")  # resolved from the library at load
+        proto = next(p for p in again.data["prototypes"] if p.get("lib") == "wheel")
+        self.assertGreater(len(proto["mesh"]["verts"]), 8)
+        self.assertGreater(again.world_mesh(again.data["nodes"][0]).tri_count(), 8)
+        scene.dispatch("Race/Car", "undo", {})  # undo restores the linked mesh too
+        self.assertTrue(all(p["mesh"] for p in scene.load("Race/Car").data["prototypes"] if p.get("lib")))
+
+    def test_linked_part_edits_propagate(self):
+        library = self._library_part("sphere")
+        self._link(library, "Race/Car", 2)
+        box = scene.dispatch("Race/Src", "add", {"kind": "box"})["ids"][0]
+        out = library.act("add", kind="part", id="wheel", from_scene="Race/Src", object=box)
+        self.assertIn("Updated", out["summary"])
+        scene._OPEN.clear()
+        car = scene.load("Race/Car")
+        proto = next(p for p in car.data["prototypes"] if p.get("lib") == "wheel")
+        lib_mesh = projects._part_mesh("Race", "wheel")
+        self.assertEqual(proto["mesh"]["verts"], lib_mesh["verts"])
+        self.assertEqual(len(proto["mesh"]["verts"]), 8)  # the box replaced the sphere
+        self._link(library, "Race/Truck", 1)
+        scene._OPEN.clear()
+        other = scene.load("Race/Truck")  # a second scene sees the same shared copy
+        self.assertIs(next(p for p in other.data["prototypes"] if p.get("lib"))["mesh"]["verts"], lib_mesh["verts"])
+
+    def test_missing_library_part_warns(self):
+        import shutil
+
+        library = self._library_part()
+        self._link(library, "Race/Car", 1)
+        shutil.rmtree(self.root / "projects" / "Race" / "library" / "parts" / "wheel")
+        scene._OPEN.clear()
+        car = scene.load("Race/Car")
+        self.assertTrue(car.warnings and "wheel" in car.warnings[0] and "Race" in car.warnings[0], car.warnings)
+        node = next(n for n in car.data["nodes"] if n.get("lib") == "wheel")
+        self.assertEqual(car.world_mesh(node).tri_count(), 12)  # placeholder box, no crash
+        self.assertIn("warnings", car.summary())
+        car.save()  # saving a scene with a missing part keeps the placeholder instead of losing the node
+        scene._OPEN.clear()
+        self.assertEqual(len(scene.load("Race/Car").data["nodes"]), 1)
+
     def test_flat_override_still_works(self):
         with patch.dict(os.environ, {"FORGE_SCENES_DIR": str(self.root / "flat")}):
             scene.create("A")
