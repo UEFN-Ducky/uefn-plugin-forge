@@ -110,10 +110,13 @@ def retopo(ob, p):
     faces = int(p.get("faces", 4000))
     src = _snapshot(ob)
     _collapse_tiny_edges(ob)
-    with _ctx(ob):
-        r = bpy.ops.object.quadriflow_remesh(
-            target_faces=faces, use_mesh_symmetry=bool(p.get("symmetry", False)),
-            use_preserve_sharp=True, use_preserve_boundary=True)
+    try:
+        with _ctx(ob):
+            r = bpy.ops.object.quadriflow_remesh(
+                target_faces=faces, use_mesh_symmetry=bool(p.get("symmetry", False)),
+                use_preserve_sharp=True, use_preserve_boundary=True)
+    except RuntimeError:  # Oct 28 2026: a raise (not CANCELLED) left the __src snapshot in the scene
+        r = {"CANCELLED"}
     if "FINISHED" not in r:
         bpy.data.objects.remove(src, do_unlink=True)
         raise RuntimeError("quadriflow failed: mesh must be closed and manifold; run remesh first")

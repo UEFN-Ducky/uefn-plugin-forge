@@ -97,6 +97,45 @@ def test_retopo_after_remesh_with_a_tiny_edge():
     assert r["quads"] / r["faces"] >= 0.9, r
 
 
+def test_retopo_that_raises_leaves_no_snapshot():
+    # Oct 28 2026: quadriflow raised "wrong init" instead of returning CANCELLED, so the
+    # __src snapshot stayed in the scene and a demo lion doubled to 45k tris.
+    fresh()
+    ob = blob()
+    hq.run("remesh", ob, {"voxel": 0.04})
+
+    def boom(**_):
+        raise RuntimeError("Error: QuadriFlow: wrong init")
+
+    class Obj:
+        quadriflow_remesh = staticmethod(boom)
+
+        def __getattr__(self, n):
+            return getattr(bpy.ops.object, n)
+
+    class Ops:
+        object = Obj()
+
+        def __getattr__(self, n):
+            return getattr(bpy.ops, n)
+
+    class Fake:
+        ops = Ops()
+
+        def __getattr__(self, n):
+            return getattr(bpy, n)
+
+    real, engine_mesh.bpy = engine_mesh.bpy, Fake()
+    try:
+        hq.run("retopo", ob, {"faces": 2000})
+        raise AssertionError("retopo should raise when quadriflow raises")
+    except RuntimeError as exc:
+        assert "quadriflow failed" in str(exc), exc
+    finally:
+        engine_mesh.bpy = real
+    assert not [o.name for o in bpy.data.objects if o.name.endswith("__src")], "snapshot left behind"
+
+
 def test_sculpt_hd_levels():
     fresh()
     ob = sphere("s")
