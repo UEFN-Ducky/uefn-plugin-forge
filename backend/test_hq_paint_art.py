@@ -246,6 +246,17 @@ class PaintArt(unittest.TestCase):
         root, tip = lum[(tmap >= 0) & (tmap < 0.2)].mean(), lum[tmap > 0.8].mean()
         self.assertGreater(tip - root, 0.1, "root %.3f tip %.3f" % (root, tip))
 
+    def test_bake_2048_is_fast(self):
+        import time
+        name = "PaintBakeBig"
+        nid = self.shape(name, "sphere", radius=30, seg=100, rings=100)  # ~20k triangles
+        self.t["forge_hq"](name=name, op="material", params={"material": "Part0", "overrides": {"color": [0.5, 0.5, 0.5]}, "id": nid})
+        t0 = time.time()
+        res = self.t["forge_hq"](name=name, op="paint_bake", params={"ids": [nid], "presets": "mane", "size": 2048, "wait": True})
+        took = time.time() - t0
+        self.assertTrue(res.get("ok"), res)
+        self.assertLess(took, 60.0, "paint_bake 2048 took %.0f s" % took)
+
     def test_bake_bad_preset_says_the_fix(self):
         nid = self.shape("PaintBakeC", "sphere", radius=10)
         with self.assertRaisesRegex(ValueError, "Use one of: fur_warm"):

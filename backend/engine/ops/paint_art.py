@@ -67,8 +67,16 @@ def _raster(uvp, size):
     ids = np.nonzero(small)[0]
     for s in range(0, len(ids), 20000):
         _cells(idx, bary, uvp, lo, ids[s:s + 20000], _CELL, _CELL, size)
-    for t in np.nonzero(~small)[0]:
-        _cells(idx, bary, uvp, lo, np.array([t]), int(dim[t, 0]), int(dim[t, 1]), size)
+    big = np.nonzero(~small)[0]
+    if len(big):  # batch by power-of-two bbox class so thousands of mid-size triangles cost a few calls, not one each
+        cls = np.ceil(np.log2(dim[big])).astype(np.int64)
+        key = cls[:, 0] * 64 + cls[:, 1]
+        for k in np.unique(key):
+            grp = big[key == k]
+            kx, ky = int(dim[grp, 0].max()), int(dim[grp, 1].max())
+            step = max(1, 2_000_000 // (kx * ky))
+            for s in range(0, len(grp), step):
+                _cells(idx, bary, uvp, lo, grp[s:s + step], kx, ky, size)
     bary = np.clip(bary, 0.0, None)
     bary /= np.maximum(bary.sum(-1, keepdims=True), 1e-9)
     return idx, bary
@@ -182,12 +190,17 @@ def _prepare(p):
         uv = np.empty(len(me.loops) * 2, np.float32)
         me.uv_layers.active.data.foreach_get("uv", uv)
         uvp = (uv.reshape(-1, 2)[tl] * size).astype(np.float64)
+        cross = (uvp[:, 1, 0] - uvp[:, 0, 0]) * (uvp[:, 2, 1] - uvp[:, 0, 1]) - (uvp[:, 1, 1] - uvp[:, 0, 1]) * (uvp[:, 2, 0] - uvp[:, 0, 0])
+        area = 0.5 * np.abs(cross).sum()
+        if not attempt and area > size * size:  # faces stacked in UV space (a stock box maps every side to 0..1): never rasterise that
+            _unwrap(ob)  # paint needs islands of their own
+            S.unwrapped = True
+            continue
         S.idx, bary = _raster(uvp, size)
         S.occ = S.idx >= 0
-        cross = (uvp[:, 1, 0] - uvp[:, 0, 0]) * (uvp[:, 2, 1] - uvp[:, 0, 1]) - (uvp[:, 1, 1] - uvp[:, 0, 1]) * (uvp[:, 2, 0] - uvp[:, 0, 0])
-        if attempt or 0.5 * np.abs(cross).sum() <= 1.2 * S.occ.sum():
+        if attempt or area <= 1.2 * S.occ.sum():
             break
-        _unwrap(ob)  # faces share UV space (a stock box maps every side to 0..1): paint needs islands of their own
+        _unwrap(ob)  # smaller overlaps found only after rasterising
         S.unwrapped = True
     S.ys, S.xs = np.nonzero(S.occ)
     S.tid = S.idx[S.ys, S.xs]
