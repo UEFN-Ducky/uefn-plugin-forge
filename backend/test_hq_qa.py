@@ -221,5 +221,36 @@ class PrintTests(Base):
         self.assertIn("thinner", out["summary"], out)
 
 
+class PivotTests(Base):
+    def test_loose_box_warns_parts_do_not(self):
+        scene, node = self.scene("box", w=40, d=40, h=40)
+        mesh = scene._bake(node)
+        mesh.translate([0, 0, 25])
+        scene.write_mesh(node, mesh)
+        self.assertIn("pivot not at base", HQ_OPS["qa"](scene, {"id": node["id"], "tol": 100})["summary"])
+        node["sockets"] = {"Hub": {"pos": [0, 0, 0], "rot": [0, 0, 0]}}
+        out = HQ_OPS["qa"](scene, {"id": node["id"], "tol": 100, "fix": True})
+        self.assertNotIn("pivot", out["summary"], out)
+        self.assertFalse(qa._pivot_base(scene.local_mesh(node)))  # fix leaves the mount pivot alone
+
+    def test_repeated_warning_is_capped(self):
+        issues = [("warn", "pivot", "P%d pivot not at base" % i, "origin=base") for i in range(57)]
+        self.assertEqual(qa.score(issues)[0], 100 - 3 * qa.WARN_CAP)
+        self.assertEqual(qa.score(issues + [("warn", "name", "x.001", "fix")])[0], 100 - 3 * qa.WARN_CAP - 3)
+
+
+@unittest.skipUnless(_READY, "Blender engine not installed; runtime.install() provisions it")
+class CarQaTests(Base):
+    def test_limo_scores_hero(self):
+        name = "HqQaLimo"
+        self.names.append(name)
+        dispatch("", "scene_new", {"name": name})
+        scene = load(name)
+        HQ_OPS["car"](scene, {"body": "limo"})
+        out = HQ_OPS["qa"](scene, {"profile": "uefn", "budget": "hero"})
+        self.assertGreaterEqual(out["score"], 85, out)
+        self.short(out)
+
+
 if __name__ == "__main__":
     unittest.main()

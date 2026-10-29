@@ -108,6 +108,11 @@ def _pivot_base(mesh):
     return abs(lo[2]) < 0.5 and abs((lo[0] + hi[0]) / 2) < 1 and abs((lo[1] + hi[1]) / 2) < 1
 
 
+def _mounted(n):
+    """Parts pivot at their mount by design: sockets, car_part / weapon data, or a part inside an assembly."""
+    return bool(n.get("sockets") or n.get("car_part") or (n.get("hq") or {}).get("weapon") or n.get("parent"))
+
+
 def audit(scene, nodes, profile="uefn", budget=None, eps=0.1, tol=0.2):
     """[(severity, kind, text, fix)] for these objects, plus total tris."""
     cap_tris, cap_verts, limit, ngon_err, closed = PROFILES[profile]
@@ -123,7 +128,7 @@ def audit(scene, nodes, profile="uefn", budget=None, eps=0.1, tol=0.2):
         t = mesh.tri_count()
         tris += t
         local = scene.local_mesh(n)
-        for issue in check_mesh(mesh, n["id"], has_collision=True, pivot_is_base=_pivot_base(local)):
+        for issue in check_mesh(mesh, n["id"], has_collision=True, pivot_is_base=_mounted(n) or _pivot_base(local)):
             kind, sev = issue["id"], issue["severity"]
             if kind == "budget" or (kind == "pivot" and not game) or (kind == "uv" and profile == "print"):
                 continue
@@ -177,9 +182,16 @@ def audit(scene, nodes, profile="uefn", budget=None, eps=0.1, tol=0.2):
     return out, tris
 
 
+WARN_CAP = 3  # warnings of one kind past this cost nothing more, so 50 copies of one nit cannot floor the score
+
+
 def score(issues):
     errors = sum(1 for s, *_ in issues if s == "error")
-    return max(0, 100 - 10 * errors - 3 * (len(issues) - errors)), errors
+    kinds = {}
+    for s, kind, *_ in issues:
+        if s != "error":
+            kinds[kind] = kinds.get(kind, 0) + 1
+    return max(0, 100 - 10 * errors - 3 * sum(min(c, WARN_CAP) for c in kinds.values())), errors
 
 
 def report(label, issues, extra=None):
@@ -209,7 +221,7 @@ def _fix(scene, nodes, issues):
             for uv in mesh.uvs:
                 uv.reverse()
             counts["normals"] = 1
-        if "pivot" in kinds and not _pivot_base(mesh):
+        if "pivot" in kinds and not _mounted(n) and not _pivot_base(mesh):
             shift = set_origin(mesh, "base")  # keep the object where it stands: move it by the shift
             t = n.setdefault("transform", {})
             s, r = t.get("scale") or [1, 1, 1], _euler(t.get("rot") or [0, 0, 0])
