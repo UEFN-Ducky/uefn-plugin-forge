@@ -155,6 +155,54 @@ class ProjectStorage(unittest.TestCase):
                                  ("tiles", "toon", ["front"]), ("tiles", "", ["front"])])
         self.assertIn("pbr or toon", str(bad.exception))
 
+    def test_scene_rename(self):
+        projects.new_project("Race")
+        a, b = scene.create("Race/Track_A"), scene.create("Race/Track_B")
+        (a.folder / "history.json").write_text("[1]")
+        lib = self.root / "projects" / "Race" / "library"
+        lib.mkdir(exist_ok=True)
+        (lib / "index.json").write_text(json.dumps({"items": {"asphalt": {"kind": "texture", "name": "Asphalt"}},
+                                                    "links": {"asphalt": {str(a.folder): {"name": "Track_A", "refs": ["m1"]}}}}))
+        out = scene.dispatch("Race/Track_A", "scene_rename", {"name": "Track_Main"})
+        self.assertEqual(out["name"], "Race/Track_Main")
+        base = self.root / "projects" / "Race" / "scenes"
+        self.assertFalse((base / "Track_A").exists())
+        self.assertEqual((base / "Track_Main" / "history.json").read_text(), "[1]")
+        self.assertEqual(scene.load("Race/Track_Main").name, "Track_Main")
+        self.assertEqual([s["name"] for s in scene.list_scenes("Race")], ["Track_B", "Track_Main"])
+        links = json.loads((lib / "index.json").read_text())["links"]["asphalt"]
+        self.assertEqual(list(links), [str(base / "Track_Main")])
+        self.assertEqual(links[str(base / "Track_Main")]["name"], "Track_Main")
+        with self.assertRaises(ValueError) as cm:
+            scene.dispatch("Race/Track_Main", "scene_rename", {"name": "Track_B"})
+        self.assertIn("already exists", str(cm.exception))
+        self.assertTrue((base / "Track_B" / "scene.json").is_file())
+        # the dock sends the new name as typed, through forge_call
+        self.assertTrue(panel_rpc.forge_call(op="scene_rename", name="Race/Track_B", params={"name": "Track_Z"})["ok"])
+
+    def test_panel_library_rpc(self):
+        projects.new_project("Race")
+        projects.set_active("Race")
+        lib = self.root / "projects" / "Race" / "library"
+        (lib / "thumbs").mkdir(parents=True)
+        (lib / "thumbs" / "asphalt.png").write_bytes(b"\x89PNG-fake")
+        (lib / "index.json").write_text(json.dumps({"items": {
+            "asphalt": {"kind": "texture", "name": "Asphalt"}, "rig_a": {"kind": "rig", "name": "Biped"},
+            "red": {"kind": "material", "name": "Red paint"}}, "links": {}}))
+        out = panel_rpc.forge_library(action="list", kind="Texture", q="asph")
+        self.assertTrue(out["ok"])
+        self.assertEqual([(i["id"], i["name"], i["kind"]) for i in out["items"]], [("asphalt", "Asphalt", "texture")])
+        self.assertTrue(out["items"][0]["thumb"].startswith("data:image/png;base64,"))
+        everything = panel_rpc.forge_library(action="list")["items"]
+        self.assertEqual({i["id"] for i in everything}, {"asphalt", "rig_a", "red"})
+        self.assertEqual(next(i for i in everything if i["id"] == "rig_a")["thumb"], "")  # rigs have none
+        with patch("backend.library.act", return_value={"summary": "Linked"}) as act:
+            res = panel_rpc.forge_library(action="link", id="asphalt", kind="texture", scene="Race/Track_A")
+        self.assertEqual(res, {"ok": True, "summary": "Linked"})
+        self.assertEqual(act.call_args.kwargs["scene"], "Race/Track_A")
+        bad = panel_rpc.forge_library(action="link", id="asphalt", kind="texture", scene="Nope/X")
+        self.assertFalse(bad["ok"])
+
     def test_flat_override_still_works(self):
         with patch.dict(os.environ, {"FORGE_SCENES_DIR": str(self.root / "flat")}):
             scene.create("A")

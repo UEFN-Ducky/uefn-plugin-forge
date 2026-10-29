@@ -253,6 +253,7 @@ def move_scene(scene: str, to_project: str) -> str:
     if dst.exists():
         raise ValueError("Project %r already has a scene %r. Rename one first" % (dst_proj, short))
     shutil.move(str(src), str(dst))
+    relink_scene(src, dst, short)
     _forget_all()
     return "%s/%s" % (dst_proj, short)
 
@@ -290,6 +291,25 @@ def act(action: str = "list", name: str = "", new_name: str = "", scene: str = "
     if not scene or not (name or new_name):
         raise ValueError("move_scene needs scene (\"Project/Scene\" or a plain name) and name = the destination project")
     return {"scene": move_scene(scene, name or new_name)}
+
+
+def relink_scene(old: Path, new: Path, name: str) -> None:
+    """A scene folder moved or was renamed: every project library's `used_by` record follows it."""
+    for folder in projects_root().iterdir() if projects_root().is_dir() else []:
+        path = folder / "library" / "index.json"
+        if not path.is_file():
+            continue
+        try:
+            idx = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        hit = False
+        for rec in (idx.get("links") or {}).values():
+            if str(old) in rec:
+                rec[str(new)] = {**rec.pop(str(old)), "name": name}
+                hit = True
+        if hit:
+            _write_json(path, idx)
 
 
 def _safe_scene(name: str) -> str:

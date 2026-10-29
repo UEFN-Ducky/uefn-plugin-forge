@@ -43,6 +43,37 @@ def forge_projects(action: str = "list", name: str = "", new_name: str = "", sce
         return {"ok": False, "error": str(exc)}
 
 
+def forge_library(action: str = "list", kind: str = "", id: str = "", q: str = "", scene: str = "", project: str = "",
+                  **kwargs: Any) -> dict:
+    """Library panel: list -> {items:[{id,name,kind,thumb}]} (thumb is a data URL, '' when none); the rest is library.act."""
+    from . import library
+    try:
+        if (action or "list").lower() != "list":
+            args = {k: v for k, v in kwargs.items() if k in ("name", "from_scene", "object", "path", "pos", "force")}
+            return {"ok": True, **library.act(action, kind, id, scene=scene, project=project, **args)}
+        kind = (kind or "").lower()
+        lib = library._lib(library._project(scene, project=project))
+        idx = library._index(lib)
+        needle = (q or "").strip().lower()
+        items, made = [], 0
+        for iid, item in idx["items"].items():
+            name = item.get("name") or iid
+            if (kind and item["kind"] != kind) or (needle and needle not in iid.lower() and needle not in str(name).lower()):
+                continue
+            thumb = lib / "thumbs" / (iid + ".png")
+            if not thumb.is_file() and item["kind"] != "rig" and made < 6:  # a few per call: the panel asks again
+                made += 1
+                try:
+                    library.act("thumb", id=iid, scene=scene, project=project)
+                except Exception:
+                    pass
+            data = "data:image/png;base64," + base64.b64encode(thumb.read_bytes()).decode("ascii") if thumb.is_file() else ""
+            items.append({"id": iid, "name": name, "kind": item["kind"], "thumb": data})
+        return {"ok": True, "items": items[:60], "total": len(items)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def forge_submit(method: str = "forge_call", params: dict | None = None, **_kwargs) -> dict:
     from .jobs import submit
     methods = {"forge_call": forge_call, "forge_texture": forge_texture}
@@ -94,6 +125,7 @@ def register_panel_rpcs(api: Any) -> None:
     api.register_panel_rpc("forge_send", forge_send_bound)
     api.register_panel_rpc("forge_texture", forge_texture)
     api.register_panel_rpc("forge_projects", forge_projects)
+    api.register_panel_rpc("forge_library", forge_library)
     api.register_panel_rpc("forge_live", live_view.live_poll)
     api.register_panel_rpc("forge_view_put", live_view.view_put)
     api.register_panel_rpc("forge_frame_put", live_view.frame_put)

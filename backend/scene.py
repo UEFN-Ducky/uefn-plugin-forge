@@ -810,6 +810,28 @@ def list_scenes(project: str | None = None) -> list[dict[str, Any]]:
     return projects.list_scenes(project)
 
 
+def _rename_scene(name: str, p: dict) -> dict[str, Any]:
+    """Rename a scene inside its project: the folder moves with its history, library refs follow."""
+    sc = load(name)
+    new = _safe(str(p.get("new_name") or p.get("name") or "").rpartition("/")[2])
+    old = sc.folder
+    full = (name.rpartition("/")[0] + "/" + new) if "/" in name else new
+    if new == old.name:
+        return {"summary": f"Scene is already named {new}", "name": full, "ids": []}
+    dest = old.with_name(new)
+    if dest.exists() and not os.path.samefile(dest, old):  # samefile: a case-only rename on Windows
+        raise ValueError(f"Scene {new!r} already exists in this project. Pick another new_name")
+    sc.save()
+    _OPEN.pop(_key(old), None)
+    old.rename(dest)
+    sc.folder = dest
+    sc.data["name"] = new
+    sc.save()
+    _OPEN[_key(dest)] = sc
+    projects.relink_scene(old, dest, new)
+    return {"summary": f"Renamed {old.name} to {new}", "name": full, "ids": []}
+
+
 def _no_such(kind: str, name: Any, options) -> ValueError:
     """'No bone 'hand_left'. Did you mean 'hand_l'? Bones: ...' with at most 8 options."""
     options = list(dict.fromkeys(str(o) for o in options if o))
@@ -845,6 +867,8 @@ def dispatch(name: str, op: str, params: dict | None = None, actor: str = "agent
             short = str(params.get("name") or "Scene")
             summary = create(f"{project}/{short}" if project else short).summary()
             return {**summary, "name": f"{projects.require(project)}/{summary['name']}"} if project else summary
+        if op == "scene_rename":
+            return _rename_scene(name, params)
         scene = load(name)
         fn = _OPS.get(op)
         if fn is None:
