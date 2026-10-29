@@ -162,8 +162,7 @@ def _srgb(c):
 
 
 @op("head", "head(base=makehuman|procedural, sex=male|female|neutral, age=child|adult|elder, build=slim|average|heavy, shape={slider:-1..1}, height_cm=24, "
-            "tone=0.3, eye_color, hair=short|buzz|long|none, hair_color=brown, name=Head) realistic quad head + neck: eye/mouth loops, "
-            "eyeballs with cornea, brow+lash cards, nostrils, teeth, tongue, mouth bag, ears, SSS skin, scalp hair cards; groups eyes lips brows jaw nose cheeks")
+            "tone=0.3, eye_color, hair=short|buzz|long|none, hair_color=brown, name=Head) realistic head+neck, eyes, teeth, brows, SSS skin, hair; skill forge/realistic_head")
 def head(scene, p):
     q = params({k: v for k, v in p.items() if k not in ("id", "wait")})
     result, changed = engine(scene, "head", [], q)

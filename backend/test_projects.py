@@ -207,7 +207,7 @@ class ProjectStorage(unittest.TestCase):
                 t["forge_render"](name="Toony", style="neon")
         self.assertEqual(calls, [("png", "toon", ["front"]), ("png", "", ["front"]),
                                  ("tiles", "toon", ["front"]), ("tiles", "", ["front"])])
-        self.assertIn("pbr or toon", str(bad.exception))
+        self.assertIn("Use pbr, toon", str(bad.exception))
 
     def test_scene_rename(self):
         projects.new_project("Race")

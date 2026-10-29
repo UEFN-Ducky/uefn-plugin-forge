@@ -191,6 +191,9 @@ class DocCalls(unittest.TestCase):
         calls = [json.loads(b) for b in re.findall(r"```json\n(.*?)```", doc.read_text(encoding="utf-8"), re.S)]
         self.assertGreaterEqual(len(calls), 1, "the doc shows the call sequence")
         for call in calls:
+            if "steps" not in call:  # a single-op example: {"op": ..., "params": ...}
+                self.assertIn(call.get("op"), hqmod.HQ_OPS, call)
+                continue
             self.assertTrue(call["name"] and call["steps"])
             for i, step in enumerate(call["steps"]):
                 self.assertIn(step["tool"], _BATCH, step)
