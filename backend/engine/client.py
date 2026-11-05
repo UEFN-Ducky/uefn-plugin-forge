@@ -13,6 +13,8 @@ from . import runtime
 # Plugin root/backend/engine, also in the compiled build (its modules report <root>/uefn_plugin_forge/...).
 _WORKER = Path(__file__).resolve().parents[2] / "backend" / "engine" / "worker.py"
 _START_S = 120
+_IDLE_S = 600  # an unused worker (~700 MB) exits after 10 minutes; the next call starts it again
+_ROLE_ENV = "UEFN_DUCKY_PROCESS_ROLE"
 
 
 class EngineError(ValueError):
@@ -46,6 +48,10 @@ class Worker:
         self._lines = None
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
+        self.clock = time.monotonic
+        self.idle_s = _IDLE_S
+        self.last_used = 0.0
+        self._watching = False
 
     def alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -103,8 +109,10 @@ class Worker:
     def call(self, op, params=None, timeout=300.0, cancel=None):
         cancel = cancel or _job_cancelled
         with self._lock:
+            self.last_used = self.clock()
             if not self.alive():
                 self._start()
+                self._watch()
             rid = next(self._ids)
             try:
                 self.proc.stdin.write((json.dumps({"id": rid, "op": op, "params": params or {}}) + "\n").encode("utf-8"))
@@ -117,9 +125,37 @@ class Worker:
                 msg = self._next(deadline, cancel, op)
                 if msg.get("id") == rid:
                     break
+            self.last_used = self.clock()
         if not msg.get("ok"):
             raise EngineError(msg.get("error") or op + " failed")
         return msg.get("result")
+
+    def stop_if_idle(self):
+        """Stop the worker when no call ran for idle_s; a call in progress holds the lock, so it is never idle."""
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
+            if not self.alive() or self.clock() - self.last_used < self.idle_s:
+                return False
+            self.stop()
+            return True
+        finally:
+            self._lock.release()
+
+    def _watch(self):
+        if self._watching:
+            return
+        self._watching = True
+        threading.Thread(target=self._idle_loop, daemon=True, name="forge-engine-idle").start()
+
+    def _idle_loop(self):
+        try:
+            while self.alive():
+                time.sleep(min(30.0, max(1.0, self.idle_s - (self.clock() - self.last_used))))
+                if self.stop_if_idle():
+                    return
+        finally:
+            self._watching = False
 
     def stop(self):
         proc, self.proc = self.proc, None
@@ -140,7 +176,10 @@ def call(op, params=None, timeout=300.0, cancel=None):
 
 
 def warm():
-    """Start the worker in the background when the engine is ready; a no-op otherwise."""
+    """Start the worker in the background when the engine is ready, in the Ducky app process only.
+    Agent hosts and tool servers never warm: their first call starts the worker (call() does)."""
+    if os.environ.get(_ROLE_ENV, "") != "app":
+        return
     if runtime.engine_status()["state"] == "ready" and not _worker.alive():
         threading.Thread(target=lambda: _safe_ping(), daemon=True, name="forge-engine-warm").start()
 

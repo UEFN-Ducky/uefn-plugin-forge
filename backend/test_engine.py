@@ -66,6 +66,77 @@ class HelpTests(unittest.TestCase):
             hq.help_text(next(iter(hq.HQ_OPS), "x") + "z")
 
 
+class _FakeProc:
+    def __init__(self):
+        self.killed = False
+
+    def poll(self):
+        return 0 if self.killed else None
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self):
+        return 0
+
+    class stdin:
+        @staticmethod
+        def close():
+            pass
+
+
+class WarmLifecycleTests(unittest.TestCase):
+    """No bpy worker at plugin load, none outside the app process, and an idle one stops itself."""
+
+    def test_register_starts_no_worker(self):
+        from . import panel_rpc
+
+        class Api:
+            listener = None
+
+            def register_panel_rpc(self, name, fn):
+                pass
+
+        with patch.dict(os.environ, {"UEFN_DUCKY_PROCESS_ROLE": "app"}), \
+                patch.object(runtime, "engine_status", return_value={"state": "ready"}), \
+                patch("subprocess.Popen") as popen, patch.object(threading, "Thread") as thread:
+            panel_rpc.register_panel_rpcs(Api())
+        popen.assert_not_called()
+        thread.assert_not_called()
+
+    def test_warm_only_in_app_role(self):
+        for role, starts in (("tool_server", False), ("agent_host", False), ("", False), ("app", True)):
+            with patch.dict(os.environ, {"UEFN_DUCKY_PROCESS_ROLE": role}), \
+                    patch.object(runtime, "engine_status", return_value={"state": "ready"}), \
+                    patch.object(client._worker, "alive", return_value=False), \
+                    patch.object(client.threading, "Thread") as thread:
+                client.warm()
+            self.assertEqual(thread.called, starts, role)
+
+    def test_idle_worker_stops_after_timeout(self):
+        worker = client.Worker()
+        now = [1000.0]
+        worker.clock = lambda: now[0]
+        proc = worker.proc = _FakeProc()
+        worker.last_used = now[0]
+        now[0] += client._IDLE_S - 1
+        self.assertFalse(worker.stop_if_idle())
+        self.assertTrue(worker.alive())
+        now[0] += 2
+        self.assertTrue(worker.stop_if_idle())
+        self.assertTrue(proc.killed)
+        self.assertFalse(worker.alive())
+        self.assertEqual(client._IDLE_S, 600)
+
+    def test_busy_worker_is_never_idle(self):
+        worker = client.Worker()
+        worker.clock = lambda: 10_000.0
+        worker.proc = _FakeProc()
+        with worker._lock:  # a call in progress
+            self.assertFalse(worker.stop_if_idle())
+        self.assertTrue(worker.alive())
+
+
 _READY = runtime.engine_status()["state"] == "ready"
 
 
