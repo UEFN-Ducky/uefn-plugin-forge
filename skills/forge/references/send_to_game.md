@@ -10,6 +10,8 @@ metadata:
 
 `forge_send_to_uefn(name, mode="each", place=false, location=None)` needs UEFN open with an island project. It runs many editor calls in order, so don't run other editor tools in the same turn. It returns every asset path, validator output, and, with `place`, what it spawned.
 
+A big send that is not done in about 280 s answers `{"state": "still_running", "job": "...", "sent": 12, "of": 40}` and keeps going. Call `forge_send_to_uefn(job="...")` for the result. Never send the scene again while a job is running: that starts the same imports twice.
+
 ## Modes (static meshes)
 
 | mode | One SM_ per | Use for |

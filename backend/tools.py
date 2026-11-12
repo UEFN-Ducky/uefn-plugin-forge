@@ -7,7 +7,7 @@ from typing import Any
 import json
 import math
 
-from . import live_view
+from . import live_view, send_job
 from .hq import compact
 from .scene import dispatch, load as load_scene
 from .uefn import export_glbs, export_skinned, send_to_uefn
@@ -613,10 +613,17 @@ def register_tools(api: Any) -> None:
         return result
 
     @api.tool(listener=True)
-    def forge_send_to_uefn(name: str = "", mode: str = "each", folder: str = "", collision: str = "simple", place: bool = False, location: list | None = None, verbose: bool = False) -> dict:
+    def forge_send_to_uefn(name: str = "", mode: str = "each", folder: str = "", collision: str = "simple", place: bool = False, location: list | None = None, verbose: bool = False,
+                           job: str = "") -> dict:
         """Import into UEFN: SM_, SK_ + AS_, MI_; place=true puts them in the level. See forge/send_to_game."""
+        if job:
+            return send_job.answer(job)
         name = _scene_name(name)
         warnings = _rig_for_send(name)
-        result = send_to_uefn(name, api.listener, mode=mode, folder=folder, collision=collision, place=place, location=location,
-                              verbose=verbose)
-        return {**result, "warnings": [*(result.get("warnings") or []), *warnings]} if warnings else result
+
+        def run(progress: dict) -> dict:
+            result = send_to_uefn(name, api.listener, mode=mode, folder=folder, collision=collision, place=place, location=location,
+                                  verbose=verbose, progress=progress)
+            return {**result, "warnings": [*(result.get("warnings") or []), *warnings]} if warnings else result
+
+        return send_job.answer(send_job.start(run))

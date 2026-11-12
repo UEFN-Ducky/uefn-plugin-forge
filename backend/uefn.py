@@ -349,7 +349,9 @@ def send_to_uefn(
     nanite: bool = False,
     lods: int = 0,
     verbose: bool = True,
+    progress: dict | None = None,
 ) -> dict[str, Any]:
+    """``progress`` (optional) is kept up to date as it goes: "of" meshes to send, "sent" so far."""
     scene = load(scene_name)
     info = _call(listener, "get_project_info", {})
     root = str(info.get("content_root") or "").rstrip("/")
@@ -367,6 +369,8 @@ def send_to_uefn(
     landed = []
     tex_cache: dict[str, str] = {}
     masters = {"base": master_path}
+    if progress is not None:
+        progress["of"] = len(skinned) + len(items)
 
     for item in skinned:
         got = _call(listener, "forge_import_skeletal", {
@@ -385,6 +389,8 @@ def send_to_uefn(
             "materials": mi_paths,
             "valid": _call(listener, "validate_uefn_asset", {"asset_path": mesh_path}),
         })
+        if progress is not None:
+            progress["sent"] = len(landed)
 
     for item in items:
         imported = _call(listener, "import_asset", {
@@ -421,6 +427,8 @@ def send_to_uefn(
             "collision_parts": len(item["collision"]),
             "placements": item["placements"],
         })
+        if progress is not None:
+            progress["sent"] = len(landed)
     spots = sum(len(a.get("placements") or [None]) for a in landed)
     out = {"folder": dest, "master": master_path, "assets": landed, "count": len(landed), "placements": spots,
            "summary": "sent %d mesh%s (%d placement%s)" % (len(landed), "" if len(landed) == 1 else "es", spots, "" if spots == 1 else "s")}
