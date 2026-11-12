@@ -259,13 +259,25 @@ def test_kernel_and_scene() -> None:
     assert len(packed["instances"]) == 20000
     assert packed["prototypes"][0]["tris"] == 12
 
+    # The 0.3 s budget is the soft renderer's. Earlier tests in a full run leave the Eevee
+    # worker warm, and render_png would then time a Blender round-trip instead.
     took = float("inf")
-    for _ in range(3):  # best of 3, same 0.3 s budget
-        t1 = time.perf_counter()
-        pngs = render_png(mesh, root / "caps" / "crate.png", ["three"])
-        took = min(took, time.perf_counter() - t1)
-        if took < 0.3:
-            break
+    soft_was = os.environ.get("FORGE_SOFT_RENDER")
+    os.environ["FORGE_SOFT_RENDER"] = "1"
+    try:
+        for _ in range(3):  # best of 3, same 0.3 s budget
+            t1 = time.perf_counter()
+            pngs = render_png(mesh, root / "caps" / "crate.png", ["three"])
+            took = min(took, time.perf_counter() - t1)
+            if took < 0.3:
+                break
+    finally:
+        if soft_was is None:
+            os.environ.pop("FORGE_SOFT_RENDER", None)
+        else:
+            os.environ["FORGE_SOFT_RENDER"] = soft_was
+    from backend import render as _render
+    assert _render.last_renderer == "fallback renderer", _render.last_renderer
     assert took < 0.3, f"crate render over 0.3 s: {took:.2f} s"
     assert Path(pngs[0]).read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     # A lit, textured front face: red on the left of its texture, blue on the right.
