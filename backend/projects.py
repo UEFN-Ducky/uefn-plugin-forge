@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,8 @@ def _base() -> Path:
     env = os.environ.get("FORGE_HOME")
     if env:
         return Path(env)
+    if sys.platform.startswith("linux"):  # the Linux app's data folder (XDG)
+        return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "UEFN-Ducky" / "forge"
     return Path(os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")) / "UEFN-Ducky" / "forge"
 
 

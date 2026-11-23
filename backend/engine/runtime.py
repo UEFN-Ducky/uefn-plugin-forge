@@ -2,7 +2,11 @@
 import hashlib
 import json
 import os
+import platform
+import shutil
 import subprocess
+import sys
+import tarfile
 import threading
 import time
 import urllib.error
@@ -23,6 +27,21 @@ _FILES = {
         "https://files.pythonhosted.org/packages/95/82/c0403458ffdb3fd8119e643819cc942f7e1b250c3265ba57d3b9d0eb3d8a/bpy-5.2.3-cp313-cp313-win_amd64.whl",
         "81c6aed7a0f2f6e755a51b507687e5b719b15dfea818859b59af351fac8cce96", 339_609_561),
 }
+_PY_ARCHIVE, _BPY_WHEEL = "python.zip", "bpy-5.2.3-cp313-cp313-win_amd64.whl"
+IS_LINUX = sys.platform.startswith("linux")
+if IS_LINUX:
+    # python-build-standalone CPython (the build kit's pin) + bpy's manylinux wheel.
+    # ponytail: x86_64 only, PyPI has no Linux arm64 bpy wheel; _provision says so.
+    _PY_ARCHIVE, _BPY_WHEEL = "python.tar.gz", "bpy-5.2.3-cp313-cp313-manylinux_2_28_x86_64.whl"
+    _FILES = {
+        _PY_ARCHIVE: ("https://github.com/astral-sh/python-build-standalone/releases/download/20261110/"
+                      "cpython-3.13.18+20261110-x86_64-unknown-linux-gnu-install_only.tar.gz",
+                      "50c774f6674740739f791c05a9177ed03e2fe02abebda9bca3512eb7309b37cc", 33_000_000),
+        "pip-26.2.2-py3-none-any.whl": _FILES["pip-26.2.2-py3-none-any.whl"],
+        _BPY_WHEEL: (
+            "https://files.pythonhosted.org/packages/66/e7/810fe7b89d36b98e28a0774b38bf227e926e0c8e01f5bfc6933986f2c5bf/bpy-5.2.3-cp313-cp313-manylinux_2_28_x86_64.whl",
+            "8ef4a335930d647233c661ae21be1abf81207af33e1440fc5a4fc2f2f2d44db7", 402_843_256),
+    }
 _STALE_LOCK_S = 3600
 _state = {"state": "", "version": VERSION, "progress": 0}
 _lock = threading.Lock()
@@ -34,11 +53,15 @@ def root():
     configured = os.environ.get("FORGE_ENGINE_DIR")
     if configured:
         return Path(configured)
+    if IS_LINUX:  # the Linux app's data folder (XDG)
+        return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "UEFN-Ducky" / "forge-engine"
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "UEFN-Ducky" / "forge-engine"
 
 
 def python():
+    if IS_LINUX and not os.environ.get("FORGE_ENGINE_PYTHON"):
+        return root() / "py" / "bin" / "python3"
     return Path(os.environ.get("FORGE_ENGINE_PYTHON") or root() / "py" / "python.exe")
 
 
@@ -172,6 +195,8 @@ def _run(command, stage):
 
 
 def _provision():
+    if IS_LINUX and platform.machine().lower() not in ("x86_64", "amd64"):
+        raise ValueError("The Forge engine needs an x86_64 PC on Linux: Blender's bpy has no Linux arm64 build.")
     base = root()
     downloads = base / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
@@ -188,16 +213,26 @@ def _provision():
         paths[name] = download(url, sha, downloads / name, on_bytes)
     py_dir = base / "py"
     _set(stage="Unpacking Python", progress=90)
-    with zipfile.ZipFile(paths["python.zip"]) as archive:
-        archive.extractall(py_dir)
+    if IS_LINUX:
+        shutil.rmtree(py_dir, ignore_errors=True)
+        shutil.rmtree(base / "python", ignore_errors=True)
+        with tarfile.open(paths[_PY_ARCHIVE]) as archive:
+            archive.extractall(base, members=[m for m in archive if m.name.split("/", 1)[0] == "python"],
+                               filter="data")
+        (base / "python").rename(py_dir)
+    else:
+        with zipfile.ZipFile(paths[_PY_ARCHIVE]) as archive:
+            archive.extractall(py_dir)
     for pth in py_dir.glob("python*._pth"):
         text = pth.read_text(encoding="utf-8").replace("#import site", "import site")
         pth.write_text(text, encoding="utf-8")
     exe = py_dir / "python.exe"
+    if IS_LINUX:
+        exe = py_dir / "bin" / "python3"
     # pip runs straight from its wheel; the engine never needs pip afterwards.
     pip = str(paths["pip-26.2.2-py3-none-any.whl"]) + "/pip"
     _run([str(exe), pip, "install", "--no-cache-dir", "--no-warn-script-location",
-          str(paths["bpy-5.2.3-cp313-cp313-win_amd64.whl"])], "Installing Blender")
+          str(paths[_BPY_WHEEL])], "Installing Blender")
     _set(progress=98)
     blender = _run([str(exe), "-c", "import bpy; print(bpy.app.version_string)"], "Checking Blender")
     (base / "ready.json").write_text(json.dumps({"version": VERSION, "blender": blender.splitlines()[-1]}), encoding="utf-8")
