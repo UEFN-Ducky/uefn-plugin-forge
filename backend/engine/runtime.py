@@ -42,6 +42,21 @@ if IS_LINUX:
             "https://files.pythonhosted.org/packages/66/e7/810fe7b89d36b98e28a0774b38bf227e926e0c8e01f5bfc6933986f2c5bf/bpy-5.2.3-cp313-cp313-manylinux_2_28_x86_64.whl",
             "8ef4a335930d647233c661ae21be1abf81207af33e1440fc5a4fc2f2f2d44db7", 402_843_256),
     }
+IS_MAC = sys.platform == "darwin"
+if IS_MAC:
+    # Same python-build-standalone layout as Linux + bpy's macOS wheel.
+    # ponytail: Apple Silicon only, bpy 5.x ships no Intel mac wheel; _provision says so.
+    _PY_ARCHIVE, _BPY_WHEEL = "python.tar.gz", "bpy-5.2.3-cp313-cp313-macosx_11_0_arm64.whl"
+    _FILES = {
+        _PY_ARCHIVE: ("https://github.com/astral-sh/python-build-standalone/releases/download/20261110/"
+                      "cpython-3.13.18+20261110-aarch64-apple-darwin-install_only.tar.gz",
+                      "1afd3983237c2a10277345f235be730e9cb49a123e0574ed252dbf3a841a24e4", 18_000_000),
+        "pip-26.2.2-py3-none-any.whl": _FILES["pip-26.2.2-py3-none-any.whl"],
+        _BPY_WHEEL: (
+            "https://files.pythonhosted.org/packages/6b/56/c6393e1a9695d1b80d88c15fcec372932fc92cac0c873b521cf3b58abeef/bpy-5.2.3-cp313-cp313-macosx_11_0_arm64.whl",
+            "3e34901f855ca1b11b19457cfd6720fb4d31e5860f6dbe336148051a8b4f3480", 245_184_706),
+    }
+IS_POSIX = IS_LINUX or IS_MAC
 _STALE_LOCK_S = 3600
 _state = {"state": "", "version": VERSION, "progress": 0}
 _lock = threading.Lock()
@@ -55,12 +70,14 @@ def root():
         return Path(configured)
     if IS_LINUX:  # the Linux app's data folder (XDG)
         return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "UEFN-Ducky" / "forge-engine"
+    if IS_MAC:
+        return Path.home() / "Library" / "Application Support" / "UEFN-Ducky" / "forge-engine"
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
     return Path(base) / "UEFN-Ducky" / "forge-engine"
 
 
 def python():
-    if IS_LINUX and not os.environ.get("FORGE_ENGINE_PYTHON"):
+    if IS_POSIX and not os.environ.get("FORGE_ENGINE_PYTHON"):
         return root() / "py" / "bin" / "python3"
     return Path(os.environ.get("FORGE_ENGINE_PYTHON") or root() / "py" / "python.exe")
 
@@ -197,6 +214,8 @@ def _run(command, stage):
 def _provision():
     if IS_LINUX and platform.machine().lower() not in ("x86_64", "amd64"):
         raise ValueError("The Forge engine needs an x86_64 PC on Linux: Blender's bpy has no Linux arm64 build.")
+    if IS_MAC and platform.machine().lower() != "arm64":
+        raise ValueError("The Forge engine needs an Apple Silicon Mac: Blender's bpy has no Intel Mac build.")
     base = root()
     downloads = base / "downloads"
     downloads.mkdir(parents=True, exist_ok=True)
@@ -213,7 +232,7 @@ def _provision():
         paths[name] = download(url, sha, downloads / name, on_bytes)
     py_dir = base / "py"
     _set(stage="Unpacking Python", progress=90)
-    if IS_LINUX:
+    if IS_POSIX:
         shutil.rmtree(py_dir, ignore_errors=True)
         shutil.rmtree(base / "python", ignore_errors=True)
         with tarfile.open(paths[_PY_ARCHIVE]) as archive:
@@ -227,7 +246,7 @@ def _provision():
         text = pth.read_text(encoding="utf-8").replace("#import site", "import site")
         pth.write_text(text, encoding="utf-8")
     exe = py_dir / "python.exe"
-    if IS_LINUX:
+    if IS_POSIX:
         exe = py_dir / "bin" / "python3"
     # pip runs straight from its wheel; the engine never needs pip afterwards.
     pip = str(paths["pip-26.2.2-py3-none-any.whl"]) + "/pip"
